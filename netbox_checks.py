@@ -255,6 +255,25 @@ def _mac_netbox_format(val):
     return n.upper() if n else ""
 
 
+def _get_interface_mac(nb_iface):
+    """
+    Получить MAC интерфейса из NetBox. В новых версиях MAC хранится в сущности
+    dcim.mac-addresses, интерфейс имеет mac_address (может быть null) и mac_addresses (список).
+    """
+    if nb_iface is None:
+        return ""
+    direct = getattr(nb_iface, "mac_address", None)
+    if direct:
+        return str(direct).strip()
+    addrs = getattr(nb_iface, "mac_addresses", None)
+    if addrs and len(addrs) > 0:
+        first = addrs[0]
+        if isinstance(first, dict):
+            return str(first.get("mac_address") or first.get("display") or "").strip()
+        return str(getattr(first, "mac_address", None) or getattr(first, "display", "") or "").strip()
+    return ""
+
+
 def load_mt_ref(path):
     """
     Загрузить справочник типов интерфейсов из JSON (формат netbox_interface_types.json).
@@ -661,7 +680,7 @@ def main():
                     mac_f_raw = entry.get("physicalAddress")
                     mac_f = str(mac_f_raw or "").strip() if mac_f_raw is not None else ""
                     if nb_iface is not None:
-                        mac_n = str(getattr(nb_iface, "mac_address", None) or "").strip()
+                        mac_n = _get_interface_mac(nb_iface)
                     mac_f_norm = _normalize_mac(mac_f)
                     mac_n_norm = _normalize_mac(mac_n)
                     if mac_f_norm and (not mac_n_norm or mac_f_norm != mac_n_norm):
