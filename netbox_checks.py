@@ -725,6 +725,8 @@ def main():
                 # --apply: вносить изменения в Netbox по выбранным ключам при разнице
                 if args.apply and nb_iface is not None:
                     updates = {}
+                    if args.intname and (nb_name or "").strip() != (int_name or "").strip():
+                        updates["name"] = int_name
                     if args.description and nD:
                         updates["description"] = desc_f
                     if args.mediatype and nM:

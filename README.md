@@ -66,9 +66,10 @@ python uplinks_report.py
 | `duplex` | show interfaces | Режим дуплекса (full/half и т.д.) |
 | `physicalAddress` | show interfaces | MAC-адрес |
 | `mtu` | show interfaces | MTU |
-| `forwardingModel` | show interfaces | Режим работы порта (например bridged) |
+| `forwardingModel` | show interfaces | Режим работы порта: `routed` или `bridged` |
 | `mediaType` | show interfaces transceiver | Тип модуля/трансивера (например 10GBASE-SR) |
 | `txPower` | show interfaces transceiver | Мощность передачи (dBm) |
+| `switchportConfiguration` | show interfaces … switchport configuration source | Только при `forwardingModel=bridged`: объект `{ "config": ["switchport …", …], "source": "cli" }` |
 
 Итоговая структура: в JSON ключ `devices`, значение — объект «имя устройства → список таких словарей по каждому uplink-интерфейсу». Этот JSON используется как вход для `netbox_checks.py`.
 
@@ -117,7 +118,7 @@ python arista_uplinks_stats.py --from-file dry-ssh.json
 | `--mac` | Сверка physicalAddress (файл) и mac_address (NetBox) |
 | `--mtu` | Сверка mtu (файл vs NetBox) |
 | `--tx-power` | Сверка txPower (файл) и tx_power (NetBox) |
-| `--forwarding-model` | Сверка forwardingModel (файл) и mode (NetBox) — режим работы порта |
+| `--forwarding-model` | Сверка forwardingModel (файл) и mode (NetBox). В NetBox: `routed` → mode=null, `bridged` → mode=tagged |
 | `--all` | Включить все проверки сразу (intname, description, mediatype, bandwidth, duplex, mac, mtu, tx-power, forwarding-model) |
 
 Без `--mt-ref` при `--mediatype` выводится предупреждение: значения не приводятся к одному формату, расхождения могут быть из-за разного написания.
@@ -140,13 +141,14 @@ python arista_uplinks_stats.py --from-file dry-ssh.json
 
 | Ключ запуска | Поле в NetBox | Источник в JSON |
 |--------------|---------------|-----------------|
+| `--intname` | `name` | Имя интерфейса из файла (при отличии от NetBox) |
 | `--description` | `description` | `description` |
 | `--mediatype` | `type` | `mediaType` (через справочник → slug) |
 | `--bandwidth` | `speed` | `bandwidth` (bps → Kbps) |
 | `--duplex` | `duplex` | `duplex` (нормализация full/half) |
 | `--mtu` | `mtu` | `mtu` |
 | `--tx-power` | `tx_power` | `txPower` |
-| `--forwarding-model` | `mode` | `forwardingModel` |
+| `--forwarding-model` | `mode` | `forwardingModel`: в NetBox записывается `routed`→null, `bridged`→`tagged` |
 
 Сверка `--mac` (physicalAddress / mac_address) в NetBox при `--apply` не обновляется.
 
@@ -157,7 +159,7 @@ python arista_uplinks_stats.py --from-file dry-ssh.json
 python netbox_checks.py -f dry-ssh.json --mediatype --mt-ref
 
 # Один хост, все проверки, колонки «что подставим»
-python netbox_checks.py -f dry-ssh.json --host ALA-KZT-7280TR-1 --all --show-change
+python netbox_checks.py -f dry-ssh.json --host DEVICE-NAME --all --show-change
 
 # Сверка и применение изменений в NetBox (таблица не выводится)
 python netbox_checks.py -f dry-ssh.json --mediatype --mt-ref --apply
