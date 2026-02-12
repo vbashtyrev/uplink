@@ -1,0 +1,159 @@
+{
+  "devices": {
+    "ALA-KZT-7280TR-2": [
+      {
+        "name": "Ethernet51/1",
+        "mediaType": "10GBASE-SR",
+        "bandwidth": 10000000000,
+        "duplex": "duplexFull",
+        "description": "Uplink: KZT 2",
+        "physicalAddress": "44:4c:a8:c7:b6:99",
+        "mtu": 1500,
+        "txPower": -2.097852297560209,
+        "forwardingModel": "routed"
+      }
+    ],
+    "ALA-KZT-7280TR-1": [
+      {
+        "name": "Ethernet51/1",
+        "mediaType": "10GBASE-SR",
+        "bandwidth": 10000000000,
+        "duplex": "duplexFull",
+        "description": "Uplink: KZT 1",
+        "physicalAddress": "44:4c:a8:c7:2b:45",
+        "mtu": 1500,
+        "txPower": -1.7979854051435993,
+        "forwardingModel": "routed"
+      }
+    ],
+    "DFW-DR-7280QR-2": [],
+    "MIA-EQX-7280QR-1": [
+      {
+        "name": "Ethernet23/1",
+        "mediaType": "10GBASE-LR",
+        "bandwidth": 10000000000,
+        "duplex": "duplexFull",
+        "description": "Uplink: CogentCo-DR",
+        "physicalAddress": "44:4c:a8:bf:2e:91",
+        "mtu": 4470,
+        "txPower": -2.569608451950664,
+        "forwardingModel": "routed"
+      }
+    ],
+    "MIA-EQX-7280QR-2": [
+      {
+        "name": "Ethernet24/1",
+        "mediaType": "10GBASE-LR",
+        "bandwidth": 10000000000,
+        "duplex": "duplexFull",
+        "description": "Uplink: Hurricane Electric HE",
+        "physicalAddress": "44:4c:a8:bd:99:13",
+        "mtu": 4470,
+        "txPower": -3.1821623353211876,
+        "forwardingModel": "routed"
+      }
+    ],
+    "DFW-DR-7280QR-1": [
+      {
+        "name": "Ethernet72/1",
+        "mediaType": "10GBASE-LR",
+        "bandwidth": 10000000000,
+        "duplex": "duplexFull",
+        "description": "Uplink: CogentCo",
+        "physicalAddress": "28:99:3a:11:ca:b9",
+        "mtu": 4470,
+        "txPower": -2.5142438306900843,
+        "forwardingModel": "routed"
+      }
+    ],
+    "WAW-EQX-7280QR-1": [
+      {
+        "name": "Ethernet23/1",
+        "mediaType": "10GBASE-LR",
+        "bandwidth": 10000000000,
+        "duplex": "duplexFull",
+        "description": "Uplink: CogentCo",
+        "physicalAddress": "44:4c:a8:bf:44:cf",
+        "mtu": 4470,
+        "txPower": -2.6792805900013335,
+        "forwardingModel": "routed"
+      }
+    ],
+    "WAW-EQX-7280QR-2": [
+      {
+        "name": "Ethernet23/1",
+        "mediaType": "10GBASE-LR",
+        "bandwidth": 10000000000,
+        "duplex": "duplexFull",
+        "description": "Uplink: HurricaneE",
+        "physicalAddress": "44:4c:a8:8e:35:83",
+        "mtu": 9192,
+        "txPower": -2.2402566887063102,
+        "forwardingModel": "routed"
+      },
+      {
+        "name": "Ethernet34/1",
+        "mediaType": "100GBASE-LR4",
+        "bandwidth": 100000000000,
+        "duplex": "duplexFull",
+        "description": "Uplink: Fiord and MSK PING-WIN 3Gbps link",
+        "physicalAddress": "44:4c:a8:8e:36:08",
+        "mtu": 10178,
+        "txPower": 1.79436883244977,
+        "forwardingModel": "bridged"
+      }
+    ],
+    "SFO-DR-116-7280TR-1": [
+      {
+        "name": "Ethernet49/1",
+        "mediaType": "10GBASE-LR",
+        "bandwidth": 10000000000,
+        "duplex": "duplexFull",
+        "description": "Uplink: Cogent",
+        "physicalAddress": "fc:bd:67:48:31:db",
+        "mtu": 4470,
+        "txPower": -1.174185464455487,
+        "forwardingModel": "routed"
+      }
+    ],
+    "SFO-DR-116-7280TR-2": [
+      {
+        "name": "Ethernet49/1",
+        "mediaType": "10GBASE-LR",
+        "bandwidth": 10000000000,
+        "duplex": "duplexFull",
+        "description": "Uplink: HE",
+        "physicalAddress": "44:4c:a8:f7:75:c3",
+        "mtu": 9000,
+        "txPower": -1.92938760082761,
+        "forwardingModel": "routed"
+      }
+    ],
+    "MNL-7280QR-1": [
+      {
+        "name": "Ethernet13/1",
+        "mediaType": "10GBASE-LR",
+        "bandwidth": 10000000000,
+        "duplex": "duplexFull",
+        "description": "Uplink: InfiniVAN 1",
+        "physicalAddress": "44:4c:a8:8d:23:31",
+        "mtu": 1500,
+        "txPower": -1.4206473528057089,
+        "forwardingModel": "routed"
+      }
+    ],
+    "MNL-7280QR-2": [
+      {
+        "name": "Ethernet13/1",
+        "mediaType": "10GBASE-LR",
+        "bandwidth": 10000000000,
+        "duplex": "duplexFull",
+        "description": "Uplink: InfiniVAN 2",
+        "physicalAddress": "74:83:ef:b4:a0:c9",
+        "mtu": 1500,
+        "txPower": -1.8104868835982728,
+        "forwardingModel": "routed"
+      }
+    ]
+  }
+}
