@@ -128,7 +128,8 @@ python arista_uplinks_stats.py --from-file dry-ssh.json
 | Ключ | Описание |
 |------|----------|
 | `--show-change` | Показать колонки «что подставим в NetBox» по выбранным ключам: mtToSet, descToSet, speedToSet, dupToSet, mtuToSet, txpToSet, fwdToSet |
-| `--hide-empty-note-cols` | Не выводить колонки примечаний (nD, nM, nB, nDup, nMac, nMtu, nTxp), если во всех строках они пустые |
+| `--hide-empty-note-cols` | Не выводить колонки примечаний (nD, nM, …), если во всех строках они пустые |
+| `--hide-no-diff-cols` | Не выводить группы колонок (файл/Netbox/примечание), в которых ни в одной строке нет расхождения |
 | `--json` | Вывод в JSON (по умолчанию — таблица) |
 
 #### Применение изменений в NetBox

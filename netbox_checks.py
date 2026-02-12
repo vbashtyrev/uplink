@@ -425,6 +425,12 @@ def main():
         help="Не выводить колонки примечаний (nD, nM, …), если во всех строках пусто",
     )
     g_out.add_argument(
+        "--hide-no-diff-cols",
+        action="store_true",
+        dest="hide_no_diff_cols",
+        help="Не выводить группы колонок (файл/Netbox/примечание), в которых ни в одной строке нет расхождения",
+    )
+    g_out.add_argument(
         "--json",
         action="store_true",
         help="Вывод в JSON (по умолчанию — таблица)",
@@ -761,6 +767,8 @@ def main():
             col_spec = _build_col_spec(args)
             if args.hide_empty_note_cols and rows:
                 col_spec = _filter_empty_note_cols(col_spec, rows)
+            if args.hide_no_diff_cols and rows:
+                col_spec = _filter_no_diff_cols(col_spec, rows)
             if args.json:
                 out["rows"] = [
                     _row_to_dict(r, col_spec)
@@ -780,6 +788,18 @@ def main():
 # Заголовки колонок-примечаний (nD, nM, nB, …) — для --hide-empty-note-cols
 NOTE_COL_HEADERS = {"nD", "nM", "nB", "nDup", "nMac", "nMtu", "nTxp", "nFwd"}
 
+# Группы колонок по проверке: при пустом примечании во всех строках скрываем всю группу (--hide-no-diff-cols)
+DIFF_GROUPS_BY_NOTE = {
+    "nD": {"descF", "descN", "nD", "descToSet"},
+    "nM": {"mtF", "mtN", "nM", "mtToSet"},
+    "nB": {"bwF", "speedN", "nB", "speedToSet"},
+    "nDup": {"dupF", "dupN", "nDup", "dupToSet"},
+    "nMac": {"macF", "macN", "nMac"},
+    "nMtu": {"mtuF", "mtuN", "nMtu", "mtuToSet"},
+    "nTxp": {"txpF", "txpN", "nTxp", "txpToSet"},
+    "nFwd": {"fwdF", "fwdN", "nFwd", "fwdToSet"},
+}
+
 
 def _filter_empty_note_cols(col_spec, rows):
     """Убрать из col_spec колонки примечаний, у которых во всех строках пусто."""
@@ -789,6 +809,22 @@ def _filter_empty_note_cols(col_spec, rows):
             return True
         return any(idx < len(r) and r[idx] for r in rows)
     return [c for c in col_spec if keep(c)]
+
+
+def _filter_no_diff_cols(col_spec, rows):
+    """Убрать группы колонок (файл/Netbox/примечание), где во всех строках примечание пусто — расхождений нет."""
+    headers_in_spec = {c[0] for c in col_spec}
+    cols_to_remove = set()
+    for note, group in DIFF_GROUPS_BY_NOTE.items():
+        if note not in headers_in_spec:
+            continue
+        note_col = next((c for c in col_spec if c[0] == note), None)
+        if not note_col:
+            continue
+        _, note_idx, _ = note_col
+        if all(note_idx >= len(r) or not r[note_idx] for r in rows):
+            cols_to_remove |= (group & headers_in_spec)
+    return [c for c in col_spec if c[0] not in cols_to_remove]
 
 
 def _build_col_spec(args):
