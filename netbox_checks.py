@@ -502,6 +502,20 @@ def main():
         args.forwarding_model = True
     if args.no_mt_ref:
         args.mt_ref = None
+    # При одном --hide-ok-hosts без проверок включаем все проверки (чтобы был вывод списка и статистики)
+    if args.hide_ok_hosts and not (
+        args.intname or args.description or args.mediatype or args.bandwidth or args.duplex
+        or args.mac or args.mtu or args.tx_power or args.forwarding_model
+    ):
+        args.intname = True
+        args.description = True
+        args.mediatype = True
+        args.bandwidth = True
+        args.duplex = True
+        args.mac = True
+        args.mtu = True
+        args.tx_power = True
+        args.forwarding_model = True
 
     url = os.environ.get("NETBOX_URL")
     token = os.environ.get("NETBOX_TOKEN")
