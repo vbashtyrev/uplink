@@ -775,6 +775,9 @@ def main():
                     if args.forwarding_model and nFwd and fwd_f:
                         # В Netbox: routed → mode=null, bridged → mode=tagged
                         updates["mode"] = _fwd_file_to_netbox_mode(fwd_f)
+                    # При применении MAC заполняем и поле интерфейса mac_address, и сущность dcim.mac-addresses
+                    if args.mac and (nMac or (mac_f and not mac_n)) and _mac_netbox_format(mac_f):
+                        updates["mac_address"] = _mac_netbox_format(mac_f)
                     if updates:
                         try:
                             nb_iface.update(updates)
