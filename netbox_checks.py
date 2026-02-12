@@ -470,6 +470,12 @@ def main():
         help="Не выводить группы колонок (файл/Netbox/примечание), в которых ни в одной строке нет расхождения",
     )
     g_out.add_argument(
+        "--hide-ok-hosts",
+        action="store_true",
+        dest="hide_ok_hosts",
+        help="Не выводить в таблице хосты без расхождений; вывести их списком и статистику (хосты/интерфейсы OK и с расхождениями)",
+    )
+    g_out.add_argument(
         "--json",
         action="store_true",
         help="Вывод в JSON (по умолчанию — таблица)",
@@ -836,26 +842,72 @@ def main():
             print("Пропущено (в файле не список интерфейсов): {}.".format(", ".join(skipped_not_list)))
         if skipped_platform:
             print("Пропущено (платформа не {}): {}.".format(args.platform, ", ".join(skipped_platform)))
+        # Статистика и фильтр «хосты без расхождений» при --hide-ok-hosts
+        rows_display = rows
+        ok_hosts = set()
+        not_ok_hosts_set = set()
+        hosts_ok_count = 0
+        hosts_not_ok_count = 0
+        interfaces_ok_count = 0
+        interfaces_not_ok_count = 0
+        if rows:
+            all_hosts = set(r[0] for r in rows)
+            ok_hosts = {h for h in all_hosts if all(not _row_has_diff(r) for r in rows if r[0] == h)}
+            not_ok_hosts_set = all_hosts - ok_hosts
+            hosts_ok_count = len(ok_hosts)
+            hosts_not_ok_count = len(not_ok_hosts_set)
+            interfaces_ok_count = sum(1 for r in rows if not _row_has_diff(r))
+            interfaces_not_ok_count = len(rows) - interfaces_ok_count
+            if args.hide_ok_hosts:
+                rows_display = [r for r in rows if r[0] not in ok_hosts]
+                ok_list = sorted(ok_hosts)
+                if ok_list:
+                    print("Хосты без расхождений ({}): {}".format(len(ok_list), ", ".join(ok_list)), flush=True)
+                print("Статистика: хосты OK {}, хосты с расхождениями {}; интерфейсы OK {}, интерфейсы с расхождениями {}.".format(
+                    hosts_ok_count, hosts_not_ok_count, interfaces_ok_count, interfaces_not_ok_count), flush=True)
+                if rows_display or not args.apply:
+                    print(flush=True)
         if not args.apply:
             col_spec = _build_col_spec(args)
-            if args.hide_empty_note_cols and rows:
-                col_spec = _filter_empty_note_cols(col_spec, rows)
-            if args.hide_no_diff_cols and rows:
-                col_spec = _filter_no_diff_cols(col_spec, rows)
+            if args.hide_empty_note_cols and rows_display:
+                col_spec = _filter_empty_note_cols(col_spec, rows_display)
+            if args.hide_no_diff_cols and rows_display:
+                col_spec = _filter_no_diff_cols(col_spec, rows_display)
             if args.json:
                 out["rows"] = [
                     _row_to_dict(r, col_spec)
-                    for r in rows
+                    for r in rows_display
                 ]
                 out["note_legend"] = {str(k): v for k, v in ALL_LEGEND.items() if k in note_codes_used}
+                if args.hide_ok_hosts and rows:
+                    out["ok_hosts"] = sorted(ok_hosts)
+                    out["not_ok_hosts"] = sorted(not_ok_hosts_set)
+                    out["stats"] = {
+                        "hosts_ok": hosts_ok_count,
+                        "hosts_not_ok": hosts_not_ok_count,
+                        "interfaces_ok": interfaces_ok_count,
+                        "interfaces_not_ok": interfaces_not_ok_count,
+                    }
             else:
-                _print_combined_table(rows, note_codes_used, col_spec)
+                _print_combined_table(rows_display, note_codes_used, col_spec)
         else:
             print("При --apply таблица не выводится (данные уже обновлены в Netbox).", flush=True)
 
     if args.json and out:
         print(json.dumps(out, indent=2, ensure_ascii=False))
     return 0
+
+
+# Индексы колонок примечаний в строке (note, nD, nM, nB, nDup, nMac, nMtu, nTxp, nFwd) — для определения «есть расхождение»
+ROW_NOTE_INDICES = (3, 6, 9, 13, 16, 19, 22, 25, 33)
+
+
+def _row_has_diff(row):
+    """Есть ли в строке хотя бы одно примечание/расхождение."""
+    for i in ROW_NOTE_INDICES:
+        if i < len(row) and row[i]:
+            return True
+    return False
 
 
 # Заголовки колонок-примечаний (nD, nM, nB, …) — для --hide-empty-note-cols
