@@ -150,8 +150,9 @@ python arista_uplinks_stats.py --from-file dry-ssh.json
 | `--mtu` | `mtu` | `mtu` |
 | `--tx-power` | `tx_power` | `txPower` |
 | `--forwarding-model` | `mode` | `forwardingModel`: в NetBox записывается `routed`→null, `bridged`→`tagged` |
+| `--mac` | сущность MAC (dcim.mac-addresses) | При расхождении или отсутствии: поиск по MAC (формат с двоеточиями, верхний регистр). Если запись есть — выводится её URL; иначе создаётся новая и привязывается к интерфейсу (`assigned_object_type=dcim.interface`, `assigned_object_id`). |
 
-Сверка `--mac` (physicalAddress / mac_address) в NetBox при `--apply` не обновляется.
+В NetBox MAC — отдельная сущность, не поле интерфейса; при `--mac --apply` создаётся или находится запись в dcim.mac-addresses и привязывается к интерфейсу.
 
 **Примеры:**
 

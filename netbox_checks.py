@@ -249,6 +249,12 @@ def _normalize_mac(val):
     return s
 
 
+def _mac_netbox_format(val):
+    """Формат MAC для NetBox API: двоеточия, верхний регистр (44:4C:A8:BF:2E:91)."""
+    n = _normalize_mac(val)
+    return n.upper() if n else ""
+
+
 def load_mt_ref(path):
     """
     Загрузить справочник типов интерфейсов из JSON (формат netbox_interface_types.json).
@@ -658,7 +664,7 @@ def main():
                         mac_n = str(getattr(nb_iface, "mac_address", None) or "").strip()
                     mac_f_norm = _normalize_mac(mac_f)
                     mac_n_norm = _normalize_mac(mac_n)
-                    if mac_f_norm and mac_n_norm and mac_f_norm != mac_n_norm:
+                    if mac_f_norm and (not mac_n_norm or mac_f_norm != mac_n_norm):
                         nMac = str(MAC_NOTE_DIFF)
                         note_codes_used.add(MAC_NOTE_DIFF)
                 mtu_f = ""
@@ -756,6 +762,28 @@ def main():
                             print("Обновлено {} {}: {}".format(dev_name, nb_name or int_name, list(updates.keys())), flush=True)
                         except Exception as e:
                             print("Ошибка обновления {} {}: {} — {}".format(dev_name, nb_name or int_name, updates, e), file=sys.stderr, flush=True)
+                    # MAC в Netbox — отдельная сущность (dcim.mac-addresses), привязка к интерфейсу через assigned_object
+                    if args.mac and (nMac or (mac_f and not mac_n)) and nb_iface is not None:
+                        mac_netbox = _mac_netbox_format(mac_f)
+                        if not mac_netbox:
+                            pass
+                        else:
+                            try:
+                                existing = list(nb.dcim.mac_addresses.filter(mac_address=mac_netbox))
+                                if existing:
+                                    rec = existing[0]
+                                    url = getattr(rec, "url", None) or getattr(rec, "display", rec)
+                                    print("MAC {} {} {}: уже в Netbox — {}".format(dev_name, nb_name or int_name, mac_netbox, url), flush=True)
+                                else:
+                                    created = nb.dcim.mac_addresses.create(
+                                        mac_address=mac_netbox,
+                                        assigned_object_type="dcim.interface",
+                                        assigned_object_id=nb_iface.id,
+                                    )
+                                    url = getattr(created, "url", None) or getattr(created, "display", created)
+                                    print("MAC {} {} {}: создан — {}".format(dev_name, nb_name or int_name, mac_netbox, url), flush=True)
+                            except Exception as e:
+                                print("Ошибка MAC {} {} {}: {} — {}".format(dev_name, nb_name or int_name, mac_netbox, e), file=sys.stderr, flush=True)
                 rows.append((dev_name, int_name, nb_name, note, desc_f, desc_n, nD, mt_f, mt_n, nM, mt_to_set, bw_f, speed_n, nB, dup_f_out, dup_n_out, nDup, mac_f, mac_n, nMac, mtu_f, mtu_n, nMtu, txp_f_out, txp_n_out, nTxp, desc_to_set, speed_to_set, dup_to_set, mtu_to_set, txp_to_set, fwd_f, fwd_n, nFwd, fwd_to_set))
         if skipped_no_netbox:
             print("Пропущено (устройство есть в файле, но нет в Netbox по тегу): {}.".format(", ".join(skipped_no_netbox)))
