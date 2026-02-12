@@ -1,3 +1,10 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Данные (вывод/экспорт, не коммитить)
+dry-ssh.json
+*-export.json
+*.log
+.env
+.env.*
