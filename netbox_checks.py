@@ -187,7 +187,8 @@ BW_NOTE_DIFF = 10      # bandwidth (dry-ssh) и speed (Netbox) различаю�
 DUP_NOTE_DIFF = 11     # duplex из dry-ssh и duplex в Netbox различаются
 
 # Код для MAC / physicalAddress (12)
-MAC_NOTE_DIFF = 12     # physicalAddress (dry-ssh) и mac_address (Netbox) различаются
+MAC_NOTE_DIFF = 12     # physicalAddress (dry-ssh) и mac (Netbox) различаются
+MAC_NOTE_NOT_BOTH = 16  # в Netbox заполнено не оба поля: mac_address и mac_addresses
 
 # Код для MTU (13)
 MTU_NOTE_DIFF = 13     # mtu из dry-ssh и mtu в Netbox различаются
@@ -208,7 +209,8 @@ ALL_LEGEND = {
     MT_NOTE_N_NOT_IN_REF: "тип в Netbox не найден в справочнике типов (netbox_interface_types.json)",
     BW_NOTE_DIFF: "bandwidth (dry-ssh, bps) и speed (Netbox, Kbps) различаются после приведения к bps",
     DUP_NOTE_DIFF: "duplex из dry-ssh и duplex в Netbox различаются",
-    MAC_NOTE_DIFF: "physicalAddress (dry-ssh) и mac_address (Netbox) различаются",
+    MAC_NOTE_DIFF: "physicalAddress (dry-ssh) и mac (Netbox) различаются",
+    MAC_NOTE_NOT_BOTH: "в Netbox заполнено не оба поля: mac_address на интерфейсе и сущность dcim.mac-addresses",
     MTU_NOTE_DIFF: "mtu из dry-ssh и mtu в Netbox различаются",
     TXPOWER_NOTE_DIFF: "txPower (dry-ssh) и tx_power (Netbox) различаются",
     FWD_NOTE_DIFF: "forwardingModel (dry-ssh) и mode (Netbox) различаются",
@@ -272,6 +274,17 @@ def _get_interface_mac(nb_iface):
             return str(first.get("mac_address") or first.get("display") or "").strip()
         return str(getattr(first, "mac_address", None) or getattr(first, "display", "") or "").strip()
     return ""
+
+
+def _mac_both_filled(nb_iface):
+    """Проверить, что в Netbox заполнены оба: поле mac_address на интерфейсе и список mac_addresses."""
+    if nb_iface is None:
+        return False
+    direct = getattr(nb_iface, "mac_address", None)
+    direct_ok = bool(direct and str(direct).strip())
+    addrs = getattr(nb_iface, "mac_addresses", None)
+    list_ok = bool(addrs and len(addrs) > 0)
+    return direct_ok and list_ok
 
 
 def load_mt_ref(path):
@@ -686,6 +699,9 @@ def main():
                     if mac_f_norm and (not mac_n_norm or mac_f_norm != mac_n_norm):
                         nMac = str(MAC_NOTE_DIFF)
                         note_codes_used.add(MAC_NOTE_DIFF)
+                    if args.mac and nb_iface and mac_n_norm and not _mac_both_filled(nb_iface):
+                        nMac = (nMac + "," if nMac else "") + str(MAC_NOTE_NOT_BOTH)
+                        note_codes_used.add(MAC_NOTE_NOT_BOTH)
                 mtu_f = ""
                 mtu_n = ""
                 nMtu = ""
