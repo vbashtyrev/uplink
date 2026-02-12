@@ -277,14 +277,15 @@ def _get_interface_mac(nb_iface):
 
 
 def _mac_both_filled(nb_iface):
-    """Проверить, что в Netbox заполнены оба: поле mac_address на интерфейсе и список mac_addresses."""
+    """Проверить, что в Netbox заполнены оба: отображение MAC на интерфейсе (mac_address или primary_mac_address) и список mac_addresses."""
     if nb_iface is None:
         return False
     direct = getattr(nb_iface, "mac_address", None)
-    direct_ok = bool(direct and str(direct).strip())
+    primary = getattr(nb_iface, "primary_mac_address", None)
+    display_ok = bool(direct and str(direct).strip()) or bool(primary)
     addrs = getattr(nb_iface, "mac_addresses", None)
     list_ok = bool(addrs and len(addrs) > 0)
-    return direct_ok and list_ok
+    return display_ok and list_ok
 
 
 def load_mt_ref(path):
@@ -791,16 +792,13 @@ def main():
                     if args.forwarding_model and nFwd and fwd_f:
                         # В Netbox: routed → mode=null, bridged → mode=tagged
                         updates["mode"] = _fwd_file_to_netbox_mode(fwd_f)
-                    # При применении MAC заполняем и поле интерфейса mac_address, и сущность dcim.mac-addresses
-                    if args.mac and (nMac or (mac_f and not mac_n)) and _mac_netbox_format(mac_f):
-                        updates["mac_address"] = _mac_netbox_format(mac_f)
                     if updates:
                         try:
                             nb_iface.update(updates)
                             print("Обновлено {} {}: {}".format(dev_name, nb_name or int_name, list(updates.keys())), flush=True)
                         except Exception as e:
                             print("Ошибка обновления {} {}: {} — {}".format(dev_name, nb_name or int_name, updates, e), file=sys.stderr, flush=True)
-                    # MAC в Netbox — отдельная сущность (dcim.mac-addresses), привязка к интерфейсу через assigned_object
+                    # MAC в Netbox — отдельная сущность (dcim.mac-addresses); затем на интерфейсе ставим primary_mac_address
                     if args.mac and (nMac or (mac_f and not mac_n)) and nb_iface is not None:
                         mac_netbox = _mac_netbox_format(mac_f)
                         if not mac_netbox:
@@ -818,8 +816,17 @@ def main():
                                         assigned_object_type="dcim.interface",
                                         assigned_object_id=nb_iface.id,
                                     )
+                                    rec = created
                                     url = getattr(created, "url", None) or getattr(created, "display", created)
                                     print("MAC {} {} {}: создан — {}".format(dev_name, nb_name or int_name, mac_netbox, url), flush=True)
+                                # Заполнить поле интерфейса: в NetBox 4 это primary_mac_address (ID записи MAC)
+                                mac_id = getattr(rec, "id", None)
+                                if mac_id is not None:
+                                    try:
+                                        nb_iface.update({"primary_mac_address": mac_id})
+                                        print("Обновлено {} {}: primary_mac_address={}".format(dev_name, nb_name or int_name, mac_id), flush=True)
+                                    except Exception as e2:
+                                        print("Ошибка установки primary_mac_address {} {}: {} — {}".format(dev_name, nb_name or int_name, mac_id, e2), file=sys.stderr, flush=True)
                             except Exception as e:
                                 print("Ошибка MAC {} {} {}: {} — {}".format(dev_name, nb_name or int_name, mac_netbox, e), file=sys.stderr, flush=True)
                 rows.append((dev_name, int_name, nb_name, note, desc_f, desc_n, nD, mt_f, mt_n, nM, mt_to_set, bw_f, speed_n, nB, dup_f_out, dup_n_out, nDup, mac_f, mac_n, nMac, mtu_f, mtu_n, nMtu, txp_f_out, txp_n_out, nTxp, desc_to_set, speed_to_set, dup_to_set, mtu_to_set, txp_to_set, fwd_f, fwd_n, nFwd, fwd_to_set))
