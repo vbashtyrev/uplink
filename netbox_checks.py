@@ -536,8 +536,18 @@ def main():
         data["devices"] = {args.host: data["devices"][args.host]}
 
     file_devices = list(data["devices"].keys())
-    nb = pynetbox.api(url, token=token)
-    nb_devices = list(nb.dcim.devices.filter(tag=netbox_tag))
+    try:
+        nb = pynetbox.api(url, token=token)
+        nb_devices = list(nb.dcim.devices.filter(tag=netbox_tag))
+    except Exception as e:
+        err_msg = str(e).strip() if e else "неизвестная ошибка"
+        if "401" in err_msg or "Unauthorized" in err_msg or "Authentication" in err_msg.lower() or "token" in err_msg.lower():
+            print("Ошибка доступа к NetBox: неверный или просроченный токен. Проверьте NETBOX_TOKEN.", file=sys.stderr)
+        elif "Connection" in err_msg or "connect" in err_msg.lower() or "ECONNREFUSED" in err_msg:
+            print("Ошибка доступа к NetBox: не удалось подключиться. Проверьте NETBOX_URL и доступность сервера.", file=sys.stderr)
+        else:
+            print("Ошибка доступа к NetBox: {}.".format(err_msg), file=sys.stderr)
+        return 1
     nb_names = [d.name for d in nb_devices]
     nb_by_name = {d.name: d for d in nb_devices}
 
