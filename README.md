@@ -272,6 +272,7 @@ python zabbix_map.py --export-map 10 > map_10.json
 |------|----------|
 | `dry-ssh.json` | Пример/результат: JSON с ключом `devices` (имя устройства → список интерфейсов с полями из SSH) |
 | `netbox_interface_types.json` | Справочник типов интерфейсов NetBox (value, label); используется `--mt-ref` в `netbox_checks.py` |
-| `description_to_name.json` | Сопоставление description → отображаемое имя ISP для `zabbix_map.py` |
+| `description_to_name.example.json` | Пример сопоставления description → имя ISP; скопировать в `description_to_name.json` и заполнить |
+| `description_to_name.json` | Локальный файл сопоставления (не в git); по умолчанию для `zabbix_map.py -m` |
 | `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix`, не коммитить |
 | `requirements.txt` | Зависимости: pynetbox, paramiko, requests |
