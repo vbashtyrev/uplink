@@ -219,10 +219,59 @@ python netbox_interface_types.py -o my_types.json
 
 ---
 
+### 5. `zabbix_map.py`
+
+Построение таблицы uplink'ов и опционально карты Zabbix по данным из `dry-ssh.json`. С Zabbix API: поиск хостов и items (Bits received/sent). **Карта Zabbix:** `--create-map` — только создать пустую карту [test] uplinks, если её нет; `--update-map` — обновить карту (хосты, провайдеры, линки); с `--host` обновляются только этот хост и его линки.
+
+**Раскладка карты:** провайдеры сортируются по убыванию числа подключений; блоки слева направо, при нехватке места — перенос на следующую строку. В блоке: провайдер сверху, хосты в две колонки (не ближе 160 px от провайдера по горизонтали, между хостами 180 px, по вертикали шаг 100 px). Провайдер с одним подключением ставится рядом с этим хостом (в том же блоке), без отдельного ряда. Граница карты 30 px; если контент не влезает, размеры карты автоматически увеличиваются. Элементы дедуплицируются: один узел на хост и один на провайдера.
+
+**Подписи линков:** имя интерфейса и строки In/Out с макросами Zabbix `{?last(/host/key)}` (скорость по items Bits received/sent).
+
+**Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
+
+| Ключ | Описание |
+|------|----------|
+| `-f`, `--file` | JSON с ключом `devices` (по умолчанию `dry-ssh.json`) |
+| `-m`, `--description-map` | Файл сопоставления description → имя ISP |
+| `--zabbix` | Запросить Zabbix API, вывести ключи items в таблице |
+| `--create-map` | Только создать карту [test] uplinks, если её нет (пустая) |
+| `--update-map` | Обновить карту: хосты, провайдеры, линки; с `--host` — только указанный хост и его линки |
+| `--host HOSTNAME` | Работать только с одним хостом |
+| `--debug` | Отладочный вывод и тело запросов map.create/update |
+| `--no-cache` | Не использовать кэш Zabbix |
+| `--export-map SYSMAPID` | Вывести JSON карты из API (для сравнения с ручной картой) |
+
+```bash
+# Только таблица из файла
+python zabbix_map.py
+
+# Таблица с hostid и ключами items из Zabbix
+python zabbix_map.py --zabbix
+
+# Один хост
+python zabbix_map.py --zabbix --host MIA-EQX-7280QR-1
+
+# Создать пустую карту (один раз)
+python zabbix_map.py --create-map
+
+# Обновить карту по всем хостам из dry-ssh.json (хосты, провайдеры, линки)
+python zabbix_map.py --zabbix --update-map --debug
+
+# Обновить только один хост и его линки
+python zabbix_map.py --zabbix --update-map --host MIA-EQX-7280QR-1 --debug
+
+# Выгрузить карту из API (например, созданную вручную) для сравнения формата
+python zabbix_map.py --export-map 10 > map_10.json
+```
+
+---
+
 ## Файлы
 
 | Файл | Описание |
 |------|----------|
 | `dry-ssh.json` | Пример/результат: JSON с ключом `devices` (имя устройства → список интерфейсов с полями из SSH) |
 | `netbox_interface_types.json` | Справочник типов интерфейсов NetBox (value, label); используется `--mt-ref` в `netbox_checks.py` |
-| `requirements.txt` | Зависимости: pynetbox, paramiko |
+| `description_to_name.json` | Сопоставление description → отображаемое имя ISP для `zabbix_map.py` |
+| `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix`, не коммитить |
+| `requirements.txt` | Зависимости: pynetbox, paramiko, requests |
