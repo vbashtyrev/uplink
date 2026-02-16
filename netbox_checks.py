@@ -14,7 +14,10 @@
 Переменные: NETBOX_URL, NETBOX_TOKEN, NETBOX_TAG (по умолчанию border).
 
 По умолчанию таблица; с --json — JSON. В note — код замечания, расшифровка под таблицей.
+При неверном/просроченном NETBOX_TOKEN — сообщение в stderr и выход с кодом 1.
 """
+
+__version__ = "1.0"
 
 import argparse
 import json
@@ -359,6 +362,7 @@ def _netbox_type_to_str(nb_iface):
 
 def main():
     parser = argparse.ArgumentParser(
+        prog="netbox_checks.py",
         description="Проверки Netbox по данным из JSON (файл/SSH). Сверка полей интерфейсов, при --apply — обновление в Netbox.",
     )
     # --- Входные данные ---
@@ -451,6 +455,7 @@ def main():
     )
     # --- Вывод ---
     g_out = parser.add_argument_group("Вывод")
+    g_out.add_argument("--version", action="version", version="%(prog)s " + __version__)
     g_out.add_argument(
         "--show-change",
         action="store_true",

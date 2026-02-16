@@ -1,5 +1,7 @@
 # Uplinks (NetBox + SSH)
 
+**Версия 1.0**
+
 Скрипты для сверки и обновления данных интерфейсов в NetBox по данным с устройств (SSH / JSON-файл). Поддерживаются Arista и Juniper.
 
 Виртуальное окружение создаётся в `.venv`.
@@ -94,7 +96,9 @@ python arista_uplinks_stats.py --from-file dry-ssh.json
 
 **Входной файл:** по умолчанию `dry-ssh.json` (структура с ключом `devices`: имя устройства → список интерфейсов с полями `name`, `description`, `mediaType`, `bandwidth`, `duplex`, `physicalAddress`, `mtu`, `txPower` и т.д.).
 
-**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG` (по умолчанию `border`).
+**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG` (по умолчанию `border`). При неверном или просроченном токене/недоступности NetBox скрипт завершается с сообщением в stderr и кодом 1 (без трассировки).
+
+**Версия:** `netbox_checks.py --version` выводит версию (например 1.0).
 
 #### Файл и хост
 
@@ -130,8 +134,9 @@ python arista_uplinks_stats.py --from-file dry-ssh.json
 | `--show-change` | Показать колонки «что подставим в NetBox» по выбранным ключам: mtToSet, descToSet, speedToSet, dupToSet, mtuToSet, txpToSet, fwdToSet |
 | `--hide-empty-note-cols` | Не выводить колонки примечаний (nD, nM, …), если во всех строках они пустые |
 | `--hide-no-diff-cols` | Не выводить группы колонок (файл/Netbox/примечание), в которых ни в одной строке нет расхождения |
-| `--hide-ok-hosts` | Не выводить в таблице хосты без расхождений; вывести их списком («Хосты без расхождений (N): …») и статистику: хосты OK / с расхождениями, интерфейсы OK / с расхождениями |
+| `--hide-ok-hosts` | Не выводить в таблице хосты без расхождений; вывести их списком («Хосты без расхождений (N): …») и статистику: хосты OK / с расхождениями, интерфейсы OK / с расхождениями. Если указан один этот ключ (без других проверок), автоматически включаются все проверки |
 | `--json` | Вывод в JSON (по умолчанию — таблица) |
+| `--version` | Вывести версию скрипта и выйти |
 
 #### Применение изменений в NetBox
 
@@ -151,9 +156,9 @@ python arista_uplinks_stats.py --from-file dry-ssh.json
 | `--mtu` | `mtu` | `mtu` |
 | `--tx-power` | `tx_power` | `txPower` |
 | `--forwarding-model` | `mode` | `forwardingModel`: в NetBox записывается `routed`→null, `bridged`→`tagged` |
-| `--mac` | сущность MAC (dcim.mac-addresses) | При расхождении или отсутствии: поиск по MAC (формат с двоеточиями, верхний регистр). Если запись есть — выводится её URL; иначе создаётся новая и привязывается к интерфейсу (`assigned_object_type=dcim.interface`, `assigned_object_id`). |
+| `--mac` | сущность MAC (dcim.mac-addresses) + поле интерфейса | При расхождении или отсутствии: поиск по MAC (формат с двоеточиями, верхний регистр). Если запись есть — выводится её URL; иначе создаётся новая и привязывается к интерфейсу. На интерфейсе дополнительно выставляется `primary_mac_address` (ID записи MAC) для отображения в NetBox 4. |
 
-В NetBox MAC — отдельная сущность, не поле интерфейса; при `--mac --apply` создаётся или находится запись в dcim.mac-addresses и привязывается к интерфейсу.
+В NetBox MAC — отдельная сущность (dcim.mac-addresses); при `--mac --apply` создаётся или находится запись, привязывается к интерфейсу и на интерфейсе устанавливается `primary_mac_address`. Примечание 16: «в Netbox заполнено не оба поля» — если есть только сущность или только отображение на интерфейсе.
 
 **Примеры:**
 
@@ -169,6 +174,9 @@ python netbox_checks.py -f dry-ssh.json --mediatype --mt-ref --apply
 
 # Только просмотр расхождений по описанию и типу, вывод в JSON
 python netbox_checks.py -f dry-ssh.json --description --mediatype --mt-ref --json
+
+# Компактный отчёт: только хосты с расхождениями + список OK и статистика
+python netbox_checks.py -f dry-ssh.json --hide-ok-hosts
 ```
 
 ---
