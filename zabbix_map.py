@@ -21,6 +21,67 @@ BITS_SENT_NAME = "Bits sent"
 # Иконки элементов карты (imageid): хосты — роутер, провайдеры — облако. ID взять в Администрирование → Изображения
 MAP_ICON_HOST = 130          # Router_symbol_(64)
 
+# В Zabbix LLD триггер «High bandwidth usage» имеет описание вида:
+# "Interface Ethernet1/1(описание): High bandwidth usage"
+
+
+def _get_uplink_triggerids_by_host_iface(url, token, hostids, debug=False):
+    """
+    Получить триггеры «High bandwidth usage» по хостам. В Zabbix LLD описание вида
+    "Interface Ethernet1/1(описание): High bandwidth usage". Возврат dict: (hostid, iface_name_norm) -> triggerid.
+    """
+    if not hostids:
+        return {}
+    result, err = zabbix_request(url, token, "trigger.get", {
+        "output": ["triggerid", "description"],
+        "hostids": list(hostids),
+        "selectHosts": ["hostid"],
+        "search": {"description": "High bandwidth usage"},
+        "searchByAny": False,
+    }, debug=debug)
+    if err:
+        return {}
+    if not result:
+        result, _ = zabbix_request(url, token, "trigger.get", {
+            "output": ["triggerid", "description"],
+            "hostids": list(hostids),
+            "selectHosts": ["hostid"],
+        }, debug=debug)
+        if result:
+            result = [t for t in result if "High bandwidth usage" in (t.get("description") or "")]
+    if not result:
+        return {}
+    # Извлечь из описания "Interface EthernetX/Y(...): High bandwidth usage" имя интерфейса
+    out = {}
+    pat = re.compile(r"Interface\s+([^\s(]+)\s*\([^)]*\):\s*High bandwidth usage", re.IGNORECASE)
+    for t in result:
+        desc = t.get("description") or ""
+        m = pat.match(desc.strip())
+        if not m:
+            continue
+        iface = m.group(1).strip()
+        hostid = None
+        for h in (t.get("hosts") or []):
+            hid = h.get("hostid")
+            if hid and str(hid) in [str(x) for x in hostids]:
+                hostid = str(hid)
+                break
+        if hostid:
+            key = (hostid, _normalize_interface_name(iface))
+            out[key] = str(t["triggerid"])
+    if debug and out:
+        for (hid, iface), tid in list(out.items())[:3]:
+            print("DEBUG: триггер (hostid={}, iface={}) -> {}".format(hid, iface, tid), file=sys.stderr)
+    return out
+
+
+def _find_triggerid_for_link(triggerid_by_host_iface, hostid, iface_name):
+    """Найти triggerid по hostid и имени интерфейса."""
+    if not hostid or not iface_name:
+        return None
+    key = (str(hostid), _normalize_interface_name(iface_name))
+    return triggerid_by_host_iface.get(key)
+
 
 def load_devices_json(path):
     """Загрузить JSON с ключом devices. Возврат (data, None) или (None, error_msg)."""
@@ -328,6 +389,50 @@ LAYOUT_HOST_HORIZONTAL_GAP = 180    # горизонталь между хост
 LAYOUT_HOST_Y_OFFSET = 100          # вертикаль: первый ряд хостов под провайдером
 LAYOUT_HOST_STEP_Y = 100            # вертикальный шаг между рядами хостов
 LAYOUT_HOST_COLUMNS = 2
+# Минимальное расстояние между центрами элементов (чтобы не накладывались)
+LAYOUT_MIN_DISTANCE = 80
+
+
+def _occupied_positions(host_pos, isp_pos, exclude_xy=None):
+    """Список занятых координат (x, y) для проверки коллизий. exclude_xy — не учитывать эту точку."""
+    out = []
+    for v in host_pos.values():
+        if exclude_xy is None or v != exclude_xy:
+            out.append(v)
+    for v in isp_pos.values():
+        if exclude_xy is None or v != exclude_xy:
+            out.append(v)
+    return out
+
+
+def _is_free(cx, cy, occupied, min_dist):
+    """True, если (cx, cy) не ближе min_dist ни к одной занятой точке."""
+    for (ox, oy) in occupied:
+        if (cx - ox) ** 2 + (cy - oy) ** 2 < min_dist * min_dist:
+            return False
+    return True
+
+
+def _place_single_host_provider(hx, hy, host_pos, isp_pos):
+    """
+    Подобрать свободную позицию для провайдера с одним хостом (хост уже в другом блоке).
+    Порядок: слева, справа, снизу, сверху, между (ближе слева/справа).
+    Возврат (x, y) или (hx - 170, hy) если все занято.
+    """
+    occupied = _occupied_positions(host_pos, isp_pos)
+    min_d = LAYOUT_MIN_DISTANCE
+    candidates = [
+        (hx - 170, hy),   # слева
+        (hx + 170, hy),   # справа
+        (hx, hy + 100),   # снизу
+        (hx, hy - 100),   # сверху
+        (hx - 85, hy),    # между (ближе слева)
+        (hx + 85, hy),    # между (ближе справа)
+    ]
+    for (cx, cy) in candidates:
+        if _is_free(cx, cy, occupied, min_d):
+            return (cx, cy)
+    return (hx - 170, hy)
 
 
 def _compute_layout(edges, map_width, map_height):
@@ -390,10 +495,10 @@ def _compute_layout(edges, map_width, map_height):
 
         if num_placed == 0:
             if single_host:
-                # Провайдер с одним хостом: хост уже в другом блоке — ставим провайдера рядом с ним, блок не занимаем
+                # Провайдер с одним хостом: хост уже в другом блоке — подбираем свободную позицию рядом
                 (_, only_hostid) = next(iter(hosts_in_block))
                 hx, hy = host_pos.get(str(only_hostid), (provider_x - 170, host_y_row0))
-                isp_pos[isp] = (hx - 170, hy)  # слева от хоста, 170 между ними
+                isp_pos[isp] = _place_single_host_provider(hx, hy, host_pos, isp_pos)
                 continue
             else:
                 isp_pos[isp] = (provider_x, block_y + LAYOUT_ISP_Y_OFFSET)
@@ -640,9 +745,9 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
                 label_parts.append("In: {?last(/" + hostname + "/" + key_in + ")}")
             if key_out:
                 label_parts.append("Out: {?last(/" + hostname + "/" + key_out + ")}")
+        # Все объекты в links должны иметь один набор полей; для нового линка передаём linkid: 0 (API может трактовать как «создать»).
         link = {
-            "drawtype": 0,
-            "color": "000000",
+            "linkid": 0,
             "selementid1": sid1,
             "selementid2": sid2,
             "label": "\n".join(label_parts),
@@ -659,17 +764,28 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
         s2 = str(l.get("selementid2", ""))
         s1 = selementid_to_canonical.get(s1, s1)
         s2 = selementid_to_canonical.get(s2, s2)
-        entry = {
-            "drawtype": int(l.get("drawtype", 0)),
-            "color": l.get("color", "000000"),
-            "selementid1": s1,
-            "selementid2": s2,
-            "label": l.get("label", ""),
-        }
+        label = str(l.get("label") or "")
         if l.get("linkid"):
-            entry["linkid"] = str(l["linkid"])
+            # Обновление существующего линка: linkid, selementid1, selementid2, label. linkid — число (как у нового с linkid: 0).
+            entry = {
+                "linkid": int(l["linkid"]),
+                "selementid1": s1,
+                "selementid2": s2,
+                "label": label,
+            }
+        else:
+            entry = {
+                "selementid1": s1,
+                "selementid2": s2,
+                "label": label,
+            }
         links_merged.append(entry)
     links_merged.extend(new_links)
+    # Гарантировать у каждого линка ключ label (строка), чтобы не было пропусков в JSON.
+    for link in links_merged:
+        if "label" not in link:
+            link["label"] = ""
+        link["label"] = str(link.get("label") or "")
 
     if debug or new_links:
         print("Линков: существующих {}, новых {}, всего {}".format(
@@ -680,12 +796,14 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
         print("Линки не созданы. Ищем hostid: {!r}, isp: {!r}. На карте hostid: {!r}, isp: {!r}".format(
             want_hosts[:15], want_isps[:15], sorted(host_to_selement.keys())[:15], sorted(isp_to_selement.keys())[:15]), file=sys.stderr)
 
+    # Обновление линков карты
     result, err = zabbix_request(url, token, "map.update", {
         "sysmapid": sysmapid,
         "links": links_merged,
     }, debug=debug)
     if err:
         return "map.update (links): {}".format(err), sysmapid
+
     return None, sysmapid
 
 
@@ -825,12 +943,19 @@ def main():
                 save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
                 if args.debug:
                     print("DEBUG: кэш сохранён в {}".format(cache_path), file=sys.stderr)
+        # Триггеры для link indicators (чтобы показать в таблице и передать в update_uplinks_map)
+        triggerid_by_host_iface = {}
+        if host_id_by_name:
+            triggerid_by_host_iface = _get_uplink_triggerids_by_host_iface(
+                url, token, list(host_id_by_name.values()), debug=args.debug
+            )
     else:
         host_id_by_name = {}
+        triggerid_by_host_iface = {}
 
     rows = [("hostname", "interface", "description", "ISP")]
     if use_zabbix:
-        rows[0] = ("hostname", "hostid", "interface", "description", "ISP", "key Bits received", "key Bits sent")
+        rows[0] = ("hostname", "hostid", "interface", "description", "ISP", "key Bits received", "key Bits sent", "triggerid (link)")
     lookup_debug_count = 0
     for hostname in sorted(devices.keys()):
         interfaces = devices[hostname]
@@ -848,12 +973,13 @@ def main():
                     print("DEBUG lookup: hostname={!r} iface_name={!r} key_norm={!r} found={}".format(
                         hostname, iface_name, key_norm, found), file=sys.stderr)
                     lookup_debug_count += 1
-                row = (hostname, hostid, iface_name, description, isp, rec.get("bits_in", ""), rec.get("bits_out", ""))
+                triggerid = _find_triggerid_for_link(triggerid_by_host_iface, hostid, iface_name) if triggerid_by_host_iface else None
+                row = (hostname, hostid, iface_name, description, isp, rec.get("bits_in", ""), rec.get("bits_out", ""), triggerid or "—")
             rows.append(row)
 
     if args.update_map:
         err_msg, sysmapid = update_uplinks_map(
-            url, token, devices, host_id_by_name, items_by_host_iface, desc_to_name, debug=args.debug
+            url, token, devices, host_id_by_name, items_by_host_iface, desc_to_name, debug=args.debug,
         )
         if err_msg:
             print(err_msg, file=sys.stderr)

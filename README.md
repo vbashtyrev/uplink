@@ -227,13 +227,15 @@ python netbox_interface_types.py -o my_types.json
 
 **Подписи линков:** имя интерфейса и строки In/Out с макросами Zabbix `{?last(/host/key)}` (скорость по items Bits received/sent).
 
+**Link indicators:** при обновлении карты к каждому линку привязывается триггер «Network interfaces discovery: Interface {интерфейс}(Uplink: {провайдер}): High bandwidth usage», если такой триггер есть на хосте (из шаблона). Тогда при срабатывании триггера линия на карте подсвечивается по статусу проблемы.
+
 **Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
 
 | Ключ | Описание |
 |------|----------|
 | `-f`, `--file` | JSON с ключом `devices` (по умолчанию `dry-ssh.json`) |
 | `-m`, `--description-map` | Файл сопоставления description → имя ISP |
-| `--zabbix` | Запросить Zabbix API, вывести ключи items в таблице |
+| `--zabbix` | Запросить Zabbix API, вывести ключи items и колонку «triggerid (link)» — ID триггера, привязываемого к линку на карте (или «—», если не найден) |
 | `--create-map` | Только создать карту [test] uplinks, если её нет (пустая) |
 | `--update-map` | Обновить карту: хосты, провайдеры, линки; с `--host` — только указанный хост и его линки |
 | `--host HOSTNAME` | Работать только с одним хостом |
@@ -263,6 +265,12 @@ python zabbix_map.py --zabbix --update-map --host MIA-EQX-7280QR-1 --debug
 # Выгрузить карту из API (например, созданную вручную) для сравнения формата
 python zabbix_map.py --export-map 10 > map_10.json
 ```
+
+---
+
+### 6. Akvorado: перцентиль и удаление за период
+
+Скрипты сравнения (Zabbix vs Akvorado, только Akvorado, discover таблиц) и удаления данных за период перенесены в отдельный репозиторий **akvorado-tools** (папка на уровень выше: `../akvorado-tools`). Там: `zabbix_percentile.py`, `akvorado_delete_period.py`, свой README и requirements.
 
 ---
 
