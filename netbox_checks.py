@@ -11,7 +11,7 @@
 Ключ --apply: вносить изменения в Netbox при разнице по выбранным ключам (--mediatype, --description, --bandwidth, --duplex, --mtu, --tx-power).
   Справочник типов (--mt-ref) по умолчанию включён (netbox_interface_types.json); для типа в Netbox подставляется value/slug из справочника.
 
-Переменные: NETBOX_URL, NETBOX_TOKEN, NETBOX_TAG (по умолчанию border).
+Переменные: NETBOX_URL, NETBOX_TOKEN, NETBOX_TAG.
 
 По умолчанию таблица; с --json — JSON. В note — код замечания, расшифровка под таблицей.
 При неверном/просроченном NETBOX_TOKEN — сообщение в stderr и выход с кодом 1.
@@ -27,7 +27,7 @@ import sys
 
 import pynetbox
 
-from uplinks_report import (
+from uplinks_stats import (
     get_device_platform_name,
     is_arista_platform,
     is_juniper_platform,

@@ -26,39 +26,27 @@ export NETBOX_TOKEN="your-api-token"
 export SSH_PASSWORD="password-for-devices"
 ```
 
-Опционально: `SSH_USERNAME` (по умолчанию `admin`), `SSH_HOST_SUFFIX` (по умолчанию `.3hc.io`), `PARALLEL_DEVICES` (по умолчанию `6`), `NETBOX_TAG` (по умолчанию `border`).
+Опционально: `SSH_USERNAME` (по умолчанию `admin`), `PARALLEL_DEVICES` (по умолчанию `6`), `SSH_HOST_SUFFIX`, `NETBOX_TAG`.
 
 Без активации venv можно вызывать интерпретатор напрямую:
 
 ```bash
-.venv/bin/python uplinks_report.py
+.venv/bin/python uplinks_stats.py
 ```
 
 ---
 
 ## Скрипты и ключи
 
-### 1. `uplinks_report.py`
+### 1. `uplinks_stats.py`
 
-**Назначение:** быстрый отчёт для визуальной сверки «что в NetBox» и «что на устройстве» по uplink-интерфейсам (с описанием, содержащим `Uplink:`). Только таблица, без сохранения JSON.
+Единый скрипт с двумя режимами.
 
-**Соотношение с другими скриптами:** по сути дублирует `arista_uplinks_stats.py` для Arista (устройства по тегу, SSH, сравнение с NetBox). Таблицу только по description можно получить и так: `arista_uplinks_stats.py --json > dry-ssh.json`, затем `netbox_checks.py -f dry-ssh.json --description` — колонки descF/descN/nD. Отличия `uplinks_report`: поддерживает **Juniper** (по `platform.name` в NetBox) и даёт один запуск без предварительного сбора JSON; при этом только uplink-интерфейсы (с `Uplink:` в description). Для парка только на Arista достаточно связки `arista_uplinks_stats` + `netbox_checks.py --description`; `uplinks_report` имеет смысл при смешанном Juniper/Arista или когда нужна одна команда без сохранения JSON.
+**Режим отчёта (`--report`):** быстрый отчёт для визуальной сверки «что в NetBox» и «что на устройстве» по uplink-интерфейсам (с описанием, содержащим `Uplink:`). Поддерживаются Juniper и Arista (по `platform.name` в NetBox). Только таблица, без сохранения JSON.
 
-**Аргументы:** нет (всё через переменные окружения).
+**Режим статистики (по умолчанию):** сбор uplink-статистики Arista: устройства из NetBox по тегу, опрос по SSH, результат — таблица или JSON. Либо чтение уже готового JSON без SSH (`--from-file`).
 
-**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `SSH_USERNAME`, `SSH_PASSWORD`, `SSH_HOST_SUFFIX`, `PARALLEL_DEVICES`. Опционально: `DEBUG_SSH_JSON=1` — выводить в консоль JSON с SSH.
-
-```bash
-python uplinks_report.py
-```
-
----
-
-### 2. `arista_uplinks_stats.py`
-
-Сбор uplink-статистики Arista: устройства из NetBox по тегу, опрос по SSH, результат — таблица или JSON. Либо чтение уже готового JSON без SSH (`--from-file`).
-
-**Что собирается с устройств:** берутся только интерфейсы, у которых в description есть строка `Uplink:`. Для каждого такого интерфейса по SSH выполняются команды `show interfaces <name> | json | no-more` и `show interfaces <name> transceiver | json | no-more`. Из вывода извлекаются поля:
+**Что собирается в режиме статистики:** берутся только интерфейсы, у которых в description есть строка `Uplink:`. Для каждого такого интерфейса по SSH выполняются команды `show interfaces <name> | json | no-more` и `show interfaces <name> transceiver | json | no-more`. Из вывода извлекаются поля:
 
 | Поле | Источник | Описание |
 |------|----------|----------|
@@ -77,26 +65,28 @@ python uplinks_report.py
 
 | Ключ | Описание |
 |------|----------|
-| `--json` | Вывод в формате JSON (по умолчанию — таблица) |
+| `--report` | Режим отчёта: таблица NetBox vs SSH (Juniper + Arista) |
+| `--json` | Вывод в формате JSON (режим статистики) |
 | `--from-file FILE` | Не опрашивать SSH; взять данные из JSON-файла и вывести таблицу/JSON |
 
-**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`, `SSH_USERNAME`, `SSH_PASSWORD`, `SSH_HOST_SUFFIX`.
+**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `SSH_USERNAME`, `SSH_PASSWORD`, `SSH_HOST_SUFFIX`, `PARALLEL_DEVICES`, `NETBOX_TAG`. Опционально: `DEBUG_SSH_JSON=1` (режим отчёта).
 
 ```bash
-python arista_uplinks_stats.py
-python arista_uplinks_stats.py --json
-python arista_uplinks_stats.py --from-file dry-ssh.json
+python uplinks_stats.py --report
+python uplinks_stats.py
+python uplinks_stats.py --json
+python uplinks_stats.py --from-file dry-ssh.json
 ```
 
 ---
 
-### 3. `netbox_checks.py`
+### 2. `netbox_checks.py`
 
-Сверка данных из JSON-файла с NetBox и при необходимости обновление интерфейсов в NetBox. **Подключения по SSH к устройствам нет** — скрипт всегда читает данные только из файла. Если `-f` не указан, используется файл по умолчанию `dry-ssh.json` (его нужно заранее получить, например через `arista_uplinks_stats.py --json > dry-ssh.json`). Устройства в NetBox выбираются по тегу.
+Сверка данных из JSON-файла с NetBox и при необходимости обновление интерфейсов в NetBox. **Подключения по SSH к устройствам нет** — скрипт всегда читает данные только из файла. Если `-f` не указан, используется файл по умолчанию `dry-ssh.json` (его нужно заранее получить, например через `uplinks_stats.py --json > dry-ssh.json`). Устройства в NetBox выбираются по тегу.
 
 **Входной файл:** по умолчанию `dry-ssh.json` (структура с ключом `devices`: имя устройства → список интерфейсов с полями `name`, `description`, `mediaType`, `bandwidth`, `duplex`, `physicalAddress`, `mtu`, `txPower` и т.д.).
 
-**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG` (по умолчанию `border`). При неверном или просроченном токене/недоступности NetBox скрипт завершается с сообщением в stderr и кодом 1 (без трассировки).
+**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`. При неверном или просроченном токене/недоступности NetBox скрипт завершается с сообщением в stderr и кодом 1 (без трассировки).
 
 **Версия:** `netbox_checks.py --version` выводит версию (например 1.0).
 
@@ -181,7 +171,7 @@ python netbox_checks.py -f dry-ssh.json --hide-ok-hosts
 
 ---
 
-### 4. `netbox_interface_types.py`
+### 3. `netbox_interface_types.py`
 
 Скачивание списка типов интерфейсов NetBox из репозитория netbox-community/netbox (choices.py), извлечение value и label, сохранение в JSON для использования в `netbox_checks.py --mt-ref`.
 
@@ -202,7 +192,7 @@ python netbox_interface_types.py -o my_types.json
 
 1. Собрать данные с устройств в JSON:
    ```bash
-   python arista_uplinks_stats.py --json > dry-ssh.json
+   python uplinks_stats.py --json > dry-ssh.json
    ```
 2. Сверить с NetBox и посмотреть расхождения:
    ```bash
@@ -219,7 +209,7 @@ python netbox_interface_types.py -o my_types.json
 
 ---
 
-### 5. `zabbix_map.py`
+### 4. `zabbix_map.py`
 
 Построение таблицы uplink'ов и опционально карты Zabbix по данным из `dry-ssh.json`. С Zabbix API: поиск хостов и items (Bits received/sent). **Карта Zabbix:** `--create-map` — только создать пустую карту [test] uplinks, если её нет; `--update-map` — обновить карту (хосты, провайдеры, линки); с `--host` обновляются только этот хост и его линки.
 
@@ -266,7 +256,7 @@ python zabbix_map.py --export-map 10 > map_10.json
 
 ---
 
-### 6. Akvorado: перцентиль и удаление за период
+### 5. Akvorado: перцентиль и удаление за период
 
 Скрипты сравнения (Zabbix vs Akvorado, только Akvorado, discover таблиц) и удаления данных за период перенесены в отдельный репозиторий **akvorado-tools** (папка на уровень выше: `../akvorado-tools`). Там: `zabbix_percentile.py`, `akvorado_delete_period.py`, свой README и requirements.
 
