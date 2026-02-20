@@ -592,6 +592,7 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
             infos = detail_data.get("interface-information") or []
             if isinstance(infos, dict):
                 infos = [infos]
+            matched = False
             for info in infos:
                 for ph in info.get("physical-interface") or []:
                     n = _juniper_data(ph.get("name"))
@@ -599,10 +600,28 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
                         row = _parse_juniper_phy_iface(ph)
                         row["name"] = iface_name
                         row["description"] = desc
+                        matched = True
                         break
-                else:
-                    continue
-                break
+                    # Логический интерфейс (ae5.0): physical — ae5, logical-interface — ae5.0
+                    logics = ph.get("logical-interface") or []
+                    if not isinstance(logics, list):
+                        logics = [logics] if logics else []
+                    for log in logics:
+                        ln = _juniper_data(log.get("name"))
+                        if ln and ln == iface_name:
+                            row = _parse_juniper_phy_iface(ph)
+                            row["name"] = iface_name
+                            row["description"] = desc
+                            # MTU может быть на logical
+                            mtu_log = _juniper_data(log.get("mtu"))
+                            if mtu_log and str(mtu_log).isdigit():
+                                row["mtu"] = int(mtu_log)
+                            matched = True
+                            break
+                    if matched:
+                        break
+                if matched:
+                    break
         result.append(row)
         time.sleep(0.3)
 
