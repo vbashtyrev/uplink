@@ -843,7 +843,9 @@ def netbox_error_message(e):
 def main():
     parser = argparse.ArgumentParser(description="Сбор и отчёт по uplink-интерфейсам (Arista, Juniper)")
     parser.add_argument("--report", action="store_true", help="Режим отчёта: таблица NetBox vs SSH по всем устройствам с тегом")
-    parser.add_argument("--fetch", action="store_true", help="Режим статистики: опросить по SSH все устройства Arista и Juniper (иначе читается файл)")
+    parser.add_argument("--fetch", action="store_true", help="Режим статистики: опросить по SSH (иначе читается файл)")
+    parser.add_argument("--platform", choices=("arista", "juniper", "all"), default="all", help="При --fetch: только Arista, только Juniper или все (по умолчанию: all)")
+    parser.add_argument("--host", metavar="NAME", help="При --fetch: опросить только указанный хост (имя устройства в NetBox)")
     parser.add_argument("--json", action="store_true", help="Вывод в формате JSON (режим статистики)")
     parser.add_argument("--from-file", metavar="FILE", dest="from_file", help="Путь к JSON с devices (по умолчанию {})".format(DEFAULT_STATS_FILE))
     args = parser.parse_args()
@@ -901,19 +903,30 @@ def main():
         print("Устройств с тегом '{}' не найдено".format(netbox_tag))
         return 0
 
+    if args.host:
+        devices = [d for d in devices if d.name == args.host]
+        if not devices:
+            print("Хост '{}' не найден в NetBox по тегу {}.".format(args.host, netbox_tag), file=sys.stderr)
+            return 1
+
     devices_to_fetch = []
     for d in devices:
         platform_name = get_device_platform_name(d, nb)
-        if is_arista_platform(platform_name) or is_juniper_platform(platform_name):
+        if args.platform == "arista" and is_arista_platform(platform_name):
+            devices_to_fetch.append(d)
+        elif args.platform == "juniper" and is_juniper_platform(platform_name):
+            devices_to_fetch.append(d)
+        elif args.platform == "all" and (is_arista_platform(platform_name) or is_juniper_platform(platform_name)):
             devices_to_fetch.append(d)
     if not devices_to_fetch:
-        print("Устройств Arista/Juniper среди выбранных не найдено")
+        print("Устройств по фильтру (platform={}, host={}) не найдено.".format(args.platform, args.host or "все"), file=sys.stderr)
         return 0
 
     n_arista = sum(1 for d in devices_to_fetch if is_arista_platform(get_device_platform_name(d, nb)))
     n_juniper = len(devices_to_fetch) - n_arista
     max_workers = min(len(devices_to_fetch), max(1, int(os.environ.get("PARALLEL_DEVICES", "6"))))
-    print("Устройств: {} (Arista: {}, Juniper: {}). Потоков: {}.".format(len(devices_to_fetch), n_arista, n_juniper, max_workers), flush=True)
+    host_note = " хост {}".format(args.host) if args.host else ""
+    print("Устройств{}: {} (Arista: {}, Juniper: {}). Потоков: {}.".format(host_note, len(devices_to_fetch), n_arista, n_juniper, max_workers), flush=True)
 
     print_lock = threading.Lock()
     def progress_print(device_name, msg):

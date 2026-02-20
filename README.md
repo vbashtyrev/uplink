@@ -68,7 +68,9 @@ export SSH_PASSWORD="password-for-devices"
 | Ключ | Описание |
 |------|----------|
 | `--report` | Режим отчёта: таблица NetBox vs SSH (Juniper + Arista) |
-| `--fetch` | Режим статистики: опросить по SSH все устройства Arista и Juniper (иначе читается файл `dry-ssh.json`) |
+| `--fetch` | Режим статистики: опросить по SSH (иначе читается файл `dry-ssh.json`) |
+| `--platform {arista,juniper,all}` | При `--fetch`: только Arista, только Juniper или все (по умолчанию `all`) |
+| `--host NAME` | При `--fetch`: опросить только указанный хост (имя устройства в NetBox) |
 | `--json` | Вывод в формате JSON (режим статистики) |
 | `--from-file FILE` | Путь к JSON с ключом `devices` (по умолчанию `dry-ssh.json`) |
 
@@ -79,6 +81,8 @@ python uplinks_stats.py
 python uplinks_stats.py --json
 python uplinks_stats.py --from-file other.json
 python uplinks_stats.py --fetch
+python uplinks_stats.py --fetch --platform arista
+python uplinks_stats.py --fetch --platform juniper --host MY-ROUTER
 python uplinks_stats.py --fetch --json
 python uplinks_stats.py --report
 ```
