@@ -1340,6 +1340,14 @@ def main():
     parser.add_argument("--host", metavar="NAME", help="При --fetch: опросить только указанный хост (имя устройства в NetBox)")
     parser.add_argument("--json", action="store_true", help="Вывод в формате JSON (режим статистики)")
     parser.add_argument("--from-file", metavar="FILE", dest="from_file", help="Путь к JSON с devices (по умолчанию {})".format(DEFAULT_STATS_FILE))
+    parser.add_argument(
+        "--merge-into",
+        metavar="FILE",
+        nargs="?",
+        const=DEFAULT_STATS_FILE,
+        default=None,
+        help="При --fetch: загрузить FILE, подставить данные по опрошенным хостам и сохранить обратно (по умолчанию %s). Остальные хосты в файле не трогаются." % DEFAULT_STATS_FILE,
+    )
     args = parser.parse_args()
 
     # Режим «чтение из файла» (по умолчанию), если не запрошены --report или --fetch
@@ -1464,6 +1472,24 @@ def main():
                 results[device.name] = {"error": str(e)}
 
     out = {"devices": {dev_name: payload for dev_name, payload in results.items()}}
+    if getattr(args, "merge_into", None) is not None:
+        merge_path = args.merge_into
+        merged, load_err = _load_stats_file(merge_path)
+        if merged is None and load_err and "не найден" not in load_err:
+            print("--merge-into: {}.".format(load_err), file=sys.stderr)
+            return 1
+        if merged is None:
+            merged = {"devices": {}}
+        for dev_name, payload in results.items():
+            merged["devices"][dev_name] = payload
+        try:
+            with open(merge_path, "w", encoding="utf-8") as f:
+                json.dump(merged, f, indent=2, ensure_ascii=False)
+        except OSError as e:
+            print("--merge-into: не удалось записать {}: {}.".format(merge_path, e), file=sys.stderr)
+            return 1
+        out = merged
+        print("Обновлён файл {} (хостов в файле: {}).".format(merge_path, len(merged["devices"])), flush=True, file=progress_file)
     print("", flush=True, file=progress_file)
 
     if args.json:
