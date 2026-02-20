@@ -55,6 +55,11 @@ def _juniper_iface_name_desc(iface_dict):
     return name, desc
 
 
+def _juniper_iface_oper_status(iface_dict):
+    """Из элемента physical-interface или logical-interface вытащить oper-status (up/down)."""
+    return _juniper_data(iface_dict.get("oper-status"))
+
+
 def _juniper_data(field):
     """Из поля Junos (список с dict с ключом data) вытащить строку или число."""
     if not field:
@@ -86,8 +91,12 @@ def _juniper_speed_to_bps(speed_str):
     return None
 
 
-def parse_juniper_uplinks(json_data):
-    """Из Juniper JSON вытащить интерфейсы с 'Uplink:' в description (physical + logical)."""
+def parse_juniper_uplinks(json_data, require_link_up=False):
+    """
+    Из Juniper JSON вытащить интерфейсы с 'Uplink:' в description (physical + logical).
+    Если require_link_up=True — только с oper-status == 'up'.
+    Возврат: [(name, desc), ...]
+    """
     out = []
     infos = json_data.get("interface-information") or []
     if isinstance(infos, dict):
@@ -96,11 +105,42 @@ def parse_juniper_uplinks(json_data):
         for ph in info.get("physical-interface") or []:
             name, desc = _juniper_iface_name_desc(ph)
             if name and "Uplink:" in desc:
+                if require_link_up:
+                    oper = _juniper_iface_oper_status(ph)
+                    if oper is not None and oper.lower() != "up":
+                        continue
                 out.append((name, desc))
         for log in info.get("logical-interface") or []:
             name, desc = _juniper_iface_name_desc(log)
             if name and "Uplink:" in desc:
+                if require_link_up:
+                    oper = _juniper_iface_oper_status(log)
+                    if oper is not None and oper.lower() != "up":
+                        continue
                 out.append((name, desc))
+    return out
+
+
+def parse_juniper_descriptions_all(json_data):
+    """
+    Из Juniper JSON (show interfaces descriptions) вытащить все интерфейсы.
+    Возврат: [(name, description, oper_status), ...]; oper_status может быть None.
+    """
+    out = []
+    infos = json_data.get("interface-information") or []
+    if isinstance(infos, dict):
+        infos = [infos]
+    for info in infos:
+        for ph in info.get("physical-interface") or []:
+            name, desc = _juniper_iface_name_desc(ph)
+            if name:
+                oper = _juniper_iface_oper_status(ph)
+                out.append((name, desc, oper))
+        for log in info.get("logical-interface") or []:
+            name, desc = _juniper_iface_name_desc(log)
+            if name:
+                oper = _juniper_iface_oper_status(log)
+                out.append((name, desc, oper))
     return out
 
 
@@ -115,6 +155,19 @@ def parse_arista_uplinks(json_data):
         if "Uplink:" in desc:
             out.append((name, desc))
     return out
+
+
+def _arista_interface_link_up(if_obj):
+    """True, если по данным show interfaces интерфейс считается поднятым (link up)."""
+    if not if_obj:
+        return False
+    line_proto = (if_obj.get("lineProtocolStatus") or "").strip().lower()
+    iface_status = (if_obj.get("interfaceStatus") or "").strip().lower()
+    if line_proto == "down":
+        return False
+    if iface_status in ("disabled", "notconnect", "down"):
+        return False
+    return True
 
 
 def arista_cli_interface_name(name):
@@ -446,7 +499,7 @@ def get_arista_uplink_stats(host, username, password, timeout=45, command_timeou
         _log("SSH: uplink-интерфейсов не найдено")
         return [], None
 
-    _log("SSH: найдено uplink-интерфейсов: {}".format(len(uplinks)))
+    _log("SSH: найдено uplink-интерфейсов: {} (в отчёт только с link up)".format(len(uplinks)))
     result = []
 
     for iface_name, desc in uplinks:
@@ -462,6 +515,10 @@ def get_arista_uplink_stats(host, username, password, timeout=45, command_timeou
         trans_data = (trans_data or {}).get("interfaces") or {}
         if_obj = if_data.get(iface_name) or {}
         trans_obj = trans_data.get(iface_name) or {}
+
+        if not _arista_interface_link_up(if_obj):
+            time.sleep(0.2)
+            continue
 
         switchport_config = None
         if (if_obj.get("forwardingModel") or "").strip().lower() == "bridged":
@@ -495,6 +552,116 @@ def get_arista_uplink_stats(host, username, password, timeout=45, command_timeou
     return result, None
 
 
+def _parse_juniper_logical_mtu(log_iface):
+    """Из logical-interface Junos взять MTU из первого address-family с числовым mtu."""
+    afs = log_iface.get("address-family") or []
+    if not isinstance(afs, list):
+        afs = [afs] if afs else []
+    for af in afs:
+        mtu_raw = _juniper_data(af.get("mtu"))
+        if mtu_raw and str(mtu_raw).isdigit():
+            return int(mtu_raw)
+    return None
+
+
+def _juniper_ae_bundle_name(iface_json):
+    """
+    Из JSON вывода show interfaces <name> | display json вытащить ae-bundle-name
+    (интерфейс в LAG: logical-interface → address-family aenet → ae-bundle-name).
+    Возврат: строка типа "ae5.0" или None.
+    """
+    infos = iface_json.get("interface-information") or []
+    if isinstance(infos, dict):
+        infos = [infos]
+    for info in infos:
+        for ph in info.get("physical-interface") or []:
+            logics = ph.get("logical-interface") or []
+            if not isinstance(logics, list):
+                logics = [logics] if logics else []
+            for log in logics:
+                afs = log.get("address-family") or []
+                if not isinstance(afs, list):
+                    afs = [afs] if afs else []
+                for af in afs:
+                    if _juniper_data(af.get("address-family-name")) == "aenet":
+                        return _juniper_data(af.get("ae-bundle-name"))
+    return None
+
+
+def _juniper_lacp_member_names(lacp_json):
+    """
+    Из JSON вывода show lacp interfaces <ae> | display json вытащить имена
+    физических членов LAG (lag-lacp-state / lag-lacp-protocol → name).
+    Возврат: список строк ["et-0/0/3", ...] без дубликатов.
+    """
+    seen = set()
+    lists = lacp_json.get("lacp-interface-information-list") or []
+    if isinstance(lists, dict):
+        lists = [lists]
+    for lst in lists:
+        blocks = lst.get("lacp-interface-information") or []
+        if not isinstance(blocks, list):
+            blocks = [blocks] if blocks else []
+        for blk in blocks:
+            for state in blk.get("lag-lacp-state") or []:
+                n = _juniper_data(state.get("name"))
+                if n and n not in seen:
+                    seen.add(n)
+            for proto in blk.get("lag-lacp-protocol") or []:
+                n = _juniper_data(proto.get("name"))
+                if n and n not in seen:
+                    seen.add(n)
+    return list(seen)
+
+
+def _juniper_interface_slot(iface_name):
+    """
+    Из имени интерфейса Junos (et-0/0/3, xe-0/1/0) вытащить (fpc, pic, port).
+    Соответствие: type-fpc/pic/port → FPC fpc, PIC pic, Xcvr port. Возврат (int,int,int) или None.
+    """
+    if not iface_name:
+        return None
+    m = re.match(r"^[a-zA-Z]+-(\d+)/(\d+)/(\d+)$", iface_name.strip())
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def _juniper_chassis_media_type(chassis_json, fpc, pic, port):
+    """
+    Из JSON show chassis hardware | display json вытащить модель SFP (description)
+    для слота FPC fpc, PIC pic, Xcvr port. Возврат строка или None.
+    """
+    invs = chassis_json.get("chassis-inventory") or []
+    if isinstance(invs, dict):
+        invs = [invs]
+    for inv in invs:
+        chasses = inv.get("chassis") or []
+        if isinstance(chasses, dict):
+            chasses = [chasses]
+        for ch in chasses:
+            modules = ch.get("chassis-module") or []
+            if not isinstance(modules, list):
+                modules = [modules] if modules else []
+            for mod in modules:
+                if _juniper_data(mod.get("name")) != "FPC {}".format(fpc):
+                    continue
+                submods = mod.get("chassis-sub-module") or []
+                if not isinstance(submods, list):
+                    submods = [submods] if submods else []
+                for sub in submods:
+                    if _juniper_data(sub.get("name")) != "PIC {}".format(pic):
+                        continue
+                    xcvrs = sub.get("chassis-sub-sub-module") or []
+                    if not isinstance(xcvrs, list):
+                        xcvrs = [xcvrs] if xcvrs else []
+                    for xc in xcvrs:
+                        xcvr_name = _juniper_data(xc.get("name"))
+                        if xcvr_name == "Xcvr {}".format(port):
+                            return _juniper_data(xc.get("description"))
+    return None
+
+
 def _parse_juniper_phy_iface(ph):
     """Из physical-interface Junos извлечь поля в виде dict (те же ключи, что у Arista)."""
     name = _juniper_data(ph.get("name"))
@@ -504,7 +671,7 @@ def _parse_juniper_phy_iface(ph):
     mtu_raw = _juniper_data(ph.get("mtu"))
     mtu = int(mtu_raw) if mtu_raw and str(mtu_raw).isdigit() else None
     mac = _juniper_data(ph.get("current-physical-address"))
-    # link-type в Junos: Full-Duplex, Half-Duplex
+    # link-type в Junos: Full-Duplex, Half-Duplex (на 10G/40G/100G Junos часто не выводит — по стандарту только full)
     duplex_raw = _juniper_data(ph.get("link-type"))
     duplex = None
     if duplex_raw:
@@ -515,6 +682,8 @@ def _parse_juniper_phy_iface(ph):
             duplex = "half"
         else:
             duplex = duplex_raw
+    if duplex is None and bandwidth is not None and bandwidth >= 10_000_000_000:
+        duplex = "full"  # 10G+ только full duplex, half не определён в стандартах
     return {
         "name": name or "",
         "description": desc,
@@ -574,55 +743,75 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
         _log("SSH: не удалось получить show interfaces descriptions | display json")
         return None, "не удалось получить show interfaces descriptions | display json"
 
-    uplinks = parse_juniper_uplinks(desc_data)
+    uplinks = parse_juniper_uplinks(desc_data, require_link_up=True)
     if not uplinks:
         client.close()
-        _log("SSH: uplink-интерфейсов не найдено")
+        _log("SSH: uplink-интерфейсов с Link up не найдено")
         return [], None
 
-    _log("SSH: найдено uplink-интерфейсов: {}".format(len(uplinks)))
+    send("show chassis hardware | display json | no-more\r\n")
+    time.sleep(0.2)
+    chassis_hw = read_until_json_and_prompt(channel, timeout=command_timeout)
+
+    _log("SSH: найдено uplink-интерфейсов (link up): {}".format(len(uplinks)))
     result = []
 
-    for iface_name, desc in uplinks:
-        send("show interfaces {} detail | display json | no-more\r\n".format(iface_name))
-        time.sleep(0.2)
-        detail_data = read_until_json_and_prompt(channel, timeout=command_timeout)
-        row = {"name": iface_name, "description": desc, "mediaType": None, "bandwidth": None, "duplex": None, "physicalAddress": None, "mtu": None, "txPower": None, "forwardingModel": None}
-        if detail_data:
-            infos = detail_data.get("interface-information") or []
-            if isinstance(infos, dict):
-                infos = [infos]
-            matched = False
-            for info in infos:
-                for ph in info.get("physical-interface") or []:
-                    n = _juniper_data(ph.get("name"))
-                    if n and n == iface_name:
-                        row = _parse_juniper_phy_iface(ph)
-                        row["name"] = iface_name
-                        row["description"] = desc
-                        matched = True
-                        break
-                    # Логический интерфейс (ae5.0): physical — ae5, logical-interface — ae5.0
-                    logics = ph.get("logical-interface") or []
-                    if not isinstance(logics, list):
-                        logics = [logics] if logics else []
-                    for log in logics:
-                        ln = _juniper_data(log.get("name"))
-                        if ln and ln == iface_name:
-                            row = _parse_juniper_phy_iface(ph)
-                            row["name"] = iface_name
-                            row["description"] = desc
-                            # MTU может быть на logical
-                            mtu_log = _juniper_data(log.get("mtu"))
-                            if mtu_log and str(mtu_log).isdigit():
-                                row["mtu"] = int(mtu_log)
-                            matched = True
+    for logical_name, desc in uplinks:
+        is_physical = "." not in logical_name and not logical_name.startswith("ae")
+        if is_physical:
+            physical_names = [logical_name]
+            aggregate_name = None
+        else:
+            aggregate_name = logical_name.split(".")[0] if "." in logical_name else None
+            physical_names = []
+            if aggregate_name:
+                send("show lacp interfaces {} | display json | no-more\r\n".format(aggregate_name))
+                time.sleep(0.2)
+                lacp_data = read_until_json_and_prompt(channel, timeout=command_timeout)
+                physical_names = _juniper_lacp_member_names(lacp_data) if lacp_data else []
+            time.sleep(0.15)
+
+        for physical_name in physical_names:
+            send("show interfaces {} | display json | no-more\r\n".format(physical_name))
+            time.sleep(0.2)
+            ph_data = read_until_json_and_prompt(channel, timeout=command_timeout)
+            physical_stats = {}
+            if ph_data:
+                pinfos = ph_data.get("interface-information") or []
+                if isinstance(pinfos, dict):
+                    pinfos = [pinfos]
+                for pinfo in pinfos:
+                    if not isinstance(pinfo, dict):
+                        continue
+                    phys = pinfo.get("physical-interface") or []
+                    if not isinstance(phys, list):
+                        phys = [phys] if phys else []
+                    for ph in phys:
+                        if _juniper_data(ph.get("name")) == physical_name:
+                            physical_stats = _parse_juniper_phy_iface(ph)
                             break
-                    if matched:
-                        break
-                if matched:
-                    break
-        result.append(row)
+            time.sleep(0.2)
+
+            media_type = physical_stats.get("mediaType")
+            if media_type is None and chassis_hw:
+                slot = _juniper_interface_slot(physical_name)
+                if slot:
+                    media_type = _juniper_chassis_media_type(chassis_hw, slot[0], slot[1], slot[2])
+            row = {
+                "name": physical_name,
+                "description": (physical_stats.get("description") or desc).strip() if physical_stats else desc,
+                "mediaType": media_type,
+                "bandwidth": physical_stats.get("bandwidth"),
+                "duplex": physical_stats.get("duplex"),
+                "physicalAddress": physical_stats.get("physicalAddress"),
+                "mtu": physical_stats.get("mtu"),
+                "txPower": physical_stats.get("txPower"),
+                "forwardingModel": physical_stats.get("forwardingModel"),
+            }
+            row["physicalInterface"] = physical_name
+            row["aggregateInterface"] = aggregate_name
+            row["logicalInterface"] = logical_name
+            result.append(row)
         time.sleep(0.3)
 
     client.close()
@@ -912,14 +1101,15 @@ def main():
         return 1
 
     nb = pynetbox.api(url, token=token)
-    print("Загрузка устройств (tag={})...".format(netbox_tag), flush=True)
+    progress_file = sys.stderr if args.json else sys.stdout
+    print("Загрузка устройств (tag={})...".format(netbox_tag), flush=True, file=progress_file)
     try:
         devices = list(nb.dcim.devices.filter(tag=netbox_tag))
     except Exception as e:
         print("Ошибка доступа к NetBox: {}.".format(netbox_error_message(e)), file=sys.stderr)
         return 1
     if not devices:
-        print("Устройств с тегом '{}' не найдено".format(netbox_tag))
+        print("Устройств с тегом '{}' не найдено".format(netbox_tag), file=progress_file)
         return 0
 
     if args.host:
@@ -945,12 +1135,12 @@ def main():
     n_juniper = len(devices_to_fetch) - n_arista
     max_workers = min(len(devices_to_fetch), max(1, int(os.environ.get("PARALLEL_DEVICES", "6"))))
     host_note = " хост {}".format(args.host) if args.host else ""
-    print("Устройств{}: {} (Arista: {}, Juniper: {}). Потоков: {}.".format(host_note, len(devices_to_fetch), n_arista, n_juniper, max_workers), flush=True)
+    print("Устройств{}: {} (Arista: {}, Juniper: {}). Потоков: {}.".format(host_note, len(devices_to_fetch), n_arista, n_juniper, max_workers), flush=True, file=progress_file)
 
     print_lock = threading.Lock()
     def progress_print(device_name, msg):
         with print_lock:
-            print("[{}] {}".format(device_name, msg), flush=True)
+            print("[{}] {}".format(device_name, msg), flush=True, file=progress_file)
 
     results = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -976,7 +1166,7 @@ def main():
                 results[device.name] = {"error": str(e)}
 
     out = {"devices": {dev_name: payload for dev_name, payload in results.items()}}
-    print("", flush=True)
+    print("", flush=True, file=progress_file)
 
     if args.json:
         print(json.dumps(out, indent=2, ensure_ascii=False))

@@ -48,14 +48,14 @@ export SSH_PASSWORD="password-for-devices"
 
 **Устройства и интерфейсы в режиме статистики (при `--fetch`):** устройства берутся из NetBox по тегу (переменная `NETBOX_TAG`), учитываются платформы Arista EOS и Juniper (Junos). Интерфейсы — только те, у которых в описании (description) есть строка `Uplink:`.
 
-**Что собирается по каждому интерфейсу (при `--fetch`):** для **Arista** — команды `show interfaces <name> | json | no-more` и `show interfaces <name> transceiver | json | no-more`. Для **Juniper** — `show interfaces descriptions | display json | no-more`, затем для каждого uplink'а `show interfaces <name> detail | display json | no-more` (speed, mtu, current-physical-address, link-type). Общий набор полей в выводе (name, description, bandwidth, mtu, physicalAddress и т.д.) совпадает. Таблица полей ниже — по Arista:
+**Что собирается по каждому интерфейсу (при `--fetch`):** для **Arista** — команды `show interfaces <name> | json | no-more` и `show interfaces <name> transceiver | json | no-more`. Для **Juniper** — uplink'и с link up, для агрегатов (ae*.0) — члены LAG через `show lacp interfaces`, по каждому физическому интерфейсу `show interfaces <name> | display json`, модель SFP из `show chassis hardware | display json` (сопоставление слот FPC/PIC/port по имени интерфейса). Duplex на 10G/40G/100G в Junos часто не выводится — при bandwidth ≥ 10 Gbps подставляется `full`. Общий набор полей в выводе (name, description, bandwidth, mtu, physicalAddress и т.д.) совпадает с Arista. Таблица полей ниже — по Arista:
 
 | Поле | Источник | Описание |
 |------|----------|----------|
 | `name` | show interfaces | Имя интерфейса |
 | `description` | show interfaces | Описание интерфейса |
 | `bandwidth` | show interfaces | Пропускная способность (bps) |
-| `duplex` | show interfaces | Режим дуплекса (full/half и т.д.) |
+| `duplex` | show interfaces | Режим дуплекса (full/half). На 10G/40G/100G по стандарту только full duplex; Junos часто не выводит duplex в JSON — скрипт подставляет `full` при bandwidth ≥ 10 Gbps. |
 | `physicalAddress` | show interfaces | MAC-адрес |
 | `mtu` | show interfaces | MTU |
 | `forwardingModel` | show interfaces | Режим работы порта: `routed` или `bridged` |
@@ -71,7 +71,7 @@ export SSH_PASSWORD="password-for-devices"
 | `--fetch` | Режим статистики: опросить по SSH (иначе читается файл `dry-ssh.json`) |
 | `--platform {arista,juniper,all}` | При `--fetch`: только Arista, только Juniper или все (по умолчанию `all`) |
 | `--host NAME` | При `--fetch`: опросить только указанный хост (имя устройства в NetBox) |
-| `--json` | Вывод в формате JSON (режим статистики) |
+| `--json` | Вывод в формате JSON (режим статистики). При `--fetch --json` прогресс идёт в stderr, в stdout — только JSON (удобно: `--fetch --json > dry-ssh.json`) |
 | `--from-file FILE` | Путь к JSON с ключом `devices` (по умолчанию `dry-ssh.json`) |
 
 **Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `SSH_USERNAME`, `SSH_PASSWORD`, `SSH_HOST_SUFFIX`, `PARALLEL_DEVICES`, `NETBOX_TAG`. Опционально: `DEBUG_SSH_JSON=1` (режим отчёта).
@@ -117,7 +117,7 @@ python uplinks_stats.py --report
 | `--mt-ref [FILE]` | Справочник типов для mediaType (по умолчанию `netbox_interface_types.json`). Значения приводятся к одному формату (value/slug). Другой файл: `--mt-ref other.json` |
 | `--no-mt-ref` | Не загружать справочник типов (отключить использование по умолчанию) |
 | `--bandwidth` | Сверка bandwidth (файл, bps) и speed (NetBox, Kbps) |
-| `--duplex` | Сверка duplex (файл vs NetBox) |
+| `--duplex` | Сверка duplex (файл vs NetBox). Для интерфейсов с bandwidth ≥ 10 Gbps пустое значение с устройства считается full (проверка duplex для 10G+ не имеет смысла). |
 | `--mac` | Сверка physicalAddress (файл) и mac_address (NetBox) |
 | `--mtu` | Сверка mtu (файл vs NetBox) |
 | `--tx-power` | Сверка txPower (файл) и tx_power (NetBox) |

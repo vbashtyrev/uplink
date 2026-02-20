@@ -698,6 +698,8 @@ def main():
                         else:
                             dup_n = str(d or "").strip()
                     dup_f_norm = _normalize_duplex(dup_f)
+                    if not dup_f_norm and entry.get("bandwidth") and entry.get("bandwidth") >= 10_000_000_000:
+                        dup_f_norm = "full"  # 10G+ только full duplex, проверять не имеет смысла
                     dup_n_norm = _normalize_duplex(dup_n)
                     if dup_f_norm and dup_n_norm and dup_f_norm != dup_n_norm:
                         nDup = str(DUP_NOTE_DIFF)
