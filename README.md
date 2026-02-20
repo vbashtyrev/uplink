@@ -4,6 +4,13 @@
 
 Скрипты для сверки и обновления данных интерфейсов в NetBox по данным с устройств (SSH / JSON-файл). Поддерживаются Arista и Juniper.
 
+**На чём проверялось / требования**
+
+- **Python** — 3.8+ (рекомендуется 3.10+).
+- **NetBox** — 4.x (REST API, pynetbox). Использовались поля интерфейсов (name, description, type, speed, duplex, mtu, tx_power, mode), MAC (dcim.mac-addresses), IP (ipam.ip_addresses, VRF), LAG/parent.
+- **Arista EOS** — вывод `show interfaces … | json`, `show interfaces … transceiver | json`; в т.ч. для VRF — `show vrf <name> | json`.
+- **Juniper Junos** — вывод `show interfaces descriptions | display json` (и fallback на `display xml`), `show interfaces <name> | display json`, `show lacp interfaces`, `show chassis hardware | display json`; конфиг `show configuration routing-instances <name> | display set` для списка интерфейсов в VRF.
+
 Виртуальное окружение создаётся в `.venv`.
 
 ---
@@ -26,7 +33,11 @@ export NETBOX_TOKEN="your-api-token"
 export SSH_PASSWORD="password-for-devices"
 ```
 
-Опционально: `SSH_USERNAME` (по умолчанию `admin`), `PARALLEL_DEVICES` (по умолчанию `6`), `SSH_HOST_SUFFIX`, `NETBOX_TAG`, `SSH_TIMEOUT`, `SSH_COMMAND_TIMEOUT` (сек). При «Network is unreachable» при том что `ssh DEVICE` из терминала работает — включите `USE_SSH_CONFIG=1`: скрипт будет брать HostName и User из `~/.ssh/config` (как при ручном `ssh DEVICE`). При ошибке SSH в лог выводится тип исключения и errno (например `TimeoutError`, `OSError [Errno 51]`), чтобы различать таймаут подключения и отсутствие маршрута.
+**Опциональные переменные**
+
+- `SSH_USERNAME` (по умолчанию `admin`), `PARALLEL_DEVICES` (по умолчанию `6`), `SSH_HOST_SUFFIX`, `NETBOX_TAG`, `SSH_TIMEOUT`, `SSH_COMMAND_TIMEOUT` (сек).
+- Если в терминале `ssh DEVICE` работает, а скрипт даёт «Network is unreachable» — задайте `USE_SSH_CONFIG=1`: скрипт возьмёт HostName и User из `~/.ssh/config` (как при ручном `ssh DEVICE`).
+- При ошибке SSH в лог выводится тип исключения и errno (например `TimeoutError`, `OSError [Errno 51]`), чтобы различать таймаут подключения и отсутствие маршрута.
 
 Без активации venv можно вызывать интерпретатор напрямую:
 
