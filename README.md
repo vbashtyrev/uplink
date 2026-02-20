@@ -48,7 +48,19 @@ export SSH_PASSWORD="password-for-devices"
 
 **Устройства и интерфейсы в режиме статистики (при `--fetch`):** устройства берутся из NetBox по тегу (переменная `NETBOX_TAG`), учитываются платформы Arista EOS и Juniper (Junos). Интерфейсы — только те, у которых в описании (description) есть строка `Uplink:`.
 
-**Что собирается по каждому интерфейсу (при `--fetch`):** для **Arista** — команды `show interfaces <name> | json | no-more` и `show interfaces <name> transceiver | json | no-more`. Для **Juniper** — uplink'и с link up и только unit 0 (upstream; интерфейсы с unit не 0 — VLAN, пока не проверяются). Список интерфейсов с описаниями запрашивается как `show interfaces descriptions | display json`; на части Junos в JSON встречаются дубликаты ключей (парсер оставляет только последнее значение), поэтому при нуле uplink'ов выполняется fallback на `display xml` — все интерфейсы из XML учитываются. Для агрегатов (ae*.0) — члены LAG через `show lacp interfaces`, по каждому физическому интерфейсу `show interfaces <name> | display json`, модель SFP из `show chassis hardware | display json` (сопоставление слот FPC/PIC/port по имени интерфейса). Duplex на 10G/40G/100G в Junos часто не выводится — при bandwidth ≥ 10 Gbps подставляется `full`. Общий набор полей в выводе (name, description, bandwidth, mtu, physicalAddress и т.д.) совпадает с Arista. Таблица полей ниже — по Arista:
+**Что собирается по каждому интерфейсу (при `--fetch`):**
+
+- **Arista**
+  - Список интерфейсов: по описаниям (интерфейсы с `Uplink:` в description).
+  - По каждому uplink: `show interfaces <name> | json | no-more`, `show interfaces <name> transceiver | json | no-more`.
+  - При `forwardingModel=bridged`: дополнительно `show interfaces <name> switchport configuration source | json | no-more`.
+- **Juniper**
+  - Список: `show interfaces descriptions | display json`. При нуле uplink'ов — fallback на `display xml` (на части Junos в JSON дубликаты ключей, парсер оставляет последнее значение).
+  - Учитываются только link up и **unit 0** (upstream; unit ≠ 0 — VLAN, пока не проверяются).
+  - Агрегаты (ae*.0): члены LAG — `show lacp interfaces <aeN>`, по каждому физическому — `show interfaces <name> | display json`; модель SFP — `show chassis hardware | display json` (слот FPC/PIC/port по имени интерфейса).
+  - Duplex: на 10G/40G/100G в Junos часто не выводится → при bandwidth ≥ 10 Gbps подставляется `full`.
+
+Набор полей в выводе (name, description, bandwidth, mtu, physicalAddress и т.д.) совпадает у Arista и Juniper. **Таблица полей** (источники указаны для Arista):
 
 | Поле | Источник | Описание |
 |------|----------|----------|
