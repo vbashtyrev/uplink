@@ -501,8 +501,17 @@ def main():
         or args.mac or args.mtu or args.tx_power or args.forwarding_model
     )
     if not has_checks and not args.apply:
-        print("Укажите хотя бы одну проверку: --description, --mediatype, --all и т.д. См. --help.", file=sys.stderr)
-        return 1
+        args.intname = True
+        args.description = True
+        args.mediatype = True
+        args.bandwidth = True
+        args.duplex = True
+        args.mac = True
+        args.mtu = True
+        args.tx_power = True
+        args.forwarding_model = True
+        args.show_change = True
+        args.hide_no_diff_cols = True
 
     url = os.environ.get("NETBOX_URL")
     token = os.environ.get("NETBOX_TOKEN")
