@@ -183,6 +183,9 @@ IP_NOTE_DIFF = 17      # ipv4/ipv6 адреса (файл) и привязанн
 # Код для LAG / Related Interfaces (18)
 LAG_NOTE_DIFF = 18     # aggregateInterface (файл) и lag (Netbox) различаются
 
+# Код для Parent interface (19)
+PARENT_NOTE_DIFF = 19  # aggregateInterface (файл) и parent (Netbox) различаются у логических интерфейсов
+
 # Общая легенда для одной таблицы
 ALL_LEGEND = {
     **NOTE_LEGEND,
@@ -200,6 +203,7 @@ ALL_LEGEND = {
     FWD_NOTE_DIFF: "forwardingModel (dry-ssh) и mode (Netbox) различаются",
     IP_NOTE_DIFF: "IPv4/IPv6 адреса (файл) и привязанные к интерфейсу в Netbox различаются",
     LAG_NOTE_DIFF: "aggregateInterface (файл) и LAG / Related Interfaces (Netbox) различаются",
+    PARENT_NOTE_DIFF: "aggregateInterface (файл) и Parent interface (Netbox) различаются у логических интерфейсов",
 }
 
 
@@ -703,6 +707,11 @@ def main():
         help="LAG / Related Interfaces: aggregateInterface (файл) vs lag (Netbox) у физических интерфейсов",
     )
     g_checks.add_argument(
+        "--parent",
+        action="store_true",
+        help="Parent interface: aggregateInterface (файл) vs parent (Netbox) у логических интерфейсов (ae5.0 → ae5)",
+    )
+    g_checks.add_argument(
         "--all",
         action="store_true",
         dest="all_checks",
@@ -762,12 +771,13 @@ def main():
         args.forwarding_model = True
         args.ip_address = True
         args.lag = True
+        args.parent = True
     if args.no_mt_ref:
         args.mt_ref = None
     # При одном --hide-ok-hosts без проверок включаем все проверки (чтобы был вывод списка и статистики)
     if args.hide_ok_hosts and not (
         args.intname or args.description or args.mediatype or args.bandwidth or args.duplex
-        or args.mac or args.mtu or args.tx_power or args.forwarding_model or args.ip_address or args.lag
+        or args.mac or args.mtu or args.tx_power or args.forwarding_model or args.ip_address or args.lag or args.parent
     ):
         args.intname = True
         args.description = True
@@ -780,10 +790,11 @@ def main():
         args.forwarding_model = True
         args.ip_address = True
         args.lag = True
+        args.parent = True
 
     has_checks = (
         args.intname or args.description or args.mediatype or args.bandwidth or args.duplex
-        or args.mac or args.mtu or args.tx_power or args.forwarding_model or args.ip_address or args.lag
+        or args.mac or args.mtu or args.tx_power or args.forwarding_model or args.ip_address or args.lag or args.parent
     )
     show_change_requested = args.show_change
     if not has_checks and not args.apply:
@@ -798,6 +809,7 @@ def main():
         args.forwarding_model = True
         args.ip_address = True
         args.lag = True
+        args.parent = True
         args.show_change = True
         # Не скрывать колонки без расхождений, если пользователь явно запросил --show-change
         args.hide_no_diff_cols = not show_change_requested
@@ -863,7 +875,7 @@ def main():
               "сверка может показывать расхождения из-за разного написания (файл vs Netbox).", file=sys.stderr, flush=True)
 
     out = {}
-    if args.intname or args.description or args.mediatype or (args.show_change and mt_ref_values) or args.bandwidth or args.duplex or args.mac or args.mtu or args.tx_power or args.forwarding_model or args.ip_address or args.lag:
+    if args.intname or args.description or args.mediatype or (args.show_change and mt_ref_values) or args.bandwidth or args.duplex or args.mac or args.mtu or args.tx_power or args.forwarding_model or args.ip_address or args.lag or args.parent:
         # Один проход: строки (..., mtToSet=10, ...); индексы 26-30 — *ToSet при --show-change
         rows = []
         note_codes_used = set()
@@ -1140,6 +1152,19 @@ def main():
                         if lag_f != lag_n:
                             nLag = str(LAG_NOTE_DIFF)
                             note_codes_used.add(LAG_NOTE_DIFF)
+                parent_f = ""
+                parent_n = ""
+                nParent = ""
+                if args.parent and is_logical_unit:
+                    parent_f = (entry.get("aggregateInterface") or "").strip()
+                    if nb_iface is not None:
+                        parent_obj = getattr(nb_iface, "parent", None)
+                        if parent_obj is not None:
+                            parent_n = getattr(parent_obj, "name", None) or str(parent_obj)
+                        parent_n = (parent_n or "").strip()
+                    if parent_f != parent_n:
+                        nParent = str(PARENT_NOTE_DIFF)
+                        note_codes_used.add(PARENT_NOTE_DIFF)
                 # значения «что подставим» для --show-change — только когда есть расхождение (есть что применять)
                 desc_to_set = desc_f if (args.show_change and args.description and nD) else ""
                 speed_to_set = (bw_f // 1000) if (args.show_change and args.bandwidth and bw_f is not None and nB) else ""
@@ -1178,6 +1203,14 @@ def main():
                             cur_lag_id = cur_lag if isinstance(cur_lag, (int, type(None))) else getattr(cur_lag, "id", None)
                             if cur_lag_id != getattr(nb_lag, "id", None):
                                 updates["lag"] = nb_lag.id
+                    # Parent interface: логические юниты (ae5.0) должны ссылаться на родительский LAG (ae5)
+                    elif aggregate_name and is_logical_unit:
+                        nb_parent_iface = nb_by_iface_name.get(aggregate_name)
+                        if nb_parent_iface:
+                            cur_parent = getattr(nb_iface, "parent", None)
+                            cur_parent_id = cur_parent if isinstance(cur_parent, (int, type(None))) else getattr(cur_parent, "id", None)
+                            if cur_parent_id != getattr(nb_parent_iface, "id", None):
+                                updates["parent"] = nb_parent_iface.id
                     if updates:
                         try:
                             nb_iface.update(updates)
@@ -1236,6 +1269,11 @@ def main():
                         mode_val = _fwd_file_to_netbox_mode(fwd_raw)
                         if mode_val is not None:
                             create_data["mode"] = mode_val
+                    # Parent interface для логического юнита (ae5.0 → ae5)
+                    if is_logical_unit:
+                        parent_name = (entry.get("aggregateInterface") or "").strip()
+                        if parent_name and parent_name in nb_by_iface_name:
+                            create_data["parent"] = nb_by_iface_name[parent_name].id
                     try:
                         nb_iface = nb.dcim.interfaces.create(**create_data)
                         nb_by_iface_name[int_name] = nb_iface  # чтобы второй проход (LAG) и последующие записи видели новый интерфейс
@@ -1247,7 +1285,7 @@ def main():
                     except Exception as e:
                         print("Ошибка создания {} {}: {} — {}".format(dev_name, int_name, create_data, e), file=sys.stderr, flush=True)
                 mt_to_set_display = mt_to_set if nM else ""
-                rows.append((dev_name, int_name, nb_name, note, desc_f, desc_n, nD, mt_f, mt_n, nM, mt_to_set_display, bw_f, speed_n, nB, dup_f_out, dup_n_out, nDup, mac_f, mac_n, nMac, mtu_f, mtu_n, nMtu, txp_f_out, txp_n_out, nTxp, desc_to_set, speed_to_set, dup_to_set, mtu_to_set_display, txp_to_set, fwd_f, fwd_n, nFwd, fwd_to_set, ip_f, ip_n, ip_vrf_f_display, ip_vrf_n_display, nIp, lag_f, lag_n, nLag))
+                rows.append((dev_name, int_name, nb_name, note, desc_f, desc_n, nD, mt_f, mt_n, nM, mt_to_set_display, bw_f, speed_n, nB, dup_f_out, dup_n_out, nDup, mac_f, mac_n, nMac, mtu_f, mtu_n, nMtu, txp_f_out, txp_n_out, nTxp, desc_to_set, speed_to_set, dup_to_set, mtu_to_set_display, txp_to_set, fwd_f, fwd_n, nFwd, fwd_to_set, ip_f, ip_n, ip_vrf_f_display, ip_vrf_n_display, nIp, lag_f, lag_n, nLag, parent_f, parent_n, nParent))
             # Второй проход: выставить LAG (Related Interfaces) у физических интерфейсов — при создании физического LAG мог ещё не существовать
             if args.apply and args.intname:
                 for entry in payload:
@@ -1271,6 +1309,29 @@ def main():
                             print("{} {}: привязан к LAG {}".format(dev_name, int_name, aggregate_name), flush=True)
                         except Exception as e:
                             print("Ошибка привязки {} {} к LAG {}: {}".format(dev_name, int_name, aggregate_name, e), file=sys.stderr, flush=True)
+            # Второй проход: выставить Parent у логических интерфейсов — при создании logical parent (LAG) мог ещё не существовать
+            if args.apply and args.intname:
+                for entry in payload:
+                    if not isinstance(entry, dict):
+                        continue
+                    int_name = entry.get("name")
+                    aggregate_name = (entry.get("aggregateInterface") or "").strip()
+                    if not int_name or not aggregate_name:
+                        continue
+                    if not (entry.get("isLogical") or (int_name and "." in str(int_name) and str(int_name).startswith("ae"))):
+                        continue
+                    _, nb_logical = resolve_interface(int_name, nb_by_iface_name)
+                    nb_parent_iface = nb_by_iface_name.get(aggregate_name) if aggregate_name else None
+                    if not nb_logical or not nb_parent_iface:
+                        continue
+                    cur_parent = getattr(nb_logical, "parent", None)
+                    cur_parent_id = cur_parent if isinstance(cur_parent, (int, type(None))) else getattr(cur_parent, "id", None)
+                    if cur_parent_id != getattr(nb_parent_iface, "id", None):
+                        try:
+                            nb_logical.update({"parent": nb_parent_iface.id})
+                            print("{} {}: parent установлен на {}".format(dev_name, int_name, aggregate_name), flush=True)
+                        except Exception as e:
+                            print("Ошибка установки parent {} {} → {}: {}".format(dev_name, int_name, aggregate_name, e), file=sys.stderr, flush=True)
         if skipped_no_netbox:
             print("Пропущено (устройство есть в файле, но нет в Netbox по тегу): {}.".format(", ".join(skipped_no_netbox)))
         if skipped_not_list:
@@ -1337,8 +1398,8 @@ def main():
     return 0
 
 
-# Индексы колонок примечаний в строке (note, nD, nM, nB, nDup, nMac, nMtu, nTxp, nFwd, nIp, nLag) — для определения «есть расхождение»
-ROW_NOTE_INDICES = (3, 6, 9, 13, 16, 19, 22, 25, 33, 39, 42)
+# Индексы колонок примечаний в строке (note, nD, nM, nB, nDup, nMac, nMtu, nTxp, nFwd, nIp, nLag, nParent) — для определения «есть расхождение»
+ROW_NOTE_INDICES = (3, 6, 9, 13, 16, 19, 22, 25, 33, 39, 42, 45)
 
 
 def _row_has_diff(row):
@@ -1350,7 +1411,7 @@ def _row_has_diff(row):
 
 
 # Заголовки колонок-примечаний (nD, nM, nB, …) — для --hide-empty-note-cols
-NOTE_COL_HEADERS = {"nD", "nM", "nB", "nDup", "nMac", "nMtu", "nTxp", "nFwd", "nIp", "nLag"}
+NOTE_COL_HEADERS = {"nD", "nM", "nB", "nDup", "nMac", "nMtu", "nTxp", "nFwd", "nIp", "nLag", "nParent"}
 
 # Группы колонок по проверке: при пустом примечании во всех строках скрываем всю группу (--hide-no-diff-cols)
 DIFF_GROUPS_BY_NOTE = {
@@ -1364,6 +1425,7 @@ DIFF_GROUPS_BY_NOTE = {
     "nFwd": {"fwdF", "fwdN", "nFwd", "fwdToSet"},
     "nIp": {"ipF", "ipN", "ipVrfF", "ipVrfN", "nIp"},
     "nLag": {"lagF", "lagN", "nLag"},
+    "nParent": {"parentF", "parentN", "nParent"},
 }
 
 
@@ -1436,6 +1498,8 @@ def _build_col_spec(args):
         cols.extend([("ipF", 35, 60), ("ipN", 36, 60), ("ipVrfF", 37, 12), ("ipVrfN", 38, 12), ("nIp", 39, 999)])
     if args.lag:
         cols.extend([("lagF", 40, 12), ("lagN", 41, 12), ("nLag", 42, 999)])
+    if args.parent:
+        cols.extend([("parentF", 43, 12), ("parentN", 44, 12), ("nParent", 45, 999)])
     return cols
 
 
