@@ -4,13 +4,6 @@
 
 Скрипты для сверки и обновления данных интерфейсов в NetBox по данным с устройств (SSH / JSON-файл). Поддерживаются Arista и Juniper.
 
-**На чём проверялось / требования**
-
-- **Python** — 3.8+ (рекомендуется 3.10+).
-- **NetBox** — 4.x (REST API, pynetbox). Использовались поля интерфейсов (name, description, type, speed, duplex, mtu, tx_power, mode), MAC (dcim.mac-addresses), IP (ipam.ip_addresses, VRF), LAG/parent.
-- **Arista EOS** — вывод `show interfaces … | json`, `show interfaces … transceiver | json`; в т.ч. для VRF — `show vrf <name> | json`.
-- **Juniper Junos** — вывод `show interfaces descriptions | display json` (и fallback на `display xml`), `show interfaces <name> | display json`, `show lacp interfaces`, `show chassis hardware | display json`; конфиг `show configuration routing-instances <name> | display set` для списка интерфейсов в VRF.
-
 Виртуальное окружение создаётся в `.venv`.
 
 ---
