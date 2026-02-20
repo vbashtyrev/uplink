@@ -669,6 +669,7 @@ def get_arista_uplink_stats(host, username, password, timeout=45, command_timeou
         if log:
             log(msg)
 
+    start_time = time.monotonic()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
@@ -683,8 +684,10 @@ def get_arista_uplink_stats(host, username, password, timeout=45, command_timeou
         )
         _log("SSH: подключено")
     except (socket.timeout, paramiko.SSHException, OSError) as e:
+        elapsed = time.monotonic() - start_time
         _log(_format_ssh_connect_error(host, e))
-        return None, str(e)
+        _log("SSH: с начала попытки прошло {:.0f} с".format(elapsed))
+        return None, "{} (через {:.0f} с)".format(str(e), elapsed)
 
     channel = client.invoke_shell(width=256)
     channel.settimeout(15)
@@ -702,9 +705,11 @@ def get_arista_uplink_stats(host, username, password, timeout=45, command_timeou
     send("show interfaces description | json | no-more\r\n")
     desc_data = read_until_json_and_prompt(channel, timeout=command_timeout)
     if not desc_data:
+        elapsed = time.monotonic() - start_time
         client.close()
         _log("SSH: не удалось получить show interfaces description | json | no-more")
-        return None, "не удалось получить show interfaces description | json"
+        _log("SSH: с начала попытки прошло {:.0f} с".format(elapsed))
+        return None, "не удалось получить show interfaces description | json (через {:.0f} с)".format(elapsed)
 
     uplinks = parse_arista_uplinks(desc_data)
     if not uplinks:
@@ -953,6 +958,7 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
         if log:
             log(msg)
 
+    start_time = time.monotonic()
     debug = os.environ.get("DEBUG_JUNIPER_UPLINKS", "").strip().lower() in ("1", "true", "yes")
     def _dbg(msg):
         if debug and log:
@@ -972,8 +978,10 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
         )
         _log("SSH: подключено")
     except (socket.timeout, paramiko.SSHException, OSError) as e:
+        elapsed = time.monotonic() - start_time
         _log(_format_ssh_connect_error(host, e))
-        return None, str(e)
+        _log("SSH: с начала попытки прошло {:.0f} с".format(elapsed))
+        return None, "{} (через {:.0f} с)".format(str(e), elapsed)
 
     channel = client.invoke_shell(width=256)
     channel.settimeout(15)
@@ -991,9 +999,11 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
     send("show interfaces descriptions | display json | no-more\r\n")
     desc_data = read_until_json_and_prompt(channel, timeout=command_timeout)
     if not desc_data:
+        elapsed = time.monotonic() - start_time
         client.close()
         _log("SSH: не удалось получить show interfaces descriptions | display json")
-        return None, "не удалось получить show interfaces descriptions | display json"
+        _log("SSH: с начала попытки прошло {:.0f} с".format(elapsed))
+        return None, "не удалось получить show interfaces descriptions | display json (через {:.0f} с)".format(elapsed)
 
     uplinks = parse_juniper_uplinks(desc_data, require_link_up=True)
     _dbg("Шаг 1 (JSON): parse_juniper_uplinks(require_link_up=True) вернул {} записей".format(len(uplinks)))
@@ -1028,6 +1038,7 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
 
     _log("SSH: найдено uplink-интерфейсов (link up): {}".format(len(uplinks)))
     result = []
+    aggregates_added = set()
 
     for logical_name, desc in uplinks:
         is_physical = "." not in logical_name and not logical_name.startswith("ae")
@@ -1043,6 +1054,45 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
                 lacp_data = read_until_json_and_prompt(channel, timeout=command_timeout)
                 physical_names = _juniper_lacp_member_names(lacp_data) if lacp_data else []
             time.sleep(0.15)
+
+        # Один раз на агрегат: собрать данные show interfaces aeN и добавить строку с isLag для NetBox (LAG / Parent)
+        if aggregate_name and aggregate_name not in aggregates_added:
+            send("show interfaces {} | display json | no-more\r\n".format(aggregate_name))
+            time.sleep(0.2)
+            ae_data = read_until_json_and_prompt(channel, timeout=command_timeout)
+            ae_stats = {}
+            if ae_data:
+                ainfos = ae_data.get("interface-information") or []
+                if isinstance(ainfos, dict):
+                    ainfos = [ainfos]
+                for ainfo in ainfos:
+                    if not isinstance(ainfo, dict):
+                        continue
+                    phys_list = ainfo.get("physical-interface") or []
+                    if isinstance(phys_list, dict):
+                        phys_list = [phys_list]
+                    for aph in phys_list:
+                        if _juniper_data(aph.get("name")) == aggregate_name:
+                            ae_stats = _parse_juniper_phy_iface(aph)
+                            break
+            agg_row = {
+                "name": aggregate_name,
+                "description": (ae_stats.get("description") or "").strip() if ae_stats else "",
+                "mediaType": None,
+                "bandwidth": ae_stats.get("bandwidth") if ae_stats else None,
+                "duplex": ae_stats.get("duplex") if ae_stats else None,
+                "physicalAddress": ae_stats.get("physicalAddress") if ae_stats else None,
+                "mtu": ae_stats.get("mtu") if ae_stats else None,
+                "txPower": None,
+                "forwardingModel": ae_stats.get("forwardingModel") if ae_stats else None,
+            }
+            agg_row["physicalInterface"] = aggregate_name
+            agg_row["aggregateInterface"] = aggregate_name
+            agg_row["logicalInterface"] = logical_name
+            agg_row["isLag"] = True
+            result.append(agg_row)
+            aggregates_added.add(aggregate_name)
+            time.sleep(0.2)
 
         for physical_name in physical_names:
             send("show interfaces {} | display json | no-more\r\n".format(physical_name))

@@ -62,6 +62,7 @@ export SSH_PASSWORD="password-for-devices"
 | `mediaType` | show interfaces transceiver | Тип модуля/трансивера (например 10GBASE-SR) |
 | `txPower` | show interfaces transceiver | Мощность передачи (dBm) |
 | `switchportConfiguration` | show interfaces … switchport configuration source | Только при `forwardingModel=bridged`: объект `{ "config": ["switchport …", …], "source": "cli" }` |
+| `isLag` | только Juniper | Признак агрегата (ae): `true` для строки по `show interfaces aeN` (LAG). У таких строк `mediaType` и `txPower` всегда `null` (у LAG нет трансивера). В NetBox — тип «Link Aggregation Group (LAG)», в Related Interfaces задаётся parent. |
 
 Итоговая структура: в JSON ключ `devices`, значение — объект «имя устройства → список таких словарей по каждому uplink-интерфейсу». Этот JSON используется как вход для `netbox_checks.py`.
 
