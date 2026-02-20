@@ -137,6 +137,10 @@
       "label": "100GBASE-LR4 (100GE)"
     },
     {
+      "value": "100gbase-lr4",
+      "label": "QSFP-100GBASE-LR4"
+    },
+    {
       "value": "100gbase-sr1",
       "label": "100GBASE-SR1 (100GE)"
     },

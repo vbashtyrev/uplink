@@ -266,6 +266,71 @@ def _mac_both_filled(nb_iface):
     return display_ok and list_ok
 
 
+def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f):
+    """
+    Создать или найти запись MAC в NetBox, привязать к интерфейсу, выставить primary_mac_address.
+    Если MAC уже есть, но привязан к другому интерфейсу — переносим на текущий (assigned_object_id).
+    mac_f — значение physicalAddress из файла.
+    """
+    if not mac_f or not nb_iface:
+        return
+    mac_netbox = _mac_netbox_format(mac_f)
+    if not mac_netbox:
+        return
+    try:
+        existing = list(nb.dcim.mac_addresses.filter(mac_address=mac_netbox))
+        if existing:
+            rec = existing[0]
+            url = getattr(rec, "url", None) or getattr(rec, "display", rec)
+            mac_id = getattr(rec, "id", None)
+            current_assigned_id = getattr(rec, "assigned_object_id", None)
+            if current_assigned_id is not None and current_assigned_id != nb_iface.id:
+                try:
+                    # NetBox не даёт переназначить MAC, пока он primary на старом интерфейсе — сначала сбрасываем
+                    old_iface = nb.dcim.interfaces.get(current_assigned_id)
+                    primary = getattr(old_iface, "primary_mac_address", None) if old_iface else None
+                    primary_id = primary if isinstance(primary, (int, type(None))) else getattr(primary, "id", None)
+                    if old_iface is not None and primary_id == mac_id:
+                        old_iface.update({"primary_mac_address": None})
+                        print("MAC {} {} {}: сброшен primary на старом интерфейсе (id={})".format(dev_name, iface_display_name, mac_netbox, current_assigned_id), flush=True)
+                    setattr(rec, "assigned_object_type", "dcim.interface")
+                    setattr(rec, "assigned_object_id", nb_iface.id)
+                    rec.save()
+                    print("MAC {} {} {}: перенесён на интерфейс {} — {}".format(dev_name, iface_display_name, mac_netbox, iface_display_name, url), flush=True)
+                except Exception as e_move:
+                    print("Ошибка переноса MAC {} {} {} на интерфейс: {} — {}".format(dev_name, iface_display_name, mac_netbox, url, e_move), file=sys.stderr, flush=True)
+                    return
+            elif current_assigned_id is None:
+                try:
+                    setattr(rec, "assigned_object_type", "dcim.interface")
+                    setattr(rec, "assigned_object_id", nb_iface.id)
+                    rec.save()
+                    print("MAC {} {} {}: привязан к интерфейсу — {}".format(dev_name, iface_display_name, mac_netbox, url), flush=True)
+                except Exception as e_bind:
+                    print("Ошибка привязки MAC {} {} {}: {} — {}".format(dev_name, iface_display_name, mac_netbox, url, e_bind), file=sys.stderr, flush=True)
+                    return
+            else:
+                print("MAC {} {} {}: уже в Netbox на этом интерфейсе — {}".format(dev_name, iface_display_name, mac_netbox, url), flush=True)
+        else:
+            created = nb.dcim.mac_addresses.create(
+                mac_address=mac_netbox,
+                assigned_object_type="dcim.interface",
+                assigned_object_id=nb_iface.id,
+            )
+            rec = created
+            url = getattr(created, "url", None) or getattr(created, "display", created)
+            print("MAC {} {} {}: создан — {}".format(dev_name, iface_display_name, mac_netbox, url), flush=True)
+        mac_id = getattr(rec, "id", None)
+        if mac_id is not None:
+            try:
+                nb_iface.update({"primary_mac_address": mac_id})
+                print("Обновлено {} {}: primary_mac_address={}".format(dev_name, iface_display_name, mac_id), flush=True)
+            except Exception as e2:
+                print("Ошибка установки primary_mac_address {} {}: {} — {}".format(dev_name, iface_display_name, mac_id, e2), file=sys.stderr, flush=True)
+    except Exception as e:
+        print("Ошибка MAC {} {} {}: {} — {}".format(dev_name, iface_display_name, mac_netbox, e), file=sys.stderr, flush=True)
+
+
 def load_mt_ref(path):
     """
     Загрузить справочник типов интерфейсов из JSON (формат netbox_interface_types.json).
@@ -356,8 +421,8 @@ def main():
     g_in.add_argument(
         "--platform",
         choices=("arista", "juniper", "all"),
-        default="arista",
-        help="Платформа в NetBox: arista (по умолчанию), juniper или all",
+        default="all",
+        help="Платформа в NetBox: arista, juniper или all (по умолчанию — все)",
     )
     # --- Проверки (какие поля сверять) ---
     g_checks = parser.add_argument_group("Проверки (какие поля сверять)")
@@ -562,7 +627,8 @@ def main():
 
     mt_ref_values = None
     mt_ref_list = None
-    if args.mediatype and args.mt_ref:
+    # Справочник типов нужен при сверке mediatype и при создании интерфейсов (--apply --intname), чтобы подставить slug NetBox
+    if (args.mediatype or (args.apply and args.intname)) and args.mt_ref:
         mt_ref_values, mt_ref_list, ref_err = load_mt_ref(args.mt_ref)
         if ref_err:
             print("Справочник типов (--mt-ref): {}.".format(ref_err), flush=True)
@@ -823,35 +889,54 @@ def main():
                             print("Ошибка обновления {} {}: {} — {}".format(dev_name, nb_name or int_name, updates, e), file=sys.stderr, flush=True)
                     # MAC в Netbox — отдельная сущность (dcim.mac-addresses); затем на интерфейсе ставим primary_mac_address
                     if args.mac and (nMac or (mac_f and not mac_n)) and nb_iface is not None:
-                        mac_netbox = _mac_netbox_format(mac_f)
-                        if not mac_netbox:
+                        _apply_mac_to_interface(nb, dev_name, nb_name or int_name, nb_iface, mac_f)
+                elif args.apply and args.intname and note_code == NOTE_MISSING:
+                    # Интерфейс в NetBox не найден — создаём и сразу заполняем все поля из файла
+                    create_data = {"device": device.id, "name": int_name}
+                    desc_raw = (entry.get("description") or "").strip()
+                    if desc_raw:
+                        create_data["description"] = desc_raw
+                    media_from_file = (entry.get("mediaType") or "").strip()
+                    mt_raw = mt_to_set or media_from_file
+                    if mt_ref_values and mt_ref_list and media_from_file:
+                        mt_resolved = _mt_to_value(media_from_file, mt_ref_values, mt_ref_list)
+                        if mt_resolved and mt_resolved in mt_ref_values:
+                            mt_raw = mt_resolved
+                    if mt_raw:
+                        create_data["type"] = mt_raw
+                    bw_raw = entry.get("bandwidth")
+                    if bw_raw is not None:
+                        create_data["speed"] = int(bw_raw) // 1000  # bps -> Kbps
+                    dup_raw = (entry.get("duplex") or "").strip()
+                    dup_val = _normalize_duplex(dup_raw) or (dup_raw if dup_raw else None)
+                    if not dup_val and bw_raw is not None and int(bw_raw) >= 10_000_000_000:
+                        dup_val = "full"
+                    if dup_val:
+                        create_data["duplex"] = dup_val
+                    mtu_raw = entry.get("mtu")
+                    if mtu_raw is not None and mtu_raw != "":
+                        try:
+                            create_data["mtu"] = int(mtu_raw)
+                        except (TypeError, ValueError):
                             pass
-                        else:
-                            try:
-                                existing = list(nb.dcim.mac_addresses.filter(mac_address=mac_netbox))
-                                if existing:
-                                    rec = existing[0]
-                                    url = getattr(rec, "url", None) or getattr(rec, "display", rec)
-                                    print("MAC {} {} {}: уже в Netbox — {}".format(dev_name, nb_name or int_name, mac_netbox, url), flush=True)
-                                else:
-                                    created = nb.dcim.mac_addresses.create(
-                                        mac_address=mac_netbox,
-                                        assigned_object_type="dcim.interface",
-                                        assigned_object_id=nb_iface.id,
-                                    )
-                                    rec = created
-                                    url = getattr(created, "url", None) or getattr(created, "display", created)
-                                    print("MAC {} {} {}: создан — {}".format(dev_name, nb_name or int_name, mac_netbox, url), flush=True)
-                                # Заполнить поле интерфейса: в NetBox 4 это primary_mac_address (ID записи MAC)
-                                mac_id = getattr(rec, "id", None)
-                                if mac_id is not None:
-                                    try:
-                                        nb_iface.update({"primary_mac_address": mac_id})
-                                        print("Обновлено {} {}: primary_mac_address={}".format(dev_name, nb_name or int_name, mac_id), flush=True)
-                                    except Exception as e2:
-                                        print("Ошибка установки primary_mac_address {} {}: {} — {}".format(dev_name, nb_name or int_name, mac_id, e2), file=sys.stderr, flush=True)
-                            except Exception as e:
-                                print("Ошибка MAC {} {} {}: {} — {}".format(dev_name, nb_name or int_name, mac_netbox, e), file=sys.stderr, flush=True)
+                    txp_raw = entry.get("txPower")
+                    if txp_raw is not None:
+                        try:
+                            create_data["tx_power"] = int(round(float(txp_raw)))
+                        except (TypeError, ValueError):
+                            pass
+                    fwd_raw = (entry.get("forwardingModel") or "").strip()
+                    if fwd_raw:
+                        mode_val = _fwd_file_to_netbox_mode(fwd_raw)
+                        if mode_val is not None:
+                            create_data["mode"] = mode_val
+                    try:
+                        nb_iface = nb.dcim.interfaces.create(**create_data)
+                        print("Создан интерфейс {} {}: {}".format(dev_name, int_name, list(create_data.keys())), flush=True)
+                        if args.mac and mac_f:
+                            _apply_mac_to_interface(nb, dev_name, int_name, nb_iface, mac_f)
+                    except Exception as e:
+                        print("Ошибка создания {} {}: {} — {}".format(dev_name, int_name, create_data, e), file=sys.stderr, flush=True)
                 rows.append((dev_name, int_name, nb_name, note, desc_f, desc_n, nD, mt_f, mt_n, nM, mt_to_set, bw_f, speed_n, nB, dup_f_out, dup_n_out, nDup, mac_f, mac_n, nMac, mtu_f, mtu_n, nMtu, txp_f_out, txp_n_out, nTxp, desc_to_set, speed_to_set, dup_to_set, mtu_to_set, txp_to_set, fwd_f, fwd_n, nFwd, fwd_to_set))
         if skipped_no_netbox:
             print("Пропущено (устройство есть в файле, но нет в Netbox по тегу): {}.".format(", ".join(skipped_no_netbox)))
