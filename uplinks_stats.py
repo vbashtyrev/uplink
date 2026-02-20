@@ -5,9 +5,9 @@
 1) Режим отчёта (--report): устройства по тегу из NetBox, таблица NetBox vs SSH
    (interface + description). Поддержка Juniper и Arista по platform.name.
 
-2) Режим статистики (по умолчанию): сбор по Arista (устройства по тегу), для каждого
-   uplink'а — show interfaces, transceiver, опционально switchport; вывод таблица или JSON.
-   Ключ --from-file: чтение готового JSON без SSH.
+2) Режим статистики: по умолчанию чтение из файла; с --fetch — опрос по SSH устройств
+   Arista и Juniper (по тегу из NetBox). Для каждого uplink'а собираются поля в едином
+   формате (name, description, bandwidth, mtu и т.д.). Вывод — таблица или JSON.
 
 Переменные: NETBOX_URL, NETBOX_TOKEN, SSH_USERNAME, SSH_PASSWORD, SSH_HOST_SUFFIX,
 PARALLEL_DEVICES, NETBOX_TAG. Опционально: DEBUG_SSH_JSON=1 (режим отчёта).
@@ -53,6 +53,37 @@ def _juniper_iface_name_desc(iface_dict):
     name = (name_list[0].get("data") or "").strip()
     desc = (desc_list[0].get("data") or "").strip()
     return name, desc
+
+
+def _juniper_data(field):
+    """Из поля Junos (список с dict с ключом data) вытащить строку или число."""
+    if not field:
+        return None
+    if isinstance(field, list) and field and isinstance(field[0], dict):
+        val = field[0].get("data")
+        if val is not None:
+            s = str(val).strip()
+            return s if s else None
+    return None
+
+
+def _juniper_speed_to_bps(speed_str):
+    """Junos speed (например 1000mbps, 10gbps) в bps. Возврат int или None."""
+    if not speed_str:
+        return None
+    s = str(speed_str).strip().lower().replace(" ", "")
+    try:
+        if s.endswith("gbps"):
+            return int(float(s[:-4]) * 1e9)
+        if s.endswith("mbps"):
+            return int(float(s[:-4]) * 1e6)
+        if s.endswith("kbps"):
+            return int(float(s[:-4]) * 1e3)
+        if s.endswith("bps") or s.isdigit():
+            return int(float(s.replace("bps", "") or s))
+    except (ValueError, TypeError):
+        pass
+    return None
 
 
 def parse_juniper_uplinks(json_data):
@@ -464,14 +495,125 @@ def get_arista_uplink_stats(host, username, password, timeout=45, command_timeou
     return result, None
 
 
+def _parse_juniper_phy_iface(ph):
+    """Из physical-interface Junos извлечь поля в виде dict (те же ключи, что у Arista)."""
+    name = _juniper_data(ph.get("name"))
+    desc = _juniper_data(ph.get("description")) or ""
+    speed_str = _juniper_data(ph.get("speed"))
+    bandwidth = _juniper_speed_to_bps(speed_str)
+    mtu_raw = _juniper_data(ph.get("mtu"))
+    mtu = int(mtu_raw) if mtu_raw and str(mtu_raw).isdigit() else None
+    mac = _juniper_data(ph.get("current-physical-address"))
+    # link-type в Junos: Full-Duplex, Half-Duplex
+    duplex_raw = _juniper_data(ph.get("link-type"))
+    duplex = None
+    if duplex_raw:
+        d = str(duplex_raw).lower()
+        if "full" in d:
+            duplex = "full"
+        elif "half" in d:
+            duplex = "half"
+        else:
+            duplex = duplex_raw
+    return {
+        "name": name or "",
+        "description": desc,
+        "mediaType": None,
+        "bandwidth": bandwidth,
+        "duplex": duplex,
+        "physicalAddress": mac,
+        "mtu": mtu,
+        "txPower": None,
+        "forwardingModel": None,
+    }
+
+
+def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeout=90, log=None):
+    """
+    SSH к Juniper (Junos): список интерфейсов с "Uplink:" в description,
+    для каждого show interfaces <name> detail | display json. Возврат: список dict (тот же формат, что Arista) или (None, error).
+    """
+    def _log(msg):
+        if log:
+            log(msg)
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        _log("SSH: подключение к {}...".format(host))
+        client.connect(
+            host,
+            username=username,
+            password=password,
+            timeout=timeout,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+        _log("SSH: подключено")
+    except (socket.timeout, paramiko.SSHException, OSError) as e:
+        _log("SSH: ошибка — {}".format(e))
+        return None, str(e)
+
+    channel = client.invoke_shell(width=256)
+    channel.settimeout(15)
+    send = channel.send
+
+    _ = read_until(channel, [">", "#", ":", "login", "Login", "Password", "password"], max_wait=20)
+    send(username + "\r\n")
+    time.sleep(0.5)
+    out_after_user = read_until(channel, [">", "#", "password", "Password", "login", "Login"], max_wait=20)
+    if "password" in out_after_user.lower() or "Password" in out_after_user:
+        send(password + "\r\n")
+        time.sleep(0.8)
+    read_until(channel, [">", "#"], max_wait=25)
+
+    send("show interfaces descriptions | display json | no-more\r\n")
+    desc_data = read_until_json_and_prompt(channel, timeout=command_timeout)
+    if not desc_data:
+        client.close()
+        _log("SSH: не удалось получить show interfaces descriptions | display json")
+        return None, "не удалось получить show interfaces descriptions | display json"
+
+    uplinks = parse_juniper_uplinks(desc_data)
+    if not uplinks:
+        client.close()
+        _log("SSH: uplink-интерфейсов не найдено")
+        return [], None
+
+    _log("SSH: найдено uplink-интерфейсов: {}".format(len(uplinks)))
+    result = []
+
+    for iface_name, desc in uplinks:
+        send("show interfaces {} detail | display json | no-more\r\n".format(iface_name))
+        time.sleep(0.2)
+        detail_data = read_until_json_and_prompt(channel, timeout=command_timeout)
+        row = {"name": iface_name, "description": desc, "mediaType": None, "bandwidth": None, "duplex": None, "physicalAddress": None, "mtu": None, "txPower": None, "forwardingModel": None}
+        if detail_data:
+            infos = detail_data.get("interface-information") or []
+            if isinstance(infos, dict):
+                infos = [infos]
+            for info in infos:
+                for ph in info.get("physical-interface") or []:
+                    n = _juniper_data(ph.get("name"))
+                    if n and n == iface_name:
+                        row = _parse_juniper_phy_iface(ph)
+                        row["name"] = iface_name
+                        row["description"] = desc
+                        break
+                else:
+                    continue
+                break
+        result.append(row)
+        time.sleep(0.3)
+
+    client.close()
+    _log("SSH: собрано записей: {}".format(len(result)))
+    return result, None
+
+
 def process_one_arista(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print):
     """Обработать одно устройство Arista: SSH + сбор stats по uplinks."""
-    progress_print(device.name, "подключение и сбор uplink stats...")
-    platform_name = get_device_platform_name(device, nb)
-    if not is_arista_platform(platform_name):
-        progress_print(device.name, "пропуск (не Arista): {}".format(platform_name or "нет платформы"))
-        return device.name, None
-
+    progress_print(device.name, "подключение и сбор uplink stats (Arista)...")
     ssh_host = device.name + ssh_suffix
     log_cb = lambda msg: progress_print(device.name, msg)
     stats, err = get_arista_uplink_stats(ssh_host, ssh_user, ssh_pass, log=log_cb)
@@ -480,6 +622,30 @@ def process_one_arista(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_prin
         return device.name, {"error": err}
     progress_print(device.name, "готово ({} интерфейсов).".format(len(stats)))
     return device.name, stats
+
+
+def process_one_juniper(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print):
+    """Обработать одно устройство Juniper: SSH + сбор stats по uplinks."""
+    progress_print(device.name, "подключение и сбор uplink stats (Juniper)...")
+    ssh_host = device.name + ssh_suffix
+    log_cb = lambda msg: progress_print(device.name, msg)
+    stats, err = get_juniper_uplink_stats(ssh_host, ssh_user, ssh_pass, log=log_cb)
+    if err:
+        progress_print(device.name, "ошибка: {}".format(err))
+        return device.name, {"error": err}
+    progress_print(device.name, "готово ({} интерфейсов).".format(len(stats)))
+    return device.name, stats
+
+
+def process_one_device_stats(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print):
+    """Обработать одно устройство: по платформе вызвать Arista или Juniper сбор; иначе пропуск."""
+    platform_name = get_device_platform_name(device, nb)
+    if is_arista_platform(platform_name):
+        return process_one_arista(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print)
+    if is_juniper_platform(platform_name):
+        return process_one_juniper(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print)
+    progress_print(device.name, "пропуск (не Arista/Juniper): {}".format(platform_name or "нет платформы"))
+    return device.name, None
 
 
 def _str(v):
@@ -677,7 +843,7 @@ def netbox_error_message(e):
 def main():
     parser = argparse.ArgumentParser(description="Сбор и отчёт по uplink-интерфейсам (Arista, Juniper)")
     parser.add_argument("--report", action="store_true", help="Режим отчёта: таблица NetBox vs SSH по всем устройствам с тегом")
-    parser.add_argument("--fetch", action="store_true", help="Режим статистики: опросить устройства по SSH (иначе по умолчанию читается файл)")
+    parser.add_argument("--fetch", action="store_true", help="Режим статистики: опросить по SSH все устройства Arista и Juniper (иначе читается файл)")
     parser.add_argument("--json", action="store_true", help="Вывод в формате JSON (режим статистики)")
     parser.add_argument("--from-file", metavar="FILE", dest="from_file", help="Путь к JSON с devices (по умолчанию {})".format(DEFAULT_STATS_FILE))
     args = parser.parse_args()
@@ -709,7 +875,7 @@ def main():
         ssh_suffix = os.environ.get("SSH_HOST_SUFFIX") or ".3hc.io"
         return _run_report(netbox_tag, ssh_suffix)
 
-    # Режим статистики Arista
+    # Режим статистики: сбор по всем поддерживаемым платформам (Arista + Juniper)
     url = os.environ.get("NETBOX_URL")
     token = os.environ.get("NETBOX_TOKEN")
     if not url or not token:
@@ -735,17 +901,19 @@ def main():
         print("Устройств с тегом '{}' не найдено".format(netbox_tag))
         return 0
 
-    arista_devices = []
+    devices_to_fetch = []
     for d in devices:
         platform_name = get_device_platform_name(d, nb)
-        if is_arista_platform(platform_name):
-            arista_devices.append(d)
-    if not arista_devices:
-        print("Устройств Arista среди выбранных не найдено")
+        if is_arista_platform(platform_name) or is_juniper_platform(platform_name):
+            devices_to_fetch.append(d)
+    if not devices_to_fetch:
+        print("Устройств Arista/Juniper среди выбранных не найдено")
         return 0
 
-    max_workers = min(len(arista_devices), max(1, int(os.environ.get("PARALLEL_DEVICES", "6"))))
-    print("Arista устройств: {}. Потоков: {}.".format(len(arista_devices), max_workers), flush=True)
+    n_arista = sum(1 for d in devices_to_fetch if is_arista_platform(get_device_platform_name(d, nb)))
+    n_juniper = len(devices_to_fetch) - n_arista
+    max_workers = min(len(devices_to_fetch), max(1, int(os.environ.get("PARALLEL_DEVICES", "6"))))
+    print("Устройств: {} (Arista: {}, Juniper: {}). Потоков: {}.".format(len(devices_to_fetch), n_arista, n_juniper, max_workers), flush=True)
 
     print_lock = threading.Lock()
     def progress_print(device_name, msg):
@@ -756,7 +924,7 @@ def main():
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_device = {
             executor.submit(
-                process_one_arista,
+                process_one_device_stats,
                 device,
                 nb,
                 ssh_user,
@@ -764,7 +932,7 @@ def main():
                 ssh_suffix,
                 progress_print,
             ): device
-            for device in arista_devices
+            for device in devices_to_fetch
         }
         for future in as_completed(future_to_device):
             device = future_to_device[future]

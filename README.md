@@ -44,11 +44,11 @@ export SSH_PASSWORD="password-for-devices"
 
 **Режим отчёта (`--report`):** быстрый отчёт для визуальной сверки «что в NetBox» и «что на устройстве» по uplink-интерфейсам (с описанием, содержащим `Uplink:`). Поддерживаются Juniper и Arista (по `platform.name` в NetBox). Только таблица, без сохранения JSON.
 
-**Режим статистики:** по умолчанию данные читаются из файла `dry-ssh.json` (таблица или `--json`). С флагом `--fetch` — опрос устройств по SSH (NetBox по тегу → только Arista → сбор по каждому uplink'у), результат — таблица или JSON.
+**Режим статистики:** по умолчанию данные читаются из файла `dry-ssh.json` (таблица или `--json`). С флагом `--fetch` — опрос по SSH всех устройств Arista и Juniper (NetBox по тегу), сбор по каждому uplink'у в едином формате, результат — таблица или JSON.
 
-**Устройства и интерфейсы в режиме статистики (при `--fetch`):** устройства берутся из NetBox по тегу (переменная `NETBOX_TAG`), учитываются только с платформой Arista EOS. Интерфейсы — только те, у которых в описании (description) есть строка `Uplink:`.
+**Устройства и интерфейсы в режиме статистики (при `--fetch`):** устройства берутся из NetBox по тегу (переменная `NETBOX_TAG`), учитываются платформы Arista EOS и Juniper (Junos). Интерфейсы — только те, у которых в описании (description) есть строка `Uplink:`.
 
-**Что собирается по каждому такому интерфейсу (при `--fetch`):** для каждого интерфейса по SSH выполняются команды `show interfaces <name> | json | no-more` и `show interfaces <name> transceiver | json | no-more`. Из вывода извлекаются поля:
+**Что собирается по каждому интерфейсу (при `--fetch`):** для **Arista** — команды `show interfaces <name> | json | no-more` и `show interfaces <name> transceiver | json | no-more`. Для **Juniper** — `show interfaces descriptions | display json | no-more`, затем для каждого uplink'а `show interfaces <name> detail | display json | no-more` (speed, mtu, current-physical-address, link-type). Общий набор полей в выводе (name, description, bandwidth, mtu, physicalAddress и т.д.) совпадает. Таблица полей ниже — по Arista:
 
 | Поле | Источник | Описание |
 |------|----------|----------|
@@ -68,7 +68,7 @@ export SSH_PASSWORD="password-for-devices"
 | Ключ | Описание |
 |------|----------|
 | `--report` | Режим отчёта: таблица NetBox vs SSH (Juniper + Arista) |
-| `--fetch` | Режим статистики: опросить устройства по SSH (иначе по умолчанию читается файл `dry-ssh.json`) |
+| `--fetch` | Режим статистики: опросить по SSH все устройства Arista и Juniper (иначе читается файл `dry-ssh.json`) |
 | `--json` | Вывод в формате JSON (режим статистики) |
 | `--from-file FILE` | Путь к JSON с ключом `devices` (по умолчанию `dry-ssh.json`) |
 
