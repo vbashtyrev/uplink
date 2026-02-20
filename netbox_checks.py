@@ -27,37 +27,11 @@ import sys
 
 import pynetbox
 
-
-def _get_device_platform_name(device, nb):
-    """Имя платформы из NetBox (device.platform.name) для определения Juniper/Arista."""
-    pl = getattr(device, "platform", None)
-    if pl is None:
-        return None
-    if hasattr(pl, "name"):
-        return getattr(pl, "name", None)
-    if isinstance(pl, int):
-        try:
-            p = nb.dcim.platforms.get(pl)
-            return getattr(p, "name", None) if p else None
-        except Exception:
-            return None
-    return None
-
-
-def _is_arista_platform(platform_name):
-    """По имени платформы из NetBox: Arista EOS → True."""
-    if not platform_name:
-        return False
-    n = platform_name.lower()
-    return "arista" in n or "eos" in n
-
-
-def _is_juniper_platform(platform_name):
-    """По имени платформы из NetBox: JunOS / Juniper → True."""
-    if not platform_name:
-        return False
-    n = platform_name.lower()
-    return "junos" in n or "juniper" in n
+from uplinks_report import (
+    get_device_platform_name,
+    is_arista_platform,
+    is_juniper_platform,
+)
 
 
 def load_file(path):
@@ -563,8 +537,8 @@ def main():
             n for n in only_nb
             if n in nb_by_name
             and (
-                (args.platform == "arista" and _is_arista_platform(_get_device_platform_name(nb_by_name[n], nb)))
-                or (args.platform == "juniper" and _is_juniper_platform(_get_device_platform_name(nb_by_name[n], nb)))
+                (args.platform == "arista" and is_arista_platform(get_device_platform_name(nb_by_name[n], nb)))
+                or (args.platform == "juniper" and is_juniper_platform(get_device_platform_name(nb_by_name[n], nb)))
             )
         ]
     if not args.host and (only_file or only_nb):
@@ -605,11 +579,11 @@ def main():
                 skipped_no_netbox.append(dev_name)
                 continue
             if args.platform != "all":
-                platform_name = _get_device_platform_name(device, nb)
-                if args.platform == "arista" and not _is_arista_platform(platform_name):
+                platform_name = get_device_platform_name(device, nb)
+                if args.platform == "arista" and not is_arista_platform(platform_name):
                     skipped_platform.append(dev_name)
                     continue
-                if args.platform == "juniper" and not _is_juniper_platform(platform_name):
+                if args.platform == "juniper" and not is_juniper_platform(platform_name):
                     skipped_platform.append(dev_name)
                     continue
             nb_ifaces = list(nb.dcim.interfaces.filter(device_id=device.id))

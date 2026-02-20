@@ -11,20 +11,32 @@ import sys
 
 import requests
 
-NETBOX_CHOICES_RAW_URL = "https://raw.githubusercontent.com/netbox-community/netbox/master/netbox/dcim/choices.py"
+# Ветка в репозитории netbox-community/netbox: возможны master или main
+NETBOX_CHOICES_URLS = [
+    "https://raw.githubusercontent.com/netbox-community/netbox/master/netbox/dcim/choices.py",
+    "https://raw.githubusercontent.com/netbox-community/netbox/main/netbox/dcim/choices.py",
+]
 
 
 def _fetch_interface_types_from_github():
     """
     Скачать choices.py из репозитория Netbox, извлечь из класса InterfaceTypeChoices
     все TYPE_* = 'value' и из CHOICES пары (константа, label). Вернуть список {value, label}.
+    Пробует ветки master и main.
     """
-    try:
-        r = requests.get(NETBOX_CHOICES_RAW_URL, timeout=15)
-        r.raise_for_status()
-        text = r.text
-    except Exception as e:
-        print("Ошибка загрузки с GitHub: {}".format(e), file=sys.stderr)
+    text = None
+    last_err = None
+    for url in NETBOX_CHOICES_URLS:
+        try:
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+            text = r.text
+            break
+        except Exception as e:
+            last_err = e
+            continue
+    if not text:
+        print("Ошибка загрузки с GitHub: {}".format(last_err), file=sys.stderr)
         return []
     start = text.find("class InterfaceTypeChoices")
     if start == -1:

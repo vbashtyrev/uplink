@@ -20,6 +20,7 @@ PARALLEL_DEVICES, NETBOX_TAG (по умолчанию border).
 import argparse
 import json
 import os
+import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -99,7 +100,7 @@ def get_arista_uplink_stats(host, username, password, timeout=45, command_timeou
             look_for_keys=False,
         )
         _log("SSH: подключено")
-    except (paramiko.SSHException, OSError) as e:
+    except (socket.timeout, paramiko.SSHException, OSError) as e:
         _log("SSH: ошибка — {}".format(e))
         return None, str(e)
 

@@ -21,68 +21,6 @@ BITS_SENT_NAME = "Bits sent"
 # Иконки элементов карты (imageid): хосты — роутер, провайдеры — облако. ID взять в Администрирование → Изображения
 MAP_ICON_HOST = 130          # Router_symbol_(64)
 
-# В Zabbix LLD триггер «High bandwidth usage» имеет описание вида:
-# "Interface Ethernet1/1(описание): High bandwidth usage"
-
-
-def _get_uplink_triggerids_by_host_iface(url, token, hostids, debug=False):
-    """
-    Получить триггеры «High bandwidth usage» по хостам. В Zabbix LLD описание вида
-    "Interface Ethernet1/1(описание): High bandwidth usage". Возврат dict: (hostid, iface_name_norm) -> triggerid.
-    """
-    if not hostids:
-        return {}
-    result, err = zabbix_request(url, token, "trigger.get", {
-        "output": ["triggerid", "description"],
-        "hostids": list(hostids),
-        "selectHosts": ["hostid"],
-        "search": {"description": "High bandwidth usage"},
-        "searchByAny": False,
-    }, debug=debug)
-    if err:
-        return {}
-    if not result:
-        result, _ = zabbix_request(url, token, "trigger.get", {
-            "output": ["triggerid", "description"],
-            "hostids": list(hostids),
-            "selectHosts": ["hostid"],
-        }, debug=debug)
-        if result:
-            result = [t for t in result if "High bandwidth usage" in (t.get("description") or "")]
-    if not result:
-        return {}
-    # Извлечь из описания "Interface EthernetX/Y(...): High bandwidth usage" имя интерфейса
-    out = {}
-    pat = re.compile(r"Interface\s+([^\s(]+)\s*\([^)]*\):\s*High bandwidth usage", re.IGNORECASE)
-    for t in result:
-        desc = t.get("description") or ""
-        m = pat.match(desc.strip())
-        if not m:
-            continue
-        iface = m.group(1).strip()
-        hostid = None
-        for h in (t.get("hosts") or []):
-            hid = h.get("hostid")
-            if hid and str(hid) in [str(x) for x in hostids]:
-                hostid = str(hid)
-                break
-        if hostid:
-            key = (hostid, _normalize_interface_name(iface))
-            out[key] = str(t["triggerid"])
-    if debug and out:
-        for (hid, iface), tid in list(out.items())[:3]:
-            print("DEBUG: триггер (hostid={}, iface={}) -> {}".format(hid, iface, tid), file=sys.stderr)
-    return out
-
-
-def _find_triggerid_for_link(triggerid_by_host_iface, hostid, iface_name):
-    """Найти triggerid по hostid и имени интерфейса."""
-    if not hostid or not iface_name:
-        return None
-    key = (str(hostid), _normalize_interface_name(iface_name))
-    return triggerid_by_host_iface.get(key)
-
-
 def load_devices_json(path):
     """Загрузить JSON с ключом devices. Возврат (data, None) или (None, error_msg)."""
     try:
@@ -943,19 +881,12 @@ def main():
                 save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
                 if args.debug:
                     print("DEBUG: кэш сохранён в {}".format(cache_path), file=sys.stderr)
-        # Триггеры для link indicators (чтобы показать в таблице и передать в update_uplinks_map)
-        triggerid_by_host_iface = {}
-        if host_id_by_name:
-            triggerid_by_host_iface = _get_uplink_triggerids_by_host_iface(
-                url, token, list(host_id_by_name.values()), debug=args.debug
-            )
     else:
         host_id_by_name = {}
-        triggerid_by_host_iface = {}
 
     rows = [("hostname", "interface", "description", "ISP")]
     if use_zabbix:
-        rows[0] = ("hostname", "hostid", "interface", "description", "ISP", "key Bits received", "key Bits sent", "triggerid (link)")
+        rows[0] = ("hostname", "hostid", "interface", "description", "ISP", "key Bits received", "key Bits sent")
     lookup_debug_count = 0
     for hostname in sorted(devices.keys()):
         interfaces = devices[hostname]
@@ -973,8 +904,7 @@ def main():
                     print("DEBUG lookup: hostname={!r} iface_name={!r} key_norm={!r} found={}".format(
                         hostname, iface_name, key_norm, found), file=sys.stderr)
                     lookup_debug_count += 1
-                triggerid = _find_triggerid_for_link(triggerid_by_host_iface, hostid, iface_name) if triggerid_by_host_iface else None
-                row = (hostname, hostid, iface_name, description, isp, rec.get("bits_in", ""), rec.get("bits_out", ""), triggerid or "—")
+                row = (hostname, hostid, iface_name, description, isp, rec.get("bits_in", ""), rec.get("bits_out", ""))
             rows.append(row)
 
     if args.update_map:

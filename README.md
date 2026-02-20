@@ -227,15 +227,13 @@ python netbox_interface_types.py -o my_types.json
 
 **Подписи линков:** имя интерфейса и строки In/Out с макросами Zabbix `{?last(/host/key)}` (скорость по items Bits received/sent).
 
-**Link indicators:** при обновлении карты к каждому линку привязывается триггер «Network interfaces discovery: Interface {интерфейс}(Uplink: {провайдер}): High bandwidth usage», если такой триггер есть на хосте (из шаблона). Тогда при срабатывании триггера линия на карте подсвечивается по статусу проблемы.
-
 **Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
 
 | Ключ | Описание |
 |------|----------|
 | `-f`, `--file` | JSON с ключом `devices` (по умолчанию `dry-ssh.json`) |
 | `-m`, `--description-map` | Файл сопоставления description → имя ISP |
-| `--zabbix` | Запросить Zabbix API, вывести ключи items и колонку «triggerid (link)» — ID триггера, привязываемого к линку на карте (или «—», если не найден) |
+| `--zabbix` | Запросить Zabbix API, вывести ключи items (Bits received/sent) |
 | `--create-map` | Только создать карту [test] uplinks, если её нет (пустая) |
 | `--update-map` | Обновить карту: хосты, провайдеры, линки; с `--host` — только указанный хост и его линки |
 | `--host HOSTNAME` | Работать только с одним хостом |
