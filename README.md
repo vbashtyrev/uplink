@@ -26,7 +26,7 @@ export NETBOX_TOKEN="your-api-token"
 export SSH_PASSWORD="password-for-devices"
 ```
 
-Опционально: `SSH_USERNAME` (по умолчанию `admin`), `PARALLEL_DEVICES` (по умолчанию `6`), `SSH_HOST_SUFFIX`, `NETBOX_TAG`.
+Опционально: `SSH_USERNAME` (по умолчанию `admin`), `PARALLEL_DEVICES` (по умолчанию `6`), `SSH_HOST_SUFFIX`, `NETBOX_TAG`, `SSH_TIMEOUT`, `SSH_COMMAND_TIMEOUT` (сек). При «Network is unreachable» при том что `ssh DEVICE` из терминала работает — включите `USE_SSH_CONFIG=1`: скрипт будет брать HostName и User из `~/.ssh/config` (как при ручном `ssh DEVICE`). При ошибке SSH в лог выводится тип исключения и errno (например `TimeoutError`, `OSError [Errno 51]`), чтобы различать таймаут подключения и отсутствие маршрута.
 
 Без активации venv можно вызывать интерпретатор напрямую:
 
@@ -48,7 +48,7 @@ export SSH_PASSWORD="password-for-devices"
 
 **Устройства и интерфейсы в режиме статистики (при `--fetch`):** устройства берутся из NetBox по тегу (переменная `NETBOX_TAG`), учитываются платформы Arista EOS и Juniper (Junos). Интерфейсы — только те, у которых в описании (description) есть строка `Uplink:`.
 
-**Что собирается по каждому интерфейсу (при `--fetch`):** для **Arista** — команды `show interfaces <name> | json | no-more` и `show interfaces <name> transceiver | json | no-more`. Для **Juniper** — uplink'и с link up, для агрегатов (ae*.0) — члены LAG через `show lacp interfaces`, по каждому физическому интерфейсу `show interfaces <name> | display json`, модель SFP из `show chassis hardware | display json` (сопоставление слот FPC/PIC/port по имени интерфейса). Duplex на 10G/40G/100G в Junos часто не выводится — при bandwidth ≥ 10 Gbps подставляется `full`. Общий набор полей в выводе (name, description, bandwidth, mtu, physicalAddress и т.д.) совпадает с Arista. Таблица полей ниже — по Arista:
+**Что собирается по каждому интерфейсу (при `--fetch`):** для **Arista** — команды `show interfaces <name> | json | no-more` и `show interfaces <name> transceiver | json | no-more`. Для **Juniper** — uplink'и с link up и только unit 0 (upstream; интерфейсы с unit не 0 — VLAN, пока не проверяются). Список интерфейсов с описаниями запрашивается как `show interfaces descriptions | display json`; на части Junos в JSON встречаются дубликаты ключей (парсер оставляет только последнее значение), поэтому при нуле uplink'ов выполняется fallback на `display xml` — все интерфейсы из XML учитываются. Для агрегатов (ae*.0) — члены LAG через `show lacp interfaces`, по каждому физическому интерфейсу `show interfaces <name> | display json`, модель SFP из `show chassis hardware | display json` (сопоставление слот FPC/PIC/port по имени интерфейса). Duplex на 10G/40G/100G в Junos часто не выводится — при bandwidth ≥ 10 Gbps подставляется `full`. Общий набор полей в выводе (name, description, bandwidth, mtu, physicalAddress и т.д.) совпадает с Arista. Таблица полей ниже — по Arista:
 
 | Поле | Источник | Описание |
 |------|----------|----------|
@@ -74,7 +74,7 @@ export SSH_PASSWORD="password-for-devices"
 | `--json` | Вывод в формате JSON (режим статистики). При `--fetch --json` прогресс идёт в stderr, в stdout — только JSON (удобно: `--fetch --json > dry-ssh.json`) |
 | `--from-file FILE` | Путь к JSON с ключом `devices` (по умолчанию `dry-ssh.json`) |
 
-**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `SSH_USERNAME`, `SSH_PASSWORD`, `SSH_HOST_SUFFIX`, `PARALLEL_DEVICES`, `NETBOX_TAG`. Опционально: `DEBUG_SSH_JSON=1` (режим отчёта).
+**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `SSH_USERNAME`, `SSH_PASSWORD`, `SSH_HOST_SUFFIX`, `PARALLEL_DEVICES`, `NETBOX_TAG`. Опционально: `SSH_TIMEOUT`, `SSH_COMMAND_TIMEOUT` (сек); `USE_SSH_CONFIG=1` — брать HostName/User из `~/.ssh/config` (если `ssh DEVICE` работает, а скрипт даёт «Network is unreachable»); `DEBUG_SSH_JSON=1` (режим отчёта); `DEBUG_JUNIPER_UPLINKS=1` — при `--fetch` для Juniper выводить пошаговый лог (JSON/XML, блоки, парсинг, причины пропуска интерфейсов).
 
 ```bash
 python uplinks_stats.py

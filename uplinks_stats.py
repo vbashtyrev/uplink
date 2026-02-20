@@ -21,10 +21,53 @@ import socket
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import paramiko
 import pynetbox
+
+
+def _format_ssh_connect_error(host, e):
+    """
+    Детальное описание ошибки при SSH-подключении к host: тип исключения, сообщение, errno.
+    Помогает различать timeout, Network unreachable, refused и т.д.
+    """
+    exc_type = type(e).__name__
+    msg = (str(e).strip() if e else "") or "(нет сообщения)"
+    line = "SSH: ошибка при подключении к {!r}: {} — {}".format(host, exc_type, msg)
+    if isinstance(e, OSError) and getattr(e, "errno", None) is not None:
+        line += " (errno {})".format(e.errno)
+    return line
+
+
+def _load_ssh_config():
+    """Загрузить ~/.ssh/config для подстановки HostName/User. Возврат SSHConfig или None."""
+    path = os.path.expanduser("~/.ssh/config")
+    if not os.path.isfile(path):
+        return None
+    try:
+        config = paramiko.SSHConfig()
+        with open(path) as f:
+            config.parse(f)
+        return config
+    except Exception:
+        return None
+
+
+def _resolve_ssh_host(ssh_config, device_name, ssh_host, username):
+    """По ~/.ssh/config подставить HostName и User. Возврат (host, user)."""
+    if not ssh_config:
+        return ssh_host, username
+    for alias in (device_name, ssh_host):
+        try:
+            entry = ssh_config.lookup(alias)
+            host = entry.get("hostname")
+            if host:
+                return host, entry.get("user") or username
+        except Exception:
+            continue
+    return ssh_host, username
 
 
 def extract_json(text):
@@ -91,10 +134,20 @@ def _juniper_speed_to_bps(speed_str):
     return None
 
 
+def _juniper_uplink_is_unit0(name):
+    """True, если интерфейс считаем upstream: физический (без точки) или unit 0 (*.0). Unit не 0 — VLAN, не проверяем."""
+    if not name:
+        return False
+    if "." not in name:
+        return True
+    return name.split(".")[-1] == "0"
+
+
 def parse_juniper_uplinks(json_data, require_link_up=False):
     """
     Из Juniper JSON вытащить интерфейсы с 'Uplink:' в description (physical + logical).
     Если require_link_up=True — только с oper-status == 'up'.
+    Учитываются только unit 0 (*.0) или физические; unit не 0 (VLAN) пропускаются.
     Возврат: [(name, desc), ...]
     """
     out = []
@@ -109,6 +162,8 @@ def parse_juniper_uplinks(json_data, require_link_up=False):
                     oper = _juniper_iface_oper_status(ph)
                     if oper is not None and oper.lower() != "up":
                         continue
+                if not _juniper_uplink_is_unit0(name):
+                    continue
                 out.append((name, desc))
         for log in info.get("logical-interface") or []:
             name, desc = _juniper_iface_name_desc(log)
@@ -117,7 +172,133 @@ def parse_juniper_uplinks(json_data, require_link_up=False):
                     oper = _juniper_iface_oper_status(log)
                     if oper is not None and oper.lower() != "up":
                         continue
+                if not _juniper_uplink_is_unit0(name):
+                    continue
                 out.append((name, desc))
+    return out
+
+
+def _extract_xml_interface_information(text):
+    """Из вывода Junos (display xml) вырезать один блок <interface-information>...</interface-information>."""
+    blocks = _extract_all_xml_interface_information_blocks(text)
+    return blocks[0] if blocks else None
+
+
+def _extract_all_xml_interface_information_blocks(text):
+    """Из вывода Junos (display xml) вырезать все блоки <interface-information>...</interface-information>."""
+    blocks = []
+    start_tag = "<interface-information"
+    pos = 0
+    while True:
+        pos = text.find(start_tag, pos)
+        if pos == -1:
+            break
+        depth = 0
+        i = pos
+        while i < len(text):
+            if text[i] == "<":
+                if i + 1 < len(text) and text[i + 1] == "/":
+                    depth -= 1
+                    if depth == 0:
+                        end = text.find(">", i)
+                        if end != -1:
+                            blocks.append(text[pos : end + 1])
+                        pos = end + 1 if end != -1 else len(text)
+                        break
+                elif i + 1 < len(text) and not text[i + 1 : i + 2].isspace():
+                    depth += 1
+            i += 1
+        else:
+            pos += 1
+    return blocks
+
+
+def _parse_junos_rpc_reply_and_find_interface_information(xml_text):
+    """
+    Распарсить полный документ <rpc-reply> (чтобы были все xmlns), вернуть список
+    корневых элементов interface-information (каждый — уже распарсенное дерево).
+    Возврат: [elem, ...] или [] при ошибке.
+    """
+    start = xml_text.find("<rpc-reply")
+    if start == -1:
+        return []
+    end = xml_text.find("</rpc-reply>")
+    if end == -1:
+        return []
+    doc = xml_text[start : end + len("</rpc-reply>")]
+    try:
+        root = ET.fromstring(doc)
+    except ET.ParseError:
+        return []
+    out = []
+    for elem in root.iter():
+        tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+        if tag == "interface-information":
+            out.append(elem)
+    return out
+
+
+def _juniper_xml_elem_text(elem):
+    """Из элемента XML Junos (с вложенным <data> или текстом) вытащить строку."""
+    if elem is None:
+        return ""
+    for child in elem:
+        if child.tag.split("}")[-1] == "data" and child.text:
+            return (child.text or "").strip()
+    return (elem.text or "").strip()
+
+
+def _juniper_xml_child(elem, local_name):
+    """Найти дочерний элемент по локальному имени тега (без namespace)."""
+    if elem is None:
+        return None
+    for c in elem:
+        if c.tag.split("}")[-1] == local_name:
+            return c
+    return None
+
+
+def _juniper_xml_iface_name_desc_oper(elem):
+    """Из элемента physical-interface или logical-interface (XML) вытащить (name, description, oper_status)."""
+    name_el = _juniper_xml_child(elem, "name")
+    desc_el = _juniper_xml_child(elem, "description")
+    oper_el = _juniper_xml_child(elem, "oper-status")
+    name = _juniper_xml_elem_text(name_el) if name_el is not None else ""
+    desc = _juniper_xml_elem_text(desc_el) if desc_el is not None else ""
+    oper = _juniper_xml_elem_text(oper_el) if oper_el is not None else None
+    return name, desc, oper
+
+
+def parse_juniper_uplinks_from_xml(xml_root, require_link_up=False, debug_cb=None):
+    """
+    Из корня XML (interface-information) вытащить все интерфейсы с 'Uplink:' в description.
+    XML не теряет дубликаты тегов (в отличие от JSON). Обходим все узлы (в т.ч. вложенные logical-interface).
+    Возврат: [(name, desc), ...]
+    debug_cb(msg) — при отладке вызывается для каждого рассматриваемого интерфейса.
+    """
+    out = []
+    for elem in xml_root.iter():
+        tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+        if tag not in ("physical-interface", "logical-interface"):
+            continue
+        name, desc, oper = _juniper_xml_iface_name_desc_oper(elem)
+        if debug_cb:
+            debug_cb("  elem: tag={} name={!r} desc={!r} oper={!r}".format(tag, name, desc, oper))
+        if not name or "Uplink:" not in desc:
+            if debug_cb and name:
+                debug_cb("    -> пропуск: нет Uplink в desc")
+            continue
+        if require_link_up and oper is not None and oper.lower() != "up":
+            if debug_cb:
+                debug_cb("    -> пропуск: oper не up")
+            continue
+        if not _juniper_uplink_is_unit0(name):
+            if debug_cb:
+                debug_cb("    -> пропуск: не unit 0")
+            continue
+        if debug_cb:
+            debug_cb("    -> добавлен")
+        out.append((name, desc))
     return out
 
 
@@ -237,7 +418,7 @@ def get_ssh_uplinks(
         )
         _log("SSH: подключено")
     except (socket.timeout, paramiko.SSHException, OSError) as e:
-        _log("SSH: ошибка — {}".format(e))
+        _log(_format_ssh_connect_error(host, e))
         return None, str(e)
 
     channel = client.invoke_shell(width=256)
@@ -447,6 +628,38 @@ def read_until_json_and_prompt(channel, timeout=120):
     return extract_json("".join(buf))
 
 
+def _looks_like_cli_prompt(text):
+    """Проверить, что в конце буфера есть приглашение CLI (user@host> или host#), а не просто '>' из XML/JSON."""
+    if not text or not text.strip():
+        return False
+    last_line = text.split("\n")[-1].strip() if "\n" in text else text.strip()
+    if not last_line:
+        return False
+    if not (last_line.endswith(">") or last_line.endswith("#")):
+        return False
+    return "@" in last_line
+
+
+def read_until_prompt(channel, timeout=120):
+    """Читать вывод до приглашения CLI в конце (user@host> или host#), вернуть сырой текст. Не возвращаться на первый '>' в XML/JSON."""
+    buf = []
+    deadline = time.monotonic() + timeout
+    last_data = time.monotonic()
+    while time.monotonic() < deadline:
+        if channel.recv_ready():
+            chunk = channel.recv(65536).decode("utf-8", errors="replace")
+            buf.append(chunk)
+            last_data = time.monotonic()
+        else:
+            time.sleep(0.15)
+        text = "".join(buf)
+        if _looks_like_cli_prompt(text):
+            return text
+        if time.monotonic() - last_data > 3 and buf:
+            break
+    return "".join(buf)
+
+
 def get_arista_uplink_stats(host, username, password, timeout=45, command_timeout=90, log=None):
     """
     SSH к Arista: список интерфейсов с "Uplink:", для каждого show interfaces + transceiver,
@@ -470,7 +683,7 @@ def get_arista_uplink_stats(host, username, password, timeout=45, command_timeou
         )
         _log("SSH: подключено")
     except (socket.timeout, paramiko.SSHException, OSError) as e:
-        _log("SSH: ошибка — {}".format(e))
+        _log(_format_ssh_connect_error(host, e))
         return None, str(e)
 
     channel = client.invoke_shell(width=256)
@@ -627,6 +840,40 @@ def _juniper_interface_slot(iface_name):
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 
+def _juniper_optics_tx_power_dbm(diag_json):
+    """
+    Из JSON show interfaces diagnostics optics <name> | display json вытащить
+    среднее laser-output-power-dbm по всем lane (optics-diagnostics-lane-values).
+    Возврат: float (dBm) или None.
+    """
+    values = []
+    infos = diag_json.get("interface-information") or []
+    if isinstance(infos, dict):
+        infos = [infos]
+    for info in infos:
+        phys = info.get("physical-interface") or []
+        if not isinstance(phys, list):
+            phys = [phys] if phys else []
+        for ph in phys:
+            od = ph.get("optics-diagnostics") or []
+            if not isinstance(od, list):
+                od = [od] if od else []
+            for opt in od:
+                lanes = opt.get("optics-diagnostics-lane-values") or []
+                if not isinstance(lanes, list):
+                    lanes = [lanes] if lanes else []
+                for lane in lanes:
+                    dbm = _juniper_data(lane.get("laser-output-power-dbm"))
+                    if dbm is not None:
+                        try:
+                            values.append(float(dbm))
+                        except (ValueError, TypeError):
+                            pass
+    if not values:
+        return None
+    return round(sum(values) / len(values), 2)
+
+
 def _juniper_chassis_media_type(chassis_json, fpc, pic, port):
     """
     Из JSON show chassis hardware | display json вытащить модель SFP (description)
@@ -706,6 +953,11 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
         if log:
             log(msg)
 
+    debug = os.environ.get("DEBUG_JUNIPER_UPLINKS", "").strip().lower() in ("1", "true", "yes")
+    def _dbg(msg):
+        if debug and log:
+            log("[DEBUG] " + msg)
+
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
@@ -720,7 +972,7 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
         )
         _log("SSH: подключено")
     except (socket.timeout, paramiko.SSHException, OSError) as e:
-        _log("SSH: ошибка — {}".format(e))
+        _log(_format_ssh_connect_error(host, e))
         return None, str(e)
 
     channel = client.invoke_shell(width=256)
@@ -744,10 +996,31 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
         return None, "не удалось получить show interfaces descriptions | display json"
 
     uplinks = parse_juniper_uplinks(desc_data, require_link_up=True)
+    _dbg("Шаг 1 (JSON): parse_juniper_uplinks(require_link_up=True) вернул {} записей".format(len(uplinks)))
     if not uplinks:
-        client.close()
-        _log("SSH: uplink-интерфейсов с Link up не найдено")
-        return [], None
+        _log("SSH: в JSON uplink'ов не найдено, пробуем display xml (дубликаты ключей в JSON)...")
+        send("show interfaces descriptions | display xml | no-more\r\n")
+        time.sleep(0.2)
+        xml_text = read_until_prompt(channel, timeout=command_timeout)
+        _dbg("Шаг 2 (XML сырой): len(xml_text)={}, _looks_like_cli_prompt={}".format(len(xml_text), _looks_like_cli_prompt(xml_text)))
+        _dbg("Шаг 2: начало (300 символов): {!r}".format(xml_text[:300] if len(xml_text) >= 300 else xml_text[:]))
+        _dbg("Шаг 2: конец (300 символов): {!r}".format(xml_text[-300:] if len(xml_text) > 300 else ""))
+        interface_information_roots = _parse_junos_rpc_reply_and_find_interface_information(xml_text)
+        _dbg("Шаг 3 (парсинг rpc-reply): найдено элементов interface-information: {}".format(len(interface_information_roots)))
+        for i, root in enumerate(interface_information_roots):
+            _dbg("Шаг 3: корень[{}] tag={}".format(i, root.tag))
+        for root in interface_information_roots:
+            from_block = parse_juniper_uplinks_from_xml(root, require_link_up=True, debug_cb=_dbg if debug else None)
+            _dbg("Шаг 4 (парсинг блока): parse_juniper_uplinks_from_xml вернул {} записей: {}".format(len(from_block), from_block))
+            uplinks.extend(from_block)
+        seen = set()
+        uplinks = [(n, d) for n, d in uplinks if n not in seen and not seen.add(n)]
+        _dbg("Шаг 5 (после дедупликации): всего uplinks: {}".format(len(uplinks)))
+        if not uplinks:
+            client.close()
+            _log("SSH: uplink-интерфейсов с Link up не найдено")
+            return [], None
+        time.sleep(0.2)
 
     send("show chassis hardware | display json | no-more\r\n")
     time.sleep(0.2)
@@ -792,6 +1065,15 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
                             break
             time.sleep(0.2)
 
+            tx_power = physical_stats.get("txPower")
+            if tx_power is None:
+                send("show interfaces diagnostics optics {} | display json | no-more\r\n".format(physical_name))
+                time.sleep(0.2)
+                optics_data = read_until_json_and_prompt(channel, timeout=command_timeout)
+                if optics_data:
+                    tx_power = _juniper_optics_tx_power_dbm(optics_data)
+                time.sleep(0.15)
+
             media_type = physical_stats.get("mediaType")
             if media_type is None and chassis_hw:
                 slot = _juniper_interface_slot(physical_name)
@@ -805,7 +1087,7 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
                 "duplex": physical_stats.get("duplex"),
                 "physicalAddress": physical_stats.get("physicalAddress"),
                 "mtu": physical_stats.get("mtu"),
-                "txPower": physical_stats.get("txPower"),
+                "txPower": tx_power,
                 "forwardingModel": physical_stats.get("forwardingModel"),
             }
             row["physicalInterface"] = physical_name
@@ -819,12 +1101,13 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
     return result, None
 
 
-def process_one_arista(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print):
+def process_one_arista(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print, ssh_timeout=45, ssh_command_timeout=90, ssh_config=None):
     """Обработать одно устройство Arista: SSH + сбор stats по uplinks."""
     progress_print(device.name, "подключение и сбор uplink stats (Arista)...")
     ssh_host = device.name + ssh_suffix
+    connect_host, connect_user = _resolve_ssh_host(ssh_config, device.name, ssh_host, ssh_user)
     log_cb = lambda msg: progress_print(device.name, msg)
-    stats, err = get_arista_uplink_stats(ssh_host, ssh_user, ssh_pass, log=log_cb)
+    stats, err = get_arista_uplink_stats(connect_host, connect_user, ssh_pass, timeout=ssh_timeout, command_timeout=ssh_command_timeout, log=log_cb)
     if err:
         progress_print(device.name, "ошибка: {}".format(err))
         return device.name, {"error": err}
@@ -832,12 +1115,13 @@ def process_one_arista(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_prin
     return device.name, stats
 
 
-def process_one_juniper(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print):
+def process_one_juniper(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print, ssh_timeout=45, ssh_command_timeout=90, ssh_config=None):
     """Обработать одно устройство Juniper: SSH + сбор stats по uplinks."""
     progress_print(device.name, "подключение и сбор uplink stats (Juniper)...")
     ssh_host = device.name + ssh_suffix
+    connect_host, connect_user = _resolve_ssh_host(ssh_config, device.name, ssh_host, ssh_user)
     log_cb = lambda msg: progress_print(device.name, msg)
-    stats, err = get_juniper_uplink_stats(ssh_host, ssh_user, ssh_pass, log=log_cb)
+    stats, err = get_juniper_uplink_stats(connect_host, connect_user, ssh_pass, timeout=ssh_timeout, command_timeout=ssh_command_timeout, log=log_cb)
     if err:
         progress_print(device.name, "ошибка: {}".format(err))
         return device.name, {"error": err}
@@ -845,13 +1129,13 @@ def process_one_juniper(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_pri
     return device.name, stats
 
 
-def process_one_device_stats(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print):
+def process_one_device_stats(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print, ssh_timeout=45, ssh_command_timeout=90, ssh_config=None):
     """Обработать одно устройство: по платформе вызвать Arista или Juniper сбор; иначе пропуск."""
     platform_name = get_device_platform_name(device, nb)
     if is_arista_platform(platform_name):
-        return process_one_arista(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print)
+        return process_one_arista(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print, ssh_timeout, ssh_command_timeout, ssh_config)
     if is_juniper_platform(platform_name):
-        return process_one_juniper(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print)
+        return process_one_juniper(device, nb, ssh_user, ssh_pass, ssh_suffix, progress_print, ssh_timeout, ssh_command_timeout, ssh_config)
     progress_print(device.name, "пропуск (не Arista/Juniper): {}".format(platform_name or "нет платформы"))
     return device.name, None
 
@@ -1095,6 +1379,14 @@ def main():
     ssh_user = os.environ.get("SSH_USERNAME", "admin")
     ssh_pass = os.environ.get("SSH_PASSWORD")
     ssh_suffix = os.environ.get("SSH_HOST_SUFFIX") or ".3hc.io"
+    try:
+        ssh_timeout = max(10, int(os.environ.get("SSH_TIMEOUT", "45")))
+    except ValueError:
+        ssh_timeout = 45
+    try:
+        ssh_command_timeout = max(30, int(os.environ.get("SSH_COMMAND_TIMEOUT", "90")))
+    except ValueError:
+        ssh_command_timeout = 90
     netbox_tag = os.environ.get("NETBOX_TAG") or "border"
     if not ssh_pass:
         print("Задайте переменную SSH_PASSWORD для доступа по SSH")
@@ -1137,6 +1429,9 @@ def main():
     host_note = " хост {}".format(args.host) if args.host else ""
     print("Устройств{}: {} (Arista: {}, Juniper: {}). Потоков: {}.".format(host_note, len(devices_to_fetch), n_arista, n_juniper, max_workers), flush=True, file=progress_file)
 
+    use_ssh_config = os.environ.get("USE_SSH_CONFIG", "").strip().lower() in ("1", "true", "yes")
+    ssh_config = _load_ssh_config() if use_ssh_config else None
+
     print_lock = threading.Lock()
     def progress_print(device_name, msg):
         with print_lock:
@@ -1153,6 +1448,9 @@ def main():
                 ssh_pass,
                 ssh_suffix,
                 progress_print,
+                ssh_timeout,
+                ssh_command_timeout,
+                ssh_config,
             ): device
             for device in devices_to_fetch
         }
