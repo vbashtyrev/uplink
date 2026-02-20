@@ -547,7 +547,7 @@ def _run_report(netbox_tag, ssh_suffix):
     try:
         devices = list(nb.dcim.devices.filter(tag=netbox_tag))
     except Exception as e:
-        print("Ошибка доступа к NetBox: {}.".format(_netbox_error_message(e)), file=sys.stderr)
+        print("Ошибка доступа к NetBox: {}.".format(netbox_error_message(e)), file=sys.stderr)
         return 1
     if not devices:
         print("Устройств с тегом '{}' не найдено".format(netbox_tag))
@@ -661,8 +661,8 @@ def _load_stats_file(path):
     return out, None
 
 
-def _netbox_error_message(e):
-    """Преобразовать исключение при обращении к NetBox в короткое сообщение."""
+def netbox_error_message(e):
+    """Преобразовать исключение при обращении к NetBox в короткое сообщение (для stderr)."""
     err_msg = str(e).strip() if e else "неизвестная ошибка"
     err_lower = err_msg.lower()
     if "401" in err_msg or "unauthorized" in err_lower or "authentication" in err_lower or "token" in err_lower:
@@ -729,7 +729,7 @@ def main():
     try:
         devices = list(nb.dcim.devices.filter(tag=netbox_tag))
     except Exception as e:
-        print("Ошибка доступа к NetBox: {}.".format(_netbox_error_message(e)), file=sys.stderr)
+        print("Ошибка доступа к NetBox: {}.".format(netbox_error_message(e)), file=sys.stderr)
         return 1
     if not devices:
         print("Устройств с тегом '{}' не найдено".format(netbox_tag))

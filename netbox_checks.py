@@ -31,6 +31,7 @@ from uplinks_stats import (
     get_device_platform_name,
     is_arista_platform,
     is_juniper_platform,
+    netbox_error_message,
 )
 
 
@@ -536,16 +537,7 @@ def main():
         nb = pynetbox.api(url, token=token)
         nb_devices = list(nb.dcim.devices.filter(tag=netbox_tag))
     except Exception as e:
-        err_msg = str(e).strip() if e else "неизвестная ошибка"
-        err_lower = err_msg.lower()
-        if "401" in err_msg or "unauthorized" in err_lower or "authentication" in err_lower or "token" in err_lower:
-            print("Ошибка доступа к NetBox: неверный или просроченный токен. Проверьте NETBOX_TOKEN.", file=sys.stderr)
-        elif "connecttimeout" in err_lower or "timed out" in err_lower or "timeout" in err_lower:
-            print("Ошибка доступа к NetBox: таймаут подключения. Проверьте NETBOX_URL и доступность сервера.", file=sys.stderr)
-        elif "connection" in err_lower or "connect" in err_lower or "econnrefused" in err_lower:
-            print("Ошибка доступа к NetBox: не удалось подключиться. Проверьте NETBOX_URL и доступность сервера.", file=sys.stderr)
-        else:
-            print("Ошибка доступа к NetBox: {}.".format(err_msg), file=sys.stderr)
+        print("Ошибка доступа к NetBox: {}.".format(netbox_error_message(e)), file=sys.stderr)
         return 1
     nb_names = [d.name for d in nb_devices]
     nb_by_name = {d.name: d for d in nb_devices}
@@ -896,6 +888,10 @@ def main():
                 col_spec = _filter_empty_note_cols(col_spec, rows_display)
             if args.hide_no_diff_cols and rows_display:
                 col_spec = _filter_no_diff_cols(col_spec, rows_display)
+            has_any_diff = any(_row_has_diff(r) for r in rows_display) if rows_display else False
+            if rows_display and not has_any_diff:
+                print("Итог: все проверенные поля совпадают с NetBox. Расхождений не найдено.", flush=True)
+                print(flush=True)
             if args.json:
                 out["rows"] = [
                     _row_to_dict(r, col_spec)
