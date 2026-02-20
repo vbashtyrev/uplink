@@ -126,7 +126,10 @@ python uplinks_stats.py --report
 | `--mtu` | Сверка mtu (файл vs NetBox) |
 | `--tx-power` | Сверка txPower (файл) и tx_power (NetBox) |
 | `--forwarding-model` | Сверка forwardingModel (файл) и mode (NetBox). В NetBox: `routed` → mode=null, `bridged` → mode=tagged |
-| `--all` | Включить все проверки сразу (intname, description, mediatype, bandwidth, duplex, mac, mtu, tx-power, forwarding-model) |
+| `--ip-address` | Сверка IPv4/IPv6 (файл: ipv4_addresses, ipv6_addresses, ip_vrf) и привязанных к интерфейсу в NetBox (с учётом VRF) |
+| `--lag` | Сверка LAG / Related Interfaces: aggregateInterface (файл) и lag (NetBox) у физических интерфейсов — членов LAG |
+| `--parent` | Сверка Parent interface: aggregateInterface (файл) и parent (NetBox) у логических интерфейсов (ae5.0 → ae5) |
+| `--all` | Включить все проверки сразу (intname, description, mediatype, bandwidth, duplex, mac, mtu, tx-power, forwarding-model, ip-address, lag, parent) |
 
 Без `--mt-ref` при `--mediatype` выводится предупреждение: значения не приводятся к одному формату, расхождения могут быть из-за разного написания.
 
@@ -162,6 +165,8 @@ python uplinks_stats.py --report
 | `--tx-power` | `tx_power` | `txPower` |
 | `--forwarding-model` | `mode` | `forwardingModel`: в NetBox записывается `routed`→null, `bridged`→`tagged` |
 | `--mac` | сущность MAC (dcim.mac-addresses) + поле интерфейса | При расхождении или отсутствии: поиск по MAC (формат с двоеточиями, верхний регистр). Если запись есть — выводится её URL; иначе создаётся новая и привязывается к интерфейсу. На интерфейсе дополнительно выставляется `primary_mac_address` (ID записи MAC) для отображения в NetBox 4. |
+| `--ip-address` | IP (ipam.ip_addresses) + VRF | При расхождении: создание/обновление привязки IP к интерфейсу; при необходимости обновление VRF у существующего адреса. Учитывается поле `ip_vrf` из файла (только VRF «internet» при сборе через uplinks_stats). |
+| `--intname` (создание) | lag, parent | При создании интерфейса: у физического члена LAG выставляется `lag` (Related Interfaces), у логического юнита (ae5.0) — `parent` (Parent interface). Если агрегат создаётся позже в том же запуске, второй проход выставит связи после создания всех интерфейсов. |
 
 В NetBox MAC — отдельная сущность (dcim.mac-addresses); при `--mac --apply` создаётся или находится запись, привязывается к интерфейсу и на интерфейсе устанавливается `primary_mac_address`. Примечание 16: «в Netbox заполнено не оба поля» — если есть только сущность или только отображение на интерфейсе.
 

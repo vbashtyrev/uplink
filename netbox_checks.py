@@ -8,7 +8,7 @@
 Ключ --mt-ref [FILE]: сверка mediaType со справочником (файл с interface_types);
   данные из файла/SSH и из Netbox сверяются со списком value в справочнике (по умолчанию netbox_interface_types.json).
 Ключ --show-change: показывать колонки «что подставим в Netbox» по выбранным ключам (mediatype → mtToSet, description → descToSet, …). Если проверки не заданы — включаются все (--all); при явном --show-change все колонки выводятся, без скрытия групп без расхождений.
-Ключ --apply: вносить изменения в Netbox при разнице по выбранным ключам (--mediatype, --description, --bandwidth, --duplex, --mtu, --tx-power).
+Ключ --apply: вносить изменения в Netbox при разнице по выбранным ключам (--mediatype, --description, --bandwidth, --duplex, --mtu, --tx-power, --mac, --ip-address; при --intname — создание интерфейсов, lag/parent).
   Справочник типов (--mt-ref) по умолчанию включён (netbox_interface_types.json); для типа в Netbox подставляется value/slug из справочника.
 
 Переменные: NETBOX_URL, NETBOX_TOKEN, NETBOX_TAG.
@@ -384,6 +384,48 @@ def _resolve_vrf_id_to_name(nb, vrf_id, id_to_name_cache):
     if id_to_name_cache is not None:
         id_to_name_cache[vrf_id] = name
     return name
+
+
+def _get_related_interface_id(nb_iface, attr_name):
+    """
+    Получить id связанного интерфейса (lag или parent) из объекта интерфейса NetBox.
+    attr_name — "lag" или "parent". Возврат: int id или None.
+    """
+    if nb_iface is None:
+        return None
+    obj = getattr(nb_iface, attr_name, None)
+    if obj is None:
+        return None
+    if isinstance(obj, int):
+        return obj
+    return getattr(obj, "id", None)
+
+
+def _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, relation_attr, is_target_entry_fn, relation_label):
+    """
+    Второй проход: выставить связь (lag или parent) у интерфейсов по payload.
+    relation_attr — "lag" или "parent"; is_target_entry_fn(entry, int_name) — предикат «эта запись участвует»;
+    relation_label — подпись для сообщений ("LAG", "parent").
+    """
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        int_name = entry.get("name")
+        aggregate_name = (entry.get("aggregateInterface") or "").strip()
+        if not int_name or not aggregate_name:
+            continue
+        if not is_target_entry_fn(entry, int_name):
+            continue
+        _, nb_iface = resolve_interface(int_name, nb_by_iface_name)
+        nb_target = nb_by_iface_name.get(aggregate_name)
+        if not nb_iface or not nb_target:
+            continue
+        if _get_related_interface_id(nb_iface, relation_attr) != getattr(nb_target, "id", None):
+            try:
+                nb_iface.update({relation_attr: nb_target.id})
+                print("{} {}: {} установлен на {}".format(dev_name, int_name, relation_label, aggregate_name), flush=True)
+            except Exception as e:
+                print("Ошибка установки {} {} {} → {}: {}".format(dev_name, int_name, relation_label, aggregate_name, e), file=sys.stderr, flush=True)
 
 
 def _find_ip_in_netbox(nb, address, vrf_id):
@@ -929,6 +971,7 @@ def main():
                             nD = DESC_NOTE_DIFF
                             note_codes_used.add(DESC_NOTE_DIFF)
                 is_logical_unit = entry.get("isLogical") or (int_name and "." in str(int_name) and str(int_name).startswith("ae"))
+                aggregate_name = (entry.get("aggregateInterface") or "").strip()
                 mt_f = (entry.get("mediaType") or "").strip() if (args.mediatype or args.show_change) else ""
                 mt_n = ""
                 nM = ""
@@ -1140,10 +1183,9 @@ def main():
                 lag_n = ""
                 nLag = ""
                 if args.lag:
-                    aggregate_name_f = (entry.get("aggregateInterface") or "").strip()
                     is_physical_for_lag = not entry.get("isLag") and not is_logical_unit
                     if is_physical_for_lag:
-                        lag_f = aggregate_name_f or ""
+                        lag_f = aggregate_name or ""
                         if nb_iface is not None:
                             lag_obj = getattr(nb_iface, "lag", None)
                             if lag_obj is not None:
@@ -1156,7 +1198,7 @@ def main():
                 parent_n = ""
                 nParent = ""
                 if args.parent and is_logical_unit:
-                    parent_f = (entry.get("aggregateInterface") or "").strip()
+                    parent_f = aggregate_name
                     if nb_iface is not None:
                         parent_obj = getattr(nb_iface, "parent", None)
                         if parent_obj is not None:
@@ -1195,22 +1237,15 @@ def main():
                         # В Netbox: routed → mode=null, bridged → mode=tagged
                         updates["mode"] = _fwd_file_to_netbox_mode(fwd_f)
                     # Related Interfaces (LAG): физические члены LAG должны ссылаться на интерфейс LAG
-                    aggregate_name = (entry.get("aggregateInterface") or "").strip()
                     if aggregate_name and not entry.get("isLag") and not is_logical_unit:
                         nb_lag = nb_by_iface_name.get(aggregate_name)
-                        if nb_lag:
-                            cur_lag = getattr(nb_iface, "lag", None)
-                            cur_lag_id = cur_lag if isinstance(cur_lag, (int, type(None))) else getattr(cur_lag, "id", None)
-                            if cur_lag_id != getattr(nb_lag, "id", None):
-                                updates["lag"] = nb_lag.id
+                        if nb_lag and _get_related_interface_id(nb_iface, "lag") != getattr(nb_lag, "id", None):
+                            updates["lag"] = nb_lag.id
                     # Parent interface: логические юниты (ae5.0) должны ссылаться на родительский LAG (ae5)
                     elif aggregate_name and is_logical_unit:
                         nb_parent_iface = nb_by_iface_name.get(aggregate_name)
-                        if nb_parent_iface:
-                            cur_parent = getattr(nb_iface, "parent", None)
-                            cur_parent_id = cur_parent if isinstance(cur_parent, (int, type(None))) else getattr(cur_parent, "id", None)
-                            if cur_parent_id != getattr(nb_parent_iface, "id", None):
-                                updates["parent"] = nb_parent_iface.id
+                        if nb_parent_iface and _get_related_interface_id(nb_iface, "parent") != getattr(nb_parent_iface, "id", None):
+                            updates["parent"] = nb_parent_iface.id
                     if updates:
                         try:
                             nb_iface.update(updates)
@@ -1270,10 +1305,8 @@ def main():
                         if mode_val is not None:
                             create_data["mode"] = mode_val
                     # Parent interface для логического юнита (ae5.0 → ae5)
-                    if is_logical_unit:
-                        parent_name = (entry.get("aggregateInterface") or "").strip()
-                        if parent_name and parent_name in nb_by_iface_name:
-                            create_data["parent"] = nb_by_iface_name[parent_name].id
+                    if is_logical_unit and aggregate_name and aggregate_name in nb_by_iface_name:
+                        create_data["parent"] = nb_by_iface_name[aggregate_name].id
                     try:
                         nb_iface = nb.dcim.interfaces.create(**create_data)
                         nb_by_iface_name[int_name] = nb_iface  # чтобы второй проход (LAG) и последующие записи видели новый интерфейс
@@ -1286,52 +1319,14 @@ def main():
                         print("Ошибка создания {} {}: {} — {}".format(dev_name, int_name, create_data, e), file=sys.stderr, flush=True)
                 mt_to_set_display = mt_to_set if nM else ""
                 rows.append((dev_name, int_name, nb_name, note, desc_f, desc_n, nD, mt_f, mt_n, nM, mt_to_set_display, bw_f, speed_n, nB, dup_f_out, dup_n_out, nDup, mac_f, mac_n, nMac, mtu_f, mtu_n, nMtu, txp_f_out, txp_n_out, nTxp, desc_to_set, speed_to_set, dup_to_set, mtu_to_set_display, txp_to_set, fwd_f, fwd_n, nFwd, fwd_to_set, ip_f, ip_n, ip_vrf_f_display, ip_vrf_n_display, nIp, lag_f, lag_n, nLag, parent_f, parent_n, nParent))
-            # Второй проход: выставить LAG (Related Interfaces) у физических интерфейсов — при создании физического LAG мог ещё не существовать
+            # Второй проход: LAG и Parent — при создании интерфейса агрегат мог ещё не существовать
             if args.apply and args.intname:
-                for entry in payload:
-                    if not isinstance(entry, dict):
-                        continue
-                    int_name = entry.get("name")
-                    aggregate_name = (entry.get("aggregateInterface") or "").strip()
-                    if not int_name or not aggregate_name or entry.get("isLag"):
-                        continue
-                    if entry.get("isLogical") or (int_name and "." in str(int_name) and str(int_name).startswith("ae")):
-                        continue
-                    _, nb_phys = resolve_interface(int_name, nb_by_iface_name)
-                    nb_lag = nb_by_iface_name.get(aggregate_name) if aggregate_name else None
-                    if not nb_phys or not nb_lag:
-                        continue
-                    cur_lag = getattr(nb_phys, "lag", None)
-                    cur_lag_id = cur_lag if isinstance(cur_lag, (int, type(None))) else getattr(cur_lag, "id", None)
-                    if cur_lag_id != getattr(nb_lag, "id", None):
-                        try:
-                            nb_phys.update({"lag": nb_lag.id})
-                            print("{} {}: привязан к LAG {}".format(dev_name, int_name, aggregate_name), flush=True)
-                        except Exception as e:
-                            print("Ошибка привязки {} {} к LAG {}: {}".format(dev_name, int_name, aggregate_name, e), file=sys.stderr, flush=True)
-            # Второй проход: выставить Parent у логических интерфейсов — при создании logical parent (LAG) мог ещё не существовать
-            if args.apply and args.intname:
-                for entry in payload:
-                    if not isinstance(entry, dict):
-                        continue
-                    int_name = entry.get("name")
-                    aggregate_name = (entry.get("aggregateInterface") or "").strip()
-                    if not int_name or not aggregate_name:
-                        continue
-                    if not (entry.get("isLogical") or (int_name and "." in str(int_name) and str(int_name).startswith("ae"))):
-                        continue
-                    _, nb_logical = resolve_interface(int_name, nb_by_iface_name)
-                    nb_parent_iface = nb_by_iface_name.get(aggregate_name) if aggregate_name else None
-                    if not nb_logical or not nb_parent_iface:
-                        continue
-                    cur_parent = getattr(nb_logical, "parent", None)
-                    cur_parent_id = cur_parent if isinstance(cur_parent, (int, type(None))) else getattr(cur_parent, "id", None)
-                    if cur_parent_id != getattr(nb_parent_iface, "id", None):
-                        try:
-                            nb_logical.update({"parent": nb_parent_iface.id})
-                            print("{} {}: parent установлен на {}".format(dev_name, int_name, aggregate_name), flush=True)
-                        except Exception as e:
-                            print("Ошибка установки parent {} {} → {}: {}".format(dev_name, int_name, aggregate_name, e), file=sys.stderr, flush=True)
+                def _is_physical_lag_member(e, n):
+                    return not e.get("isLag") and not (e.get("isLogical") or (n and "." in str(n) and str(n).startswith("ae")))
+                def _is_logical_unit_entry(e, n):
+                    return e.get("isLogical") or (n and "." in str(n) and str(n).startswith("ae"))
+                _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, "lag", _is_physical_lag_member, "LAG")
+                _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, "parent", _is_logical_unit_entry, "parent")
         if skipped_no_netbox:
             print("Пропущено (устройство есть в файле, но нет в Netbox по тегу): {}.".format(", ".join(skipped_no_netbox)))
         if skipped_not_list:
