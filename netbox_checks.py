@@ -496,6 +496,14 @@ def main():
         args.tx_power = True
         args.forwarding_model = True
 
+    has_checks = (
+        args.intname or args.description or args.mediatype or args.bandwidth or args.duplex
+        or args.mac or args.mtu or args.tx_power or args.forwarding_model
+    )
+    if not has_checks and not args.apply:
+        print("Укажите хотя бы одну проверку: --description, --mediatype, --all и т.д. См. --help.", file=sys.stderr)
+        return 1
+
     url = os.environ.get("NETBOX_URL")
     token = os.environ.get("NETBOX_TOKEN")
     netbox_tag = os.environ.get("NETBOX_TAG", "border")
@@ -520,9 +528,12 @@ def main():
         nb_devices = list(nb.dcim.devices.filter(tag=netbox_tag))
     except Exception as e:
         err_msg = str(e).strip() if e else "неизвестная ошибка"
-        if "401" in err_msg or "Unauthorized" in err_msg or "Authentication" in err_msg.lower() or "token" in err_msg.lower():
+        err_lower = err_msg.lower()
+        if "401" in err_msg or "unauthorized" in err_lower or "authentication" in err_lower or "token" in err_lower:
             print("Ошибка доступа к NetBox: неверный или просроченный токен. Проверьте NETBOX_TOKEN.", file=sys.stderr)
-        elif "Connection" in err_msg or "connect" in err_msg.lower() or "ECONNREFUSED" in err_msg:
+        elif "connecttimeout" in err_lower or "timed out" in err_lower or "timeout" in err_lower:
+            print("Ошибка доступа к NetBox: таймаут подключения. Проверьте NETBOX_URL и доступность сервера.", file=sys.stderr)
+        elif "connection" in err_lower or "connect" in err_lower or "econnrefused" in err_lower:
             print("Ошибка доступа к NetBox: не удалось подключиться. Проверьте NETBOX_URL и доступность сервера.", file=sys.stderr)
         else:
             print("Ошибка доступа к NetBox: {}.".format(err_msg), file=sys.stderr)

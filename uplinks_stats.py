@@ -18,6 +18,7 @@ import json
 import os
 import re
 import socket
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -543,7 +544,11 @@ def _run_report(netbox_tag, ssh_suffix):
     """Режим отчёта: таблица NetBox vs SSH по устройствам с тегом."""
     nb = pynetbox.api(os.environ.get("NETBOX_URL"), token=os.environ.get("NETBOX_TOKEN"))
     print("Загрузка списка устройств (tag={})...".format(netbox_tag), flush=True)
-    devices = list(nb.dcim.devices.filter(tag=netbox_tag))
+    try:
+        devices = list(nb.dcim.devices.filter(tag=netbox_tag))
+    except Exception as e:
+        print("Ошибка доступа к NetBox: {}.".format(_netbox_error_message(e)), file=sys.stderr)
+        return 1
     if not devices:
         print("Устройств с тегом '{}' не найдено".format(netbox_tag))
         return 0
@@ -639,25 +644,50 @@ def _run_report(netbox_tag, ssh_suffix):
     return 0
 
 
+DEFAULT_STATS_FILE = "dry-ssh.json"
+
+
+def _load_stats_file(path):
+    """Загрузить JSON с ключом devices. Возврат (data, None) или (None, error_msg)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            out = json.load(f)
+    except FileNotFoundError:
+        return None, "Файл не найден: {}".format(path)
+    except json.JSONDecodeError as e:
+        return None, "Ошибка разбора JSON в файле: {}".format(e)
+    if "devices" not in out:
+        return None, "В файле ожидается структура с ключом 'devices'."
+    return out, None
+
+
+def _netbox_error_message(e):
+    """Преобразовать исключение при обращении к NetBox в короткое сообщение."""
+    err_msg = str(e).strip() if e else "неизвестная ошибка"
+    err_lower = err_msg.lower()
+    if "401" in err_msg or "unauthorized" in err_lower or "authentication" in err_lower or "token" in err_lower:
+        return "Неверный или просроченный токен. Проверьте NETBOX_TOKEN."
+    if "connecttimeout" in err_lower or "timed out" in err_lower or "timeout" in err_lower:
+        return "Таймаут подключения к NetBox. Проверьте NETBOX_URL и доступность сервера."
+    if "connection" in err_lower or "econnrefused" in err_lower or "connect" in err_lower:
+        return "Не удалось подключиться к NetBox. Проверьте NETBOX_URL и доступность сервера."
+    return err_msg
+
+
 def main():
     parser = argparse.ArgumentParser(description="Сбор и отчёт по uplink-интерфейсам (Arista, Juniper)")
     parser.add_argument("--report", action="store_true", help="Режим отчёта: таблица NetBox vs SSH по всем устройствам с тегом")
+    parser.add_argument("--fetch", action="store_true", help="Режим статистики: опросить устройства по SSH (иначе по умолчанию читается файл)")
     parser.add_argument("--json", action="store_true", help="Вывод в формате JSON (режим статистики)")
-    parser.add_argument("--from-file", metavar="FILE", dest="from_file", help="Не опрашивать SSH; взять данные из JSON-файла и вывести таблицу/JSON")
+    parser.add_argument("--from-file", metavar="FILE", dest="from_file", help="Путь к JSON с devices (по умолчанию {})".format(DEFAULT_STATS_FILE))
     args = parser.parse_args()
 
-    if args.from_file:
-        try:
-            with open(args.from_file, "r", encoding="utf-8") as f:
-                out = json.load(f)
-        except FileNotFoundError:
-            print("Файл не найден: {}".format(args.from_file))
-            return 1
-        except json.JSONDecodeError as e:
-            print("Ошибка разбора JSON в файле: {}".format(e))
-            return 1
-        if "devices" not in out:
-            print("В файле ожидается структура с ключом 'devices'.")
+    # Режим «чтение из файла» (по умолчанию), если не запрошены --report или --fetch
+    if not args.fetch and not args.report:
+        input_file = args.from_file if args.from_file is not None else DEFAULT_STATS_FILE
+        out, err = _load_stats_file(input_file)
+        if err:
+            print(err, file=sys.stderr)
             return 1
         if args.json:
             print(json.dumps(out, indent=2, ensure_ascii=False))
@@ -696,7 +726,11 @@ def main():
 
     nb = pynetbox.api(url, token=token)
     print("Загрузка устройств (tag={})...".format(netbox_tag), flush=True)
-    devices = list(nb.dcim.devices.filter(tag=netbox_tag))
+    try:
+        devices = list(nb.dcim.devices.filter(tag=netbox_tag))
+    except Exception as e:
+        print("Ошибка доступа к NetBox: {}.".format(_netbox_error_message(e)), file=sys.stderr)
+        return 1
     if not devices:
         print("Устройств с тегом '{}' не найдено".format(netbox_tag))
         return 0

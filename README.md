@@ -44,9 +44,11 @@ export SSH_PASSWORD="password-for-devices"
 
 **Режим отчёта (`--report`):** быстрый отчёт для визуальной сверки «что в NetBox» и «что на устройстве» по uplink-интерфейсам (с описанием, содержащим `Uplink:`). Поддерживаются Juniper и Arista (по `platform.name` в NetBox). Только таблица, без сохранения JSON.
 
-**Режим статистики (по умолчанию):** сбор uplink-статистики Arista: устройства из NetBox по тегу, опрос по SSH, результат — таблица или JSON. Либо чтение уже готового JSON без SSH (`--from-file`).
+**Режим статистики:** по умолчанию данные читаются из файла `dry-ssh.json` (таблица или `--json`). С флагом `--fetch` — опрос устройств по SSH (NetBox по тегу → только Arista → сбор по каждому uplink'у), результат — таблица или JSON.
 
-**Что собирается в режиме статистики:** берутся только интерфейсы, у которых в description есть строка `Uplink:`. Для каждого такого интерфейса по SSH выполняются команды `show interfaces <name> | json | no-more` и `show interfaces <name> transceiver | json | no-more`. Из вывода извлекаются поля:
+**Устройства и интерфейсы в режиме статистики (при `--fetch`):** устройства берутся из NetBox по тегу (переменная `NETBOX_TAG`), учитываются только с платформой Arista EOS. Интерфейсы — только те, у которых в описании (description) есть строка `Uplink:`.
+
+**Что собирается по каждому такому интерфейсу (при `--fetch`):** для каждого интерфейса по SSH выполняются команды `show interfaces <name> | json | no-more` и `show interfaces <name> transceiver | json | no-more`. Из вывода извлекаются поля:
 
 | Поле | Источник | Описание |
 |------|----------|----------|
@@ -66,23 +68,26 @@ export SSH_PASSWORD="password-for-devices"
 | Ключ | Описание |
 |------|----------|
 | `--report` | Режим отчёта: таблица NetBox vs SSH (Juniper + Arista) |
+| `--fetch` | Режим статистики: опросить устройства по SSH (иначе по умолчанию читается файл `dry-ssh.json`) |
 | `--json` | Вывод в формате JSON (режим статистики) |
-| `--from-file FILE` | Не опрашивать SSH; взять данные из JSON-файла и вывести таблицу/JSON |
+| `--from-file FILE` | Путь к JSON с ключом `devices` (по умолчанию `dry-ssh.json`) |
 
 **Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `SSH_USERNAME`, `SSH_PASSWORD`, `SSH_HOST_SUFFIX`, `PARALLEL_DEVICES`, `NETBOX_TAG`. Опционально: `DEBUG_SSH_JSON=1` (режим отчёта).
 
 ```bash
-python uplinks_stats.py --report
 python uplinks_stats.py
 python uplinks_stats.py --json
-python uplinks_stats.py --from-file dry-ssh.json
+python uplinks_stats.py --from-file other.json
+python uplinks_stats.py --fetch
+python uplinks_stats.py --fetch --json
+python uplinks_stats.py --report
 ```
 
 ---
 
 ### 2. `netbox_checks.py`
 
-Сверка данных из JSON-файла с NetBox и при необходимости обновление интерфейсов в NetBox. **Подключения по SSH к устройствам нет** — скрипт всегда читает данные только из файла. Если `-f` не указан, используется файл по умолчанию `dry-ssh.json` (его нужно заранее получить, например через `uplinks_stats.py --json > dry-ssh.json`). Устройства в NetBox выбираются по тегу.
+Сверка данных из JSON-файла с NetBox и при необходимости обновление интерфейсов в NetBox. **Подключения по SSH к устройствам нет** — скрипт всегда читает данные только из файла. Если `-f` не указан, используется файл по умолчанию `dry-ssh.json` (его можно получить через `uplinks_stats.py --fetch --json > dry-ssh.json` или использовать уже сохранённый). Устройства в NetBox выбираются по тегу.
 
 **Входной файл:** по умолчанию `dry-ssh.json` (структура с ключом `devices`: имя устройства → список интерфейсов с полями `name`, `description`, `mediaType`, `bandwidth`, `duplex`, `physicalAddress`, `mtu`, `txPower` и т.д.).
 
@@ -190,9 +195,9 @@ python netbox_interface_types.py -o my_types.json
 
 ## Типичный сценарий
 
-1. Собрать данные с устройств в JSON:
+1. Собрать данные с устройств в JSON (опрос по SSH):
    ```bash
-   python uplinks_stats.py --json > dry-ssh.json
+   python uplinks_stats.py --fetch --json > dry-ssh.json
    ```
 2. Сверить с NetBox и посмотреть расхождения:
    ```bash
@@ -253,12 +258,6 @@ python zabbix_map.py --zabbix --update-map --host MIA-EQX-7280QR-1 --debug
 # Выгрузить карту из API (например, созданную вручную) для сравнения формата
 python zabbix_map.py --export-map 10 > map_10.json
 ```
-
----
-
-### 5. Akvorado: перцентиль и удаление за период
-
-Скрипты сравнения (Zabbix vs Akvorado, только Akvorado, discover таблиц) и удаления данных за период перенесены в отдельный репозиторий **akvorado-tools** (папка на уровень выше: `../akvorado-tools`). Там: `zabbix_percentile.py`, `akvorado_delete_period.py`, свой README и requirements.
 
 ---
 
