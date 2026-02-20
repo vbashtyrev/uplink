@@ -351,6 +351,90 @@ def _arista_interface_link_up(if_obj):
     return True
 
 
+def _is_global_routable_address(addr_with_prefix):
+    """
+    Только глобальные маршрутизируемые адреса (IPv4 и IPv6).
+    Исключаем: private (10/8, 172.16/12, 192.168/16), link-local (169.254/16, fe80::/10),
+    unique local (fc00::/7), loopback (127/8, ::1).
+    """
+    if not addr_with_prefix or not isinstance(addr_with_prefix, str):
+        return False
+    s = addr_with_prefix.strip().split("/")[0].lower()
+    if ":" in s:
+        # IPv6: исключаем fe80::/10, fc00::/7, ::1
+        if s == "::1" or s == "0:0:0:0:0:0:0:1":
+            return False
+        if s.startswith("fe8") or s.startswith("fe9") or s.startswith("fea") or s.startswith("feb"):
+            return False
+        if s.startswith("fc") or s.startswith("fd"):
+            return False
+        return True
+    # IPv4: исключаем 10/8, 172.16/12, 192.168/16, 169.254/16, 127/8
+    parts = s.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        a, b, c, d = (int(x) for x in parts)
+    except ValueError:
+        return False
+    if a == 10:
+        return False
+    if a == 172 and 16 <= b <= 31:
+        return False
+    if a == 192 and b == 168:
+        return False
+    if a == 169 and b == 254:
+        return False
+    if a == 127:
+        return False
+    return True
+
+
+def _parse_arista_interface_ips(if_obj):
+    """
+    Из Arista show interfaces вытащить IPv4/IPv6 для routed-интерфейса.
+    Только глобальные маршрутизируемые адреса (private/link-local не берём).
+    Возврат: {"ipv4_addresses": ["addr/prefix", ...], "ipv6_addresses": ["addr/prefix", ...]}.
+    """
+    ipv4 = []
+    ipv6 = []
+    if (if_obj.get("forwardingModel") or "").strip().lower() != "routed":
+        return {"ipv4_addresses": ipv4, "ipv6_addresses": ipv6}
+    # IPv4: interfaceAddress — массив, элемент: primaryIp: { address, maskLen }
+    for block in (if_obj.get("interfaceAddress") or []):
+        if not isinstance(block, dict):
+            continue
+        pi = block.get("primaryIp")
+        if not isinstance(pi, dict):
+            continue
+        addr = (pi.get("address") or "").strip()
+        if not addr or addr == "0.0.0.0":
+            continue
+        mask = pi.get("maskLen")
+        addr_str = "{}/{}".format(addr, mask) if mask is not None else addr
+        if not _is_global_routable_address(addr_str):
+            continue
+        ipv4.append(addr_str)
+    # IPv6: только globalUnicastIp6s, только глобальные (не link-local, не unique local)
+    ip6_block = if_obj.get("interfaceAddressIp6")
+    if isinstance(ip6_block, dict):
+        for g in (ip6_block.get("globalUnicastIp6s") or []):
+            if not isinstance(g, dict):
+                continue
+            addr = (g.get("address") or "").strip()
+            if not addr:
+                continue
+            subnet = (g.get("subnet") or "").strip()
+            prefix = ""
+            if "/" in subnet:
+                prefix = subnet.split("/", 1)[1].strip()
+            addr_str = "{}/{}".format(addr, prefix) if prefix else addr
+            if not _is_global_routable_address(addr_str):
+                continue
+            ipv6.append(addr_str)
+    return {"ipv4_addresses": ipv4, "ipv6_addresses": ipv6}
+
+
 def arista_cli_interface_name(name):
     """Ethernet72/1 -> ethernet 72/1 для команды show int ..."""
     return re.sub(r"([a-zA-Z]+)(\d)", r"\1 \2", name).strip().lower()
@@ -762,6 +846,11 @@ def get_arista_uplink_stats(host, username, password, timeout=45, command_timeou
         }
         if switchport_config is not None:
             row["switchportConfiguration"] = switchport_config
+        # IP-адреса для routed-интерфейсов (сверка с NetBox в netbox_checks.py)
+        ips = _parse_arista_interface_ips(if_obj)
+        if ips["ipv4_addresses"] or ips["ipv6_addresses"]:
+            row["ipv4_addresses"] = ips["ipv4_addresses"]
+            row["ipv6_addresses"] = ips["ipv6_addresses"]
         result.append(row)
         time.sleep(0.3)
 
@@ -780,6 +869,45 @@ def _parse_juniper_logical_mtu(log_iface):
         if mtu_raw and str(mtu_raw).isdigit():
             return int(mtu_raw)
     return None
+
+
+def _parse_juniper_logical_ip_addresses(log_iface):
+    """
+    Из logical-interface Junos вытащить ifa-local для address-family inet (IPv4) и inet6 (IPv6).
+    Возврат: {"ipv4_addresses": ["addr/prefix", ...], "ipv6_addresses": ["addr/prefix", ...]}.
+    """
+    ipv4 = []
+    ipv6 = []
+    afs = log_iface.get("address-family") or []
+    if not isinstance(afs, list):
+        afs = [afs] if afs else []
+    for af in afs:
+        if not isinstance(af, dict):
+            continue
+        family = _juniper_data(af.get("address-family-name")) or ""
+        if family not in ("inet", "inet6"):
+            continue
+        addrs = af.get("interface-address") or []
+        if not isinstance(addrs, list):
+            addrs = [addrs] if addrs else []
+        for ia in addrs:
+            if not isinstance(ia, dict):
+                continue
+            ifa_local = _juniper_data(ia.get("ifa-local"))
+            ifa_dest = _juniper_data(ia.get("ifa-destination"))
+            if not ifa_local:
+                continue
+            prefix = ""
+            if ifa_dest and "/" in str(ifa_dest):
+                prefix = str(ifa_dest).split("/", 1)[1]
+            addr_str = str(ifa_local).strip() + ("/" + prefix if prefix else "")
+            if not _is_global_routable_address(addr_str):
+                continue
+            if family == "inet":
+                ipv4.append(addr_str)
+            else:
+                ipv6.append(addr_str)
+    return {"ipv4_addresses": ipv4, "ipv6_addresses": ipv6}
 
 
 def _juniper_ae_bundle_name(iface_json):
@@ -1092,6 +1220,54 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
             agg_row["isLag"] = True
             result.append(agg_row)
             aggregates_added.add(aggregate_name)
+            # Строка по логическому unit 0 (ae5.0): адреса из address-family inet/inet6 → ifa-local
+            log_iface_for_unit0 = None
+            if ae_data:
+                ainfos_ = ae_data.get("interface-information") or []
+                if isinstance(ainfos_, dict):
+                    ainfos_ = [ainfos_]
+                for ainfo_ in ainfos_:
+                    if not isinstance(ainfo_, dict):
+                        continue
+                    phys_list_ = ainfo_.get("physical-interface") or []
+                    if isinstance(phys_list_, dict):
+                        phys_list_ = [phys_list_] if phys_list_ else []
+                    for aph_ in phys_list_:
+                        if not isinstance(aph_, dict) or _juniper_data(aph_.get("name")) != aggregate_name:
+                            continue
+                        logics_ = aph_.get("logical-interface") or []
+                        if not isinstance(logics_, list):
+                            logics_ = [logics_] if logics_ else []
+                        for log_iface in logics_:
+                            if isinstance(log_iface, dict) and _juniper_data(log_iface.get("name")) == logical_name:
+                                log_iface_for_unit0 = log_iface
+                                break
+                        if log_iface_for_unit0:
+                            break
+                    if log_iface_for_unit0:
+                        break
+            if log_iface_for_unit0:
+                addrs = _parse_juniper_logical_ip_addresses(log_iface_for_unit0)
+                log_desc = (_juniper_data(log_iface_for_unit0.get("description")) or desc or "").strip()
+                first_physical = physical_names[0] if physical_names else None
+                logical_row = {
+                    "name": logical_name,
+                    "description": log_desc,
+                    "mediaType": None,
+                    "bandwidth": None,
+                    "duplex": None,
+                    "physicalAddress": None,
+                    "mtu": None,
+                    "txPower": None,
+                    "forwardingModel": None,
+                    "physicalInterface": first_physical,
+                    "aggregateInterface": aggregate_name,
+                    "logicalInterface": logical_name,
+                    "isLogical": True,
+                    "ipv4_addresses": addrs["ipv4_addresses"],
+                    "ipv6_addresses": addrs["ipv6_addresses"],
+                }
+                result.append(logical_row)
             time.sleep(0.2)
 
         for physical_name in physical_names:

@@ -7,7 +7,7 @@
 Ключ --mediatype: сверка mediaType / type (файл/SSH vs Netbox).
 Ключ --mt-ref [FILE]: сверка mediaType со справочником (файл с interface_types);
   данные из файла/SSH и из Netbox сверяются со списком value в справочнике (по умолчанию netbox_interface_types.json).
-Ключ --show-change: показывать колонки «что подставим в Netbox» по выбранным ключам (mediatype → mtToSet, description → descToSet, bandwidth → speedToSet, duplex → dupToSet, mtu → mtuToSet, tx-power → txpToSet).
+Ключ --show-change: показывать колонки «что подставим в Netbox» по выбранным ключам (mediatype → mtToSet, description → descToSet, …). Если проверки не заданы — включаются все (--all); при явном --show-change все колонки выводятся, без скрытия групп без расхождений.
 Ключ --apply: вносить изменения в Netbox при разнице по выбранным ключам (--mediatype, --description, --bandwidth, --duplex, --mtu, --tx-power).
   Справочник типов (--mt-ref) по умолчанию включён (netbox_interface_types.json); для типа в Netbox подставляется value/slug из справочника.
 
@@ -177,6 +177,9 @@ TXPOWER_NOTE_DIFF = 14  # txPower (dry-ssh) и tx_power (Netbox) различа�
 # Код для forwardingModel / mode (15)
 FWD_NOTE_DIFF = 15     # forwardingModel (dry-ssh) и mode (Netbox) различаются
 
+# Код для IP-адресов (17)
+IP_NOTE_DIFF = 17      # ipv4/ipv6 адреса (файл) и привязанные к интерфейсу в Netbox различаются
+
 # Общая легенда для одной таблицы
 ALL_LEGEND = {
     **NOTE_LEGEND,
@@ -192,6 +195,7 @@ ALL_LEGEND = {
     MTU_NOTE_DIFF: "mtu из dry-ssh и mtu в Netbox различаются",
     TXPOWER_NOTE_DIFF: "txPower (dry-ssh) и tx_power (Netbox) различаются",
     FWD_NOTE_DIFF: "forwardingModel (dry-ssh) и mode (Netbox) различаются",
+    IP_NOTE_DIFF: "IPv4/IPv6 адреса (файл) и привязанные к интерфейсу в Netbox различаются",
 }
 
 
@@ -264,6 +268,111 @@ def _mac_both_filled(nb_iface):
     addrs = getattr(nb_iface, "mac_addresses", None)
     list_ok = bool(addrs and len(addrs) > 0)
     return display_ok and list_ok
+
+
+def _normalize_ip_address(addr):
+    """Нормализовать адрес для сравнения: строка без пробелов, нижний регистр для IPv6."""
+    if addr is None:
+        return ""
+    s = str(addr).strip().lower()
+    return s
+
+
+def _is_global_routable_address(addr_with_prefix):
+    """
+    Только глобальные маршрутизируемые адреса (IPv4 и IPv6).
+    Исключаем: private, link-local, unique local, loopback — как в uplinks_stats.
+    """
+    if not addr_with_prefix or not isinstance(addr_with_prefix, str):
+        return False
+    s = addr_with_prefix.strip().split("/")[0].lower()
+    if ":" in s:
+        if s == "::1" or s == "0:0:0:0:0:0:0:1":
+            return False
+        if s.startswith(("fe8", "fe9", "fea", "feb")):
+            return False
+        if s.startswith(("fc", "fd")):
+            return False
+        return True
+    parts = s.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        a, b, c, d = (int(x) for x in parts)
+    except ValueError:
+        return False
+    if a == 10:
+        return False
+    if a == 172 and 16 <= b <= 31:
+        return False
+    if a == 192 and b == 168:
+        return False
+    if a == 169 and b == 254:
+        return False
+    if a == 127:
+        return False
+    return True
+
+
+def _get_interface_ip_addresses(nb, nb_iface):
+    """Список IP-адресов (с префиксом), привязанных к интерфейсу в Netbox. Только глобальные маршрутизируемые."""
+    if nb is None or nb_iface is None:
+        return []
+    try:
+        ip_list = list(nb.ipam.ip_addresses.filter(interface_id=nb_iface.id))
+    except Exception:
+        return []
+    out = []
+    for ip_obj in ip_list:
+        addr = getattr(ip_obj, "address", None)
+        if addr:
+            addr_norm = _normalize_ip_address(addr)
+            if _is_global_routable_address(addr_norm):
+                out.append(addr_norm)
+    return sorted(out)
+
+
+def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface, addrs_f):
+    """
+    Привести привязку IP к интерфейсу в NetBox к списку из файла (addrs_f — глобальные адреса).
+    Добавить недостающие (создать или переназначить), отвязать лишние с интерфейса.
+    """
+    if nb is None or nb_iface is None:
+        return
+    addrs_n = _get_interface_ip_addresses(nb, nb_iface)
+    set_f = set(addrs_f or [])
+    set_n = set(addrs_n)
+    to_add = set_f - set_n
+    to_remove = set_n - set_f
+    try:
+        for addr in to_remove:
+            existing = list(nb.ipam.ip_addresses.filter(address=addr))
+            if existing:
+                ip_obj = existing[0]
+                ip_obj.assigned_object_id = None
+                ip_obj.assigned_object_type = None
+                ip_obj.save()
+                print("IP {} {} {}: отвязан от интерфейса".format(dev_name, iface_display_name, addr), flush=True)
+        for addr in to_add:
+            existing = list(nb.ipam.ip_addresses.filter(address=addr))
+            if existing:
+                ip_obj = existing[0]
+                cur_id = getattr(ip_obj, "assigned_object_id", None)
+                if cur_id == nb_iface.id:
+                    continue
+                ip_obj.assigned_object_id = nb_iface.id
+                ip_obj.assigned_object_type = "dcim.interface"
+                ip_obj.save()
+                print("IP {} {} {}: привязан к интерфейсу".format(dev_name, iface_display_name, addr), flush=True)
+            else:
+                nb.ipam.ip_addresses.create(
+                    address=addr,
+                    assigned_object_id=nb_iface.id,
+                    assigned_object_type="dcim.interface",
+                )
+                print("IP {} {} {}: создан и привязан к интерфейсу".format(dev_name, iface_display_name, addr), flush=True)
+    except Exception as e:
+        print("Ошибка применения IP {} {}: {}".format(dev_name, iface_display_name, e), file=sys.stderr, flush=True)
 
 
 def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f):
@@ -488,6 +597,12 @@ def main():
         help="forwardingModel (файл) / mode (Netbox) — режим работы порта",
     )
     g_checks.add_argument(
+        "--ip-address",
+        action="store_true",
+        dest="ip_address",
+        help="IPv4/IPv6 адреса (файл: ipv4_addresses, ipv6_addresses) vs привязанные к интерфейсу в Netbox",
+    )
+    g_checks.add_argument(
         "--all",
         action="store_true",
         dest="all_checks",
@@ -545,12 +660,13 @@ def main():
         args.mtu = True
         args.tx_power = True
         args.forwarding_model = True
+        args.ip_address = True
     if args.no_mt_ref:
         args.mt_ref = None
     # При одном --hide-ok-hosts без проверок включаем все проверки (чтобы был вывод списка и статистики)
     if args.hide_ok_hosts and not (
         args.intname or args.description or args.mediatype or args.bandwidth or args.duplex
-        or args.mac or args.mtu or args.tx_power or args.forwarding_model
+        or args.mac or args.mtu or args.tx_power or args.forwarding_model or args.ip_address
     ):
         args.intname = True
         args.description = True
@@ -561,11 +677,13 @@ def main():
         args.mtu = True
         args.tx_power = True
         args.forwarding_model = True
+        args.ip_address = True
 
     has_checks = (
         args.intname or args.description or args.mediatype or args.bandwidth or args.duplex
-        or args.mac or args.mtu or args.tx_power or args.forwarding_model
+        or args.mac or args.mtu or args.tx_power or args.forwarding_model or args.ip_address
     )
+    show_change_requested = args.show_change
     if not has_checks and not args.apply:
         args.intname = True
         args.description = True
@@ -576,8 +694,10 @@ def main():
         args.mtu = True
         args.tx_power = True
         args.forwarding_model = True
+        args.ip_address = True
         args.show_change = True
-        args.hide_no_diff_cols = True
+        # Не скрывать колонки без расхождений, если пользователь явно запросил --show-change
+        args.hide_no_diff_cols = not show_change_requested
 
     url = os.environ.get("NETBOX_URL")
     token = os.environ.get("NETBOX_TOKEN")
@@ -640,7 +760,7 @@ def main():
               "сверка может показывать расхождения из-за разного написания (файл vs Netbox).", file=sys.stderr, flush=True)
 
     out = {}
-    if args.intname or args.description or args.mediatype or (args.show_change and mt_ref_values) or args.bandwidth or args.duplex or args.mac or args.mtu or args.tx_power or args.forwarding_model:
+    if args.intname or args.description or args.mediatype or (args.show_change and mt_ref_values) or args.bandwidth or args.duplex or args.mac or args.mtu or args.tx_power or args.forwarding_model or args.ip_address:
         # Один проход: строки (..., mtToSet=10, ...); индексы 26-30 — *ToSet при --show-change
         rows = []
         note_codes_used = set()
@@ -691,6 +811,7 @@ def main():
                         if desc_f != desc_n:
                             nD = DESC_NOTE_DIFF
                             note_codes_used.add(DESC_NOTE_DIFF)
+                is_logical_unit = entry.get("isLogical") or (int_name and "." in str(int_name) and str(int_name).startswith("ae"))
                 mt_f = (entry.get("mediaType") or "").strip() if (args.mediatype or args.show_change) else ""
                 mt_n = ""
                 nM = ""
@@ -698,6 +819,12 @@ def main():
                 if args.mediatype or args.show_change:
                     if nb_iface is not None:
                         mt_n = _netbox_type_to_str(nb_iface)
+                    # LAG: в файле mediaType не задаётся, в NetBox type=lag — не считать расхождением
+                    is_lag = entry.get("isLag") or (int_name and str(int_name).startswith("ae") and "." not in str(int_name))
+                    is_lag_ok = is_lag and not mt_f and mt_n == "lag"
+                    # Logical unit (ae5.0): в файле mediaType не задаётся, в NetBox type=virtual — не считать расхождением
+                    is_logical_ok = is_logical_unit and not mt_f and mt_n == "virtual"
+                    type_ok = is_lag_ok or is_logical_ok
                     ref_list = mt_ref_list or []
                     mt_f_value = _mt_to_value(mt_f, mt_ref_values or set(), ref_list) if mt_ref_values else mt_f
                     mt_n_value = _mt_to_value(mt_n, mt_ref_values or set(), ref_list) if mt_ref_values else mt_n
@@ -706,11 +833,11 @@ def main():
                         mt_to_set = mt_f_value
                     if args.mediatype and nb_iface is not None:
                         if mt_ref_values:
-                            if mt_f_value and mt_n_value and mt_f_value != mt_n_value:
+                            if mt_f_value and mt_n_value and mt_f_value != mt_n_value and not type_ok:
                                 nM = str(MT_NOTE_DIFF)
                                 note_codes_used.add(MT_NOTE_DIFF)
                         else:
-                            if mt_f != mt_n:
+                            if mt_f != mt_n and not type_ok:
                                 nM = str(MT_NOTE_DIFF)
                                 note_codes_used.add(MT_NOTE_DIFF)
                     if mt_ref_values is not None:
@@ -718,7 +845,7 @@ def main():
                         if mt_f and not _mt_in_ref(mt_f, mt_ref_values, ref_list):
                             n_codes.append(str(MT_NOTE_F_NOT_IN_REF))
                             note_codes_used.add(MT_NOTE_F_NOT_IN_REF)
-                        if mt_n and mt_n not in mt_ref_values:
+                        if mt_n and mt_n not in mt_ref_values and not type_ok:
                             n_codes.append(str(MT_NOTE_N_NOT_IN_REF))
                             note_codes_used.add(MT_NOTE_N_NOT_IN_REF)
                         if n_codes:
@@ -784,8 +911,14 @@ def main():
                     mac_f = str(mac_f_raw or "").strip() if mac_f_raw is not None else ""
                     if nb_iface is not None:
                         mac_n = _get_interface_mac(nb_iface)
-                    # У LAG (ae) MAC наследуется с физического порта — расхождение не считаем
-                    if not entry.get("isLag"):
+                    # MAC проверяем только у физических интерфейсов (не LAG, не logical unit)
+                    is_lag_for_mac = entry.get("isLag") or (int_name and str(int_name).startswith("ae") and "." not in str(int_name))
+                    is_logical = entry.get("isLogical") or (int_name and "." in str(int_name))
+                    is_physical_for_mac = not is_lag_for_mac and not is_logical
+                    if not is_physical_for_mac:
+                        mac_f = ""
+                        mac_n = ""
+                    if is_physical_for_mac:
                         mac_f_norm = _normalize_mac(mac_f)
                         mac_n_norm = _normalize_mac(mac_n)
                         if mac_f_norm and (not mac_n_norm or mac_f_norm != mac_n_norm):
@@ -849,18 +982,37 @@ def main():
                         else:
                             fwd_n = str(mode_raw or "").strip()
                     # В Netbox: routed → mode=null, bridged → mode=tagged; сравнение по значению для Netbox
+                    # У logical unit в файле forwardingModel не задаётся — не считать расхождением
                     fwd_f_cmp = (_fwd_file_to_netbox_mode(fwd_f) or "")
                     fwd_n_cmp = (fwd_n or "").strip().lower()
-                    if fwd_f_cmp != fwd_n_cmp:
+                    if fwd_f_cmp != fwd_n_cmp and not (is_logical_unit and not fwd_f):
                         nFwd = str(FWD_NOTE_DIFF)
                         note_codes_used.add(FWD_NOTE_DIFF)
-                fwd_to_set = (_fwd_file_to_netbox_mode(fwd_f) or "") if (args.show_change and args.forwarding_model and fwd_f) else ""
-                # значения «что подставим» для --show-change (индексы 26–30)
-                desc_to_set = desc_f if (args.show_change and args.description) else ""
-                speed_to_set = (bw_f // 1000) if (args.show_change and args.bandwidth and bw_f is not None) else ""
-                dup_to_set = (_normalize_duplex(dup_f) or dup_f) if (args.show_change and args.duplex and dup_f) else ""
-                mtu_to_set = mtu_f if (args.show_change and args.mtu and mtu_f != "") else ""
-                txp_to_set = txp_f_out if (args.show_change and args.tx_power) else ""
+                fwd_to_set = (_fwd_file_to_netbox_mode(fwd_f) or "") if (args.show_change and args.forwarding_model and fwd_f and nFwd) else ""
+                ip_f = ""
+                ip_n = ""
+                nIp = ""
+                if args.ip_address:
+                    ipv4_f = entry.get("ipv4_addresses") or []
+                    ipv6_f = entry.get("ipv6_addresses") or []
+                    if not isinstance(ipv4_f, list):
+                        ipv4_f = [ipv4_f] if ipv4_f is not None else []
+                    if not isinstance(ipv6_f, list):
+                        ipv6_f = [ipv6_f] if ipv6_f is not None else []
+                    addrs_f = sorted([n for a in ipv4_f + ipv6_f if a for n in (_normalize_ip_address(a),) if _is_global_routable_address(n)])
+                    addrs_n = _get_interface_ip_addresses(nb, nb_iface) if nb_iface else []
+                    ip_f = ", ".join(addrs_f) if addrs_f else ""
+                    ip_n = ", ".join(addrs_n) if addrs_n else ""
+                    if addrs_f != addrs_n:
+                        nIp = str(IP_NOTE_DIFF)
+                        note_codes_used.add(IP_NOTE_DIFF)
+                # значения «что подставим» для --show-change — только когда есть расхождение (есть что применять)
+                desc_to_set = desc_f if (args.show_change and args.description and nD) else ""
+                speed_to_set = (bw_f // 1000) if (args.show_change and args.bandwidth and bw_f is not None and nB) else ""
+                dup_to_set = (_normalize_duplex(dup_f) or dup_f) if (args.show_change and args.duplex and dup_f and nDup) else ""
+                mtu_to_set_val = mtu_f if (args.show_change and args.mtu and mtu_f != "") else ""
+                mtu_to_set_display = mtu_to_set_val if nMtu else ""
+                txp_to_set = txp_f_out if (args.show_change and args.tx_power and nTxp) else ""
                 # --apply: вносить изменения в Netbox по выбранным ключам при разнице
                 if args.apply and nb_iface is not None:
                     updates = {}
@@ -872,9 +1024,9 @@ def main():
                         updates["type"] = mt_to_set if mt_to_set else mt_f
                     if args.bandwidth and bw_f is not None and (speed_n is None or (bw_f // 1000) != speed_n):
                         updates["speed"] = bw_f // 1000  # bps -> Kbps
-                    if args.duplex and dup_f:
+                    if args.duplex and nDup and dup_f:
                         dup_val = _normalize_duplex(dup_f) or dup_f
-                        if dup_val and (dup_n or "").strip() != dup_val:
+                        if dup_val:
                             updates["duplex"] = dup_val
                     if args.mtu and mtu_f != "" and (mtu_n == "" or mtu_f != mtu_n):
                         updates["mtu"] = int(mtu_f) if isinstance(mtu_f, (int, float)) else mtu_f
@@ -889,16 +1041,20 @@ def main():
                             print("Обновлено {} {}: {}".format(dev_name, nb_name or int_name, list(updates.keys())), flush=True)
                         except Exception as e:
                             print("Ошибка обновления {} {}: {} — {}".format(dev_name, nb_name or int_name, updates, e), file=sys.stderr, flush=True)
-                    # MAC в Netbox — отдельная сущность (dcim.mac-addresses); затем на интерфейсе ставим primary_mac_address
-                    # MAC только у физических интерфейсов; у LAG (ae) MAC наследуется с члена, не трогаем
-                    if args.mac and not entry.get("isLag") and (nMac or (mac_f and not mac_n)) and nb_iface is not None:
+                    # MAC в Netbox — отдельная сущность (dcim.mac-addresses); только у физических интерфейсов
+                    if args.mac and is_physical_for_mac and (nMac or (mac_f and not mac_n)) and nb_iface is not None:
                         _apply_mac_to_interface(nb, dev_name, nb_name or int_name, nb_iface, mac_f)
+                    # IP в Netbox — ipam.ip_addresses с assigned_object_id/type; привести к списку из файла
+                    if args.ip_address and nIp and nb_iface is not None:
+                        _apply_ip_addresses_to_interface(nb, dev_name, nb_name or int_name, nb_iface, addrs_f)
                 elif args.apply and args.intname and note_code == NOTE_MISSING:
                     # Интерфейс в NetBox не найден — создаём и сразу заполняем все поля из файла
                     create_data = {"device": device.id, "name": int_name}
                     # LAG (агрегат ae): в NetBox тип Link Aggregation Group (LAG), slug = "lag"
                     if entry.get("isLag"):
                         create_data["type"] = "lag"
+                    elif is_logical_unit:
+                        create_data["type"] = "virtual"
                     else:
                         media_from_file = (entry.get("mediaType") or "").strip()
                         mt_raw = mt_to_set or media_from_file
@@ -940,11 +1096,14 @@ def main():
                     try:
                         nb_iface = nb.dcim.interfaces.create(**create_data)
                         print("Создан интерфейс {} {}: {}".format(dev_name, int_name, list(create_data.keys())), flush=True)
-                        if args.mac and not entry.get("isLag") and mac_f:
+                        if args.mac and is_physical_for_mac and mac_f:
                             _apply_mac_to_interface(nb, dev_name, int_name, nb_iface, mac_f)
+                        if args.ip_address and addrs_f:
+                            _apply_ip_addresses_to_interface(nb, dev_name, int_name, nb_iface, addrs_f)
                     except Exception as e:
                         print("Ошибка создания {} {}: {} — {}".format(dev_name, int_name, create_data, e), file=sys.stderr, flush=True)
-                rows.append((dev_name, int_name, nb_name, note, desc_f, desc_n, nD, mt_f, mt_n, nM, mt_to_set, bw_f, speed_n, nB, dup_f_out, dup_n_out, nDup, mac_f, mac_n, nMac, mtu_f, mtu_n, nMtu, txp_f_out, txp_n_out, nTxp, desc_to_set, speed_to_set, dup_to_set, mtu_to_set, txp_to_set, fwd_f, fwd_n, nFwd, fwd_to_set))
+                mt_to_set_display = mt_to_set if nM else ""
+                rows.append((dev_name, int_name, nb_name, note, desc_f, desc_n, nD, mt_f, mt_n, nM, mt_to_set_display, bw_f, speed_n, nB, dup_f_out, dup_n_out, nDup, mac_f, mac_n, nMac, mtu_f, mtu_n, nMtu, txp_f_out, txp_n_out, nTxp, desc_to_set, speed_to_set, dup_to_set, mtu_to_set_display, txp_to_set, fwd_f, fwd_n, nFwd, fwd_to_set, ip_f, ip_n, nIp))
         if skipped_no_netbox:
             print("Пропущено (устройство есть в файле, но нет в Netbox по тегу): {}.".format(", ".join(skipped_no_netbox)))
         if skipped_not_list:
@@ -1011,8 +1170,8 @@ def main():
     return 0
 
 
-# Индексы колонок примечаний в строке (note, nD, nM, nB, nDup, nMac, nMtu, nTxp, nFwd) — для определения «есть расхождение»
-ROW_NOTE_INDICES = (3, 6, 9, 13, 16, 19, 22, 25, 33)
+# Индексы колонок примечаний в строке (note, nD, nM, nB, nDup, nMac, nMtu, nTxp, nFwd, nIp) — для определения «есть расхождение»
+ROW_NOTE_INDICES = (3, 6, 9, 13, 16, 19, 22, 25, 33, 37)
 
 
 def _row_has_diff(row):
@@ -1024,7 +1183,7 @@ def _row_has_diff(row):
 
 
 # Заголовки колонок-примечаний (nD, nM, nB, …) — для --hide-empty-note-cols
-NOTE_COL_HEADERS = {"nD", "nM", "nB", "nDup", "nMac", "nMtu", "nTxp", "nFwd"}
+NOTE_COL_HEADERS = {"nD", "nM", "nB", "nDup", "nMac", "nMtu", "nTxp", "nFwd", "nIp"}
 
 # Группы колонок по проверке: при пустом примечании во всех строках скрываем всю группу (--hide-no-diff-cols)
 DIFF_GROUPS_BY_NOTE = {
@@ -1036,6 +1195,7 @@ DIFF_GROUPS_BY_NOTE = {
     "nMtu": {"mtuF", "mtuN", "nMtu", "mtuToSet"},
     "nTxp": {"txpF", "txpN", "nTxp", "txpToSet"},
     "nFwd": {"fwdF", "fwdN", "nFwd", "fwdToSet"},
+    "nIp": {"ipF", "ipN", "nIp"},
 }
 
 
@@ -1104,6 +1264,8 @@ def _build_col_spec(args):
         cols.extend([("mtuF", 20, 8), ("mtuN", 21, 8), ("nMtu", 22, 999)])
     if args.tx_power:
         cols.extend([("txpF", 23, 10), ("txpN", 24, 10), ("nTxp", 25, 999)])
+    if args.ip_address:
+        cols.extend([("ipF", 35, 60), ("ipN", 36, 60), ("nIp", 37, 999)])
     return cols
 
 
