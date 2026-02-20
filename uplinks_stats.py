@@ -27,6 +27,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import paramiko
 import pynetbox
 
+# VRF/routing-instance для uplink'ов (только internet учитываем при сборе ip_vrf)
+UPLINK_VRF_NAME = "internet"
+
 
 def _format_ssh_connect_error(host, e):
     """
@@ -801,6 +804,17 @@ def get_arista_uplink_stats(host, username, password, timeout=45, command_timeou
         _log("SSH: uplink-интерфейсов не найдено")
         return [], None
 
+    # Список интерфейсов в VRF internet (show vrf internet | json → vrfs.internet.interfaces)
+    internet_interfaces = set()
+    send("show vrf {} | json | no-more\r\n".format(UPLINK_VRF_NAME))
+    time.sleep(0.2)
+    vrf_data = read_until_json_and_prompt(channel, timeout=command_timeout)
+    if vrf_data:
+        vrf_internet = (vrf_data.get("vrfs") or {}).get(UPLINK_VRF_NAME)
+        if isinstance(vrf_internet, dict):
+            for iface in (vrf_internet.get("interfaces") or []):
+                if iface:
+                    internet_interfaces.add(iface)
     _log("SSH: найдено uplink-интерфейсов: {} (в отчёт только с link up)".format(len(uplinks)))
     result = []
 
@@ -851,6 +865,9 @@ def get_arista_uplink_stats(host, username, password, timeout=45, command_timeou
         if ips["ipv4_addresses"] or ips["ipv6_addresses"]:
             row["ipv4_addresses"] = ips["ipv4_addresses"]
             row["ipv6_addresses"] = ips["ipv6_addresses"]
+            if_name = (if_obj.get("name") or iface_name or "").strip()
+            if if_name and if_name in internet_interfaces:
+                row["ip_vrf"] = UPLINK_VRF_NAME
         result.append(row)
         time.sleep(0.3)
 
@@ -1164,6 +1181,18 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
     time.sleep(0.2)
     chassis_hw = read_until_json_and_prompt(channel, timeout=command_timeout)
 
+    # Интерфейсы в routing-instance internet (show configuration routing-instances internet | display set | match interface)
+    internet_interfaces = set()
+    send("show configuration routing-instances {} | display set | match interface\r\n".format(UPLINK_VRF_NAME))
+    time.sleep(0.2)
+    set_output = read_until_prompt(channel, timeout=command_timeout)
+    for line in (set_output or "").splitlines():
+        line = line.strip()
+        if line.startswith("set routing-instances {} interface ".format(UPLINK_VRF_NAME)):
+            parts = line.split()
+            if len(parts) >= 5:
+                internet_interfaces.add(parts[-1])
+
     _log("SSH: найдено uplink-интерфейсов (link up): {}".format(len(uplinks)))
     result = []
     aggregates_added = set()
@@ -1267,6 +1296,9 @@ def get_juniper_uplink_stats(host, username, password, timeout=45, command_timeo
                     "ipv4_addresses": addrs["ipv4_addresses"],
                     "ipv6_addresses": addrs["ipv6_addresses"],
                 }
+                # VRF для IP: интерфейс в routing-instance internet (по конфигу)
+                if (addrs["ipv4_addresses"] or addrs["ipv6_addresses"]) and logical_name in internet_interfaces:
+                    logical_row["ip_vrf"] = UPLINK_VRF_NAME
                 result.append(logical_row)
             time.sleep(0.2)
 

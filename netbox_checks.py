@@ -315,7 +315,10 @@ def _is_global_routable_address(addr_with_prefix):
 
 
 def _get_interface_ip_addresses(nb, nb_iface):
-    """Список IP-адресов (с префиксом), привязанных к интерфейсу в Netbox. Только глобальные маршрутизируемые."""
+    """
+    Список IP (addr, vrf_id), привязанных к интерфейсу в Netbox. Только глобальные маршрутизируемые.
+    vrf_id — id VRF в NetBox или None (global).
+    """
     if nb is None or nb_iface is None:
         return []
     try:
@@ -325,36 +328,102 @@ def _get_interface_ip_addresses(nb, nb_iface):
     out = []
     for ip_obj in ip_list:
         addr = getattr(ip_obj, "address", None)
-        if addr:
-            addr_norm = _normalize_ip_address(addr)
-            if _is_global_routable_address(addr_norm):
-                out.append(addr_norm)
+        if not addr:
+            continue
+        addr_norm = _normalize_ip_address(addr)
+        if not _is_global_routable_address(addr_norm):
+            continue
+        vrf = getattr(ip_obj, "vrf", None)
+        vrf_id = None
+        if vrf is not None:
+            vrf_id = vrf if isinstance(vrf, (int, type(None))) else getattr(vrf, "id", None)
+        out.append((addr_norm, vrf_id))
     return sorted(out)
 
 
-def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface, addrs_f):
+def _resolve_vrf_name_to_id(nb, vrf_name, cache):
+    """По имени VRF в NetBox вернуть id. cache — dict для кэша (name -> id)."""
+    if not nb or not vrf_name or not str(vrf_name).strip():
+        return None
+    name = str(vrf_name).strip()
+    if name in cache:
+        return cache[name]
+    try:
+        vrfs = list(nb.ipam.vrfs.filter(name=name))
+        if vrfs:
+            cache[name] = vrfs[0].id
+            return vrfs[0].id
+    except Exception:
+        pass
+    cache[name] = None
+    return None
+
+
+def _resolve_vrf_id_to_name(nb, vrf_id, id_to_name_cache):
+    """По id VRF в NetBox вернуть имя для отображения. id_to_name_cache — dict (id -> name). None → '—'."""
+    if vrf_id is None:
+        return "—"
+    if id_to_name_cache is not None and vrf_id in id_to_name_cache:
+        return id_to_name_cache[vrf_id]
+    name = "—"
+    try:
+        if nb:
+            vrf_obj = nb.ipam.vrfs.get(vrf_id)
+            if vrf_obj and getattr(vrf_obj, "name", None):
+                name = vrf_obj.name
+    except Exception:
+        pass
+    if id_to_name_cache is not None:
+        id_to_name_cache[vrf_id] = name
+    return name
+
+
+def _find_ip_in_netbox(nb, address, vrf_id):
+    """Найти в NetBox IP по address и vrf_id (None = global). Возврат список из 0 или 1 элемента."""
+    try:
+        if vrf_id is not None:
+            candidates = list(nb.ipam.ip_addresses.filter(address=address, vrf_id=vrf_id))
+        else:
+            candidates = list(nb.ipam.ip_addresses.filter(address=address))
+            candidates = [c for c in candidates if getattr(c, "vrf", None) is None]
+        return candidates[:1]
+    except Exception:
+        return []
+
+
+def _find_ip_in_netbox_any_vrf(nb, address):
+    """Найти в NetBox любой IP с данным address (любой VRF или без VRF). Возврат список из 0 или 1 элемента."""
+    try:
+        candidates = list(nb.ipam.ip_addresses.filter(address=address))
+        return candidates[:1]
+    except Exception:
+        return []
+
+
+def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface, addrs_f, vrf_id_f=None):
     """
-    Привести привязку IP к интерфейсу в NetBox к списку из файла (addrs_f — глобальные адреса).
-    Добавить недостающие (создать или переназначить), отвязать лишние с интерфейса.
+    Привести привязку IP к интерфейсу в NetBox к списку из файла.
+    addrs_f — список глобальных адресов (строки), vrf_id_f — id VRF в NetBox или None (global).
+    Учитывается VRF: один и тот же адрес в разных VRF считаются разными.
     """
     if nb is None or nb_iface is None:
         return
-    addrs_n = _get_interface_ip_addresses(nb, nb_iface)
-    set_f = set(addrs_f or [])
-    set_n = set(addrs_n)
-    to_add = set_f - set_n
+    addrs_n_tuples = _get_interface_ip_addresses(nb, nb_iface)
+    set_f = set((a, vrf_id_f) for a in (addrs_f or []))
+    set_n = set(addrs_n_tuples)
     to_remove = set_n - set_f
+    to_add = set_f - set_n
     try:
-        for addr in to_remove:
-            existing = list(nb.ipam.ip_addresses.filter(address=addr))
+        for addr, vrf_id_n in to_remove:
+            existing = _find_ip_in_netbox(nb, addr, vrf_id_n)
             if existing:
                 ip_obj = existing[0]
                 ip_obj.assigned_object_id = None
                 ip_obj.assigned_object_type = None
                 ip_obj.save()
                 print("IP {} {} {}: отвязан от интерфейса".format(dev_name, iface_display_name, addr), flush=True)
-        for addr in to_add:
-            existing = list(nb.ipam.ip_addresses.filter(address=addr))
+        for addr, vrf_id in to_add:
+            existing = _find_ip_in_netbox(nb, addr, vrf_id)
             if existing:
                 ip_obj = existing[0]
                 cur_id = getattr(ip_obj, "assigned_object_id", None)
@@ -365,12 +434,34 @@ def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface,
                 ip_obj.save()
                 print("IP {} {} {}: привязан к интерфейсу".format(dev_name, iface_display_name, addr), flush=True)
             else:
-                nb.ipam.ip_addresses.create(
-                    address=addr,
-                    assigned_object_id=nb_iface.id,
-                    assigned_object_type="dcim.interface",
-                )
-                print("IP {} {} {}: создан и привязан к интерфейсу".format(dev_name, iface_display_name, addr), flush=True)
+                # IP с нужным VRF не найден — возможно, адрес есть в другом VRF (например global); обновляем VRF и привязываем
+                existing_any = _find_ip_in_netbox_any_vrf(nb, addr)
+                if existing_any:
+                    ip_obj = existing_any[0]
+                    cur_vrf = getattr(ip_obj, "vrf", None)
+                    cur_vrf_id = cur_vrf if isinstance(cur_vrf, (int, type(None))) else getattr(cur_vrf, "id", None)
+                    cur_id = getattr(ip_obj, "assigned_object_id", None)
+                    if cur_vrf_id != vrf_id or cur_id != nb_iface.id:
+                        if cur_vrf_id != vrf_id:
+                            ip_obj.vrf = vrf_id
+                        if cur_id != nb_iface.id:
+                            ip_obj.assigned_object_id = nb_iface.id
+                            ip_obj.assigned_object_type = "dcim.interface"
+                        ip_obj.save()
+                        if cur_vrf_id != vrf_id:
+                            print("IP {} {} {}: VRF изменён на целевой".format(dev_name, iface_display_name, addr), flush=True)
+                        if cur_id != nb_iface.id:
+                            print("IP {} {} {}: привязан к интерфейсу".format(dev_name, iface_display_name, addr), flush=True)
+                else:
+                    create_kw = dict(
+                        address=addr,
+                        assigned_object_id=nb_iface.id,
+                        assigned_object_type="dcim.interface",
+                    )
+                    if vrf_id is not None:
+                        create_kw["vrf"] = vrf_id
+                    nb.ipam.ip_addresses.create(**create_kw)
+                    print("IP {} {} {}: создан и привязан к интерфейсу".format(dev_name, iface_display_name, addr), flush=True)
     except Exception as e:
         print("Ошибка применения IP {} {}: {}".format(dev_name, iface_display_name, e), file=sys.stderr, flush=True)
 
@@ -764,6 +855,8 @@ def main():
         # Один проход: строки (..., mtToSet=10, ...); индексы 26-30 — *ToSet при --show-change
         rows = []
         note_codes_used = set()
+        vrf_cache = {}
+        vrf_id_to_name_cache = {}
         skipped_no_netbox = []
         skipped_not_list = []
         skipped_platform = []
@@ -991,6 +1084,8 @@ def main():
                 fwd_to_set = (_fwd_file_to_netbox_mode(fwd_f) or "") if (args.show_change and args.forwarding_model and fwd_f and nFwd) else ""
                 ip_f = ""
                 ip_n = ""
+                ip_vrf_f_display = ""
+                ip_vrf_n_display = ""
                 nIp = ""
                 if args.ip_address:
                     ipv4_f = entry.get("ipv4_addresses") or []
@@ -1000,10 +1095,21 @@ def main():
                     if not isinstance(ipv6_f, list):
                         ipv6_f = [ipv6_f] if ipv6_f is not None else []
                     addrs_f = sorted([n for a in ipv4_f + ipv6_f if a for n in (_normalize_ip_address(a),) if _is_global_routable_address(n)])
-                    addrs_n = _get_interface_ip_addresses(nb, nb_iface) if nb_iface else []
+                    ip_vrf_f = (entry.get("ip_vrf") or "").strip() or None
+                    vrf_id_f = _resolve_vrf_name_to_id(nb, ip_vrf_f, vrf_cache) if ip_vrf_f else None
+                    addrs_n_tuples = _get_interface_ip_addresses(nb, nb_iface) if nb_iface else []
+                    set_f = set((a, vrf_id_f) for a in (addrs_f or []))
+                    set_n = set(addrs_n_tuples)
                     ip_f = ", ".join(addrs_f) if addrs_f else ""
-                    ip_n = ", ".join(addrs_n) if addrs_n else ""
-                    if addrs_f != addrs_n:
+                    ip_n = ", ".join(a for a, _ in addrs_n_tuples) if addrs_n_tuples else ""
+                    ip_vrf_f_display = (ip_vrf_f or "—").strip() if ip_vrf_f else "—"
+                    vrf_ids_n = list({vid for _, vid in addrs_n_tuples})
+                    if not vrf_ids_n:
+                        ip_vrf_n_display = "—"
+                    else:
+                        names_n = [_resolve_vrf_id_to_name(nb, vid, vrf_id_to_name_cache) for vid in vrf_ids_n]
+                        ip_vrf_n_display = ", ".join(sorted(set(names_n)))
+                    if set_f != set_n:
                         nIp = str(IP_NOTE_DIFF)
                         note_codes_used.add(IP_NOTE_DIFF)
                 # значения «что подставим» для --show-change — только когда есть расхождение (есть что применять)
@@ -1046,7 +1152,7 @@ def main():
                         _apply_mac_to_interface(nb, dev_name, nb_name or int_name, nb_iface, mac_f)
                     # IP в Netbox — ipam.ip_addresses с assigned_object_id/type; привести к списку из файла
                     if args.ip_address and nIp and nb_iface is not None:
-                        _apply_ip_addresses_to_interface(nb, dev_name, nb_name or int_name, nb_iface, addrs_f)
+                        _apply_ip_addresses_to_interface(nb, dev_name, nb_name or int_name, nb_iface, addrs_f, vrf_id_f)
                 elif args.apply and args.intname and note_code == NOTE_MISSING:
                     # Интерфейс в NetBox не найден — создаём и сразу заполняем все поля из файла
                     create_data = {"device": device.id, "name": int_name}
@@ -1099,11 +1205,11 @@ def main():
                         if args.mac and is_physical_for_mac and mac_f:
                             _apply_mac_to_interface(nb, dev_name, int_name, nb_iface, mac_f)
                         if args.ip_address and addrs_f:
-                            _apply_ip_addresses_to_interface(nb, dev_name, int_name, nb_iface, addrs_f)
+                            _apply_ip_addresses_to_interface(nb, dev_name, int_name, nb_iface, addrs_f, vrf_id_f)
                     except Exception as e:
                         print("Ошибка создания {} {}: {} — {}".format(dev_name, int_name, create_data, e), file=sys.stderr, flush=True)
                 mt_to_set_display = mt_to_set if nM else ""
-                rows.append((dev_name, int_name, nb_name, note, desc_f, desc_n, nD, mt_f, mt_n, nM, mt_to_set_display, bw_f, speed_n, nB, dup_f_out, dup_n_out, nDup, mac_f, mac_n, nMac, mtu_f, mtu_n, nMtu, txp_f_out, txp_n_out, nTxp, desc_to_set, speed_to_set, dup_to_set, mtu_to_set_display, txp_to_set, fwd_f, fwd_n, nFwd, fwd_to_set, ip_f, ip_n, nIp))
+                rows.append((dev_name, int_name, nb_name, note, desc_f, desc_n, nD, mt_f, mt_n, nM, mt_to_set_display, bw_f, speed_n, nB, dup_f_out, dup_n_out, nDup, mac_f, mac_n, nMac, mtu_f, mtu_n, nMtu, txp_f_out, txp_n_out, nTxp, desc_to_set, speed_to_set, dup_to_set, mtu_to_set_display, txp_to_set, fwd_f, fwd_n, nFwd, fwd_to_set, ip_f, ip_n, ip_vrf_f_display, ip_vrf_n_display, nIp))
         if skipped_no_netbox:
             print("Пропущено (устройство есть в файле, но нет в Netbox по тегу): {}.".format(", ".join(skipped_no_netbox)))
         if skipped_not_list:
@@ -1171,7 +1277,7 @@ def main():
 
 
 # Индексы колонок примечаний в строке (note, nD, nM, nB, nDup, nMac, nMtu, nTxp, nFwd, nIp) — для определения «есть расхождение»
-ROW_NOTE_INDICES = (3, 6, 9, 13, 16, 19, 22, 25, 33, 37)
+ROW_NOTE_INDICES = (3, 6, 9, 13, 16, 19, 22, 25, 33, 39)
 
 
 def _row_has_diff(row):
@@ -1195,7 +1301,7 @@ DIFF_GROUPS_BY_NOTE = {
     "nMtu": {"mtuF", "mtuN", "nMtu", "mtuToSet"},
     "nTxp": {"txpF", "txpN", "nTxp", "txpToSet"},
     "nFwd": {"fwdF", "fwdN", "nFwd", "fwdToSet"},
-    "nIp": {"ipF", "ipN", "nIp"},
+    "nIp": {"ipF", "ipN", "ipVrfF", "ipVrfN", "nIp"},
 }
 
 
@@ -1265,7 +1371,7 @@ def _build_col_spec(args):
     if args.tx_power:
         cols.extend([("txpF", 23, 10), ("txpN", 24, 10), ("nTxp", 25, 999)])
     if args.ip_address:
-        cols.extend([("ipF", 35, 60), ("ipN", 36, 60), ("nIp", 37, 999)])
+        cols.extend([("ipF", 35, 60), ("ipN", 36, 60), ("ipVrfF", 37, 12), ("ipVrfN", 38, 12), ("nIp", 39, 999)])
     return cols
 
 
