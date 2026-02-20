@@ -83,12 +83,19 @@ export SSH_PASSWORD="password-for-devices"
 | `--report` | Режим отчёта: таблица NetBox vs SSH (Juniper + Arista) |
 | `--fetch` | Режим статистики: опросить по SSH (иначе читается файл `dry-ssh.json`) |
 | `--platform {arista,juniper,all}` | При `--fetch`: только Arista, только Juniper или все (по умолчанию `all`) |
-| `--host NAME` | При `--fetch`: опросить только указанный хост (имя устройства в NetBox) |
+| `--host NAME` | При `--fetch`: опросить только указанный хост (имя устройства в NetBox). Платформа берётся из NetBox по устройству, указывать `--platform` вместе с `--host` не нужно. |
 | `--json` | Вывод в формате JSON (режим статистики). При `--fetch --json` прогресс идёт в stderr, в stdout — только JSON (удобно: `--fetch --json > dry-ssh.json`) |
 | `--merge-into [FILE]` | При `--fetch`: загрузить FILE (по умолчанию `dry-ssh.json`), подставить в него данные по опрошенным хостам и сохранить. Остальные хосты в файле не меняются. Удобно для обновления одного хоста: `--fetch --host HOST --merge-into` |
 | `--from-file FILE` | Путь к JSON с ключом `devices` (по умолчанию `dry-ssh.json`) |
 
-**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `SSH_USERNAME`, `SSH_PASSWORD`, `SSH_HOST_SUFFIX`, `PARALLEL_DEVICES`, `NETBOX_TAG`. Опционально: `SSH_TIMEOUT`, `SSH_COMMAND_TIMEOUT` (сек); `USE_SSH_CONFIG=1` — брать HostName/User из `~/.ssh/config` (если `ssh DEVICE` работает, а скрипт даёт «Network is unreachable»); `DEBUG_SSH_JSON=1` (режим отчёта); `DEBUG_JUNIPER_UPLINKS=1` — при `--fetch` для Juniper выводить пошаговый лог (JSON/XML, блоки, парсинг, причины пропуска интерфейсов).
+**Переменные окружения**
+
+- **Обязательные:** `NETBOX_URL`, `NETBOX_TOKEN`, `SSH_USERNAME`, `SSH_PASSWORD`, `SSH_HOST_SUFFIX`, `PARALLEL_DEVICES`, `NETBOX_TAG`.
+- **Опционально:**
+  - `SSH_TIMEOUT`, `SSH_COMMAND_TIMEOUT` — таймауты в секундах;
+  - `USE_SSH_CONFIG=1` — брать HostName и User из `~/.ssh/config` (если в терминале `ssh DEVICE` работает, а скрипт даёт «Network is unreachable»);
+  - `DEBUG_SSH_JSON=1` — режим отчёта (`--report`): отладочный вывод JSON;
+  - `DEBUG_JUNIPER_UPLINKS=1` — при `--fetch` для Juniper: пошаговый лог (JSON/XML, блоки, парсинг, причины пропуска интерфейсов).
 
 ```bash
 python uplinks_stats.py
@@ -96,7 +103,7 @@ python uplinks_stats.py --json
 python uplinks_stats.py --from-file other.json
 python uplinks_stats.py --fetch
 python uplinks_stats.py --fetch --platform arista
-python uplinks_stats.py --fetch --platform juniper --host MY-ROUTER
+python uplinks_stats.py --fetch --host MY-ROUTER
 python uplinks_stats.py --fetch --json
 python uplinks_stats.py --fetch --host MY-ROUTER --merge-into
 python uplinks_stats.py --fetch --host MY-ROUTER --merge-into other.json
