@@ -103,10 +103,10 @@ python uplinks_stats.py --json
 python uplinks_stats.py --from-file other.json
 python uplinks_stats.py --fetch
 python uplinks_stats.py --fetch --platform arista
-python uplinks_stats.py --fetch --host MY-ROUTER
+python uplinks_stats.py --fetch --host router-001
 python uplinks_stats.py --fetch --json
-python uplinks_stats.py --fetch --host MY-ROUTER --merge-into
-python uplinks_stats.py --fetch --host MY-ROUTER --merge-into other.json
+python uplinks_stats.py --fetch --host router-001 --merge-into
+python uplinks_stats.py --fetch --host router-001 --merge-into other.json
 python uplinks_stats.py --report
 ```
 
@@ -196,7 +196,7 @@ python uplinks_stats.py --report
 python netbox_checks.py -f dry-ssh.json --mediatype --mt-ref
 
 # Один хост, все проверки, колонки «что подставим»
-python netbox_checks.py -f dry-ssh.json --host DEVICE-NAME --all --show-change
+python netbox_checks.py -f dry-ssh.json --host router-001 --all --show-change
 
 # Сверка и применение изменений в NetBox (таблица не выводится)
 python netbox_checks.py -f dry-ssh.json --mediatype --mt-ref --apply
@@ -250,11 +250,24 @@ python netbox_interface_types.py -o my_types.json
 
 ### 4. `zabbix_map.py`
 
-Построение таблицы uplink'ов и опционально карты Zabbix по данным из `dry-ssh.json`. С Zabbix API: поиск хостов и items (Bits received/sent). **Карта Zabbix:** `--create-map` — только создать пустую карту [test] uplinks, если её нет; `--update-map` — обновить карту (хосты, провайдеры, линки); с `--host` обновляются только этот хост и его линки.
+Построение таблицы uplink'ов по данным из `dry-ssh.json`; опционально — карта Zabbix. При обращении к Zabbix API: поиск хостов и items (Bits received/sent).
 
-**Раскладка карты:** провайдеры сортируются по убыванию числа подключений; блоки слева направо, при нехватке места — перенос на следующую строку. В блоке: провайдер сверху, хосты в две колонки (не ближе 160 px от провайдера по горизонтали, между хостами 180 px, по вертикали шаг 100 px). Провайдер с одним подключением ставится рядом с этим хостом (в том же блоке), без отдельного ряда. Граница карты 30 px; если контент не влезает, размеры карты автоматически увеличиваются. Элементы дедуплицируются: один узел на хост и один на провайдера.
+**Карта Zabbix**
 
-**Подписи линков:** имя интерфейса и строки In/Out с макросами Zabbix `{?last(/host/key)}` (скорость по items Bits received/sent).
+- `--create-map` — только создать пустую карту [test] uplinks, если её нет.
+- `--update-map` — обновить карту (хосты, провайдеры, линки). С `--host` обновляются только указанный хост и его линки.
+
+**Раскладка карты**
+
+- Провайдеры сортируются по убыванию числа подключений; блоки идут слева направо, при нехватке места — перенос на следующую строку.
+- В блоке: провайдер сверху, хосты — в две колонки (отступ от провайдера по горизонтали 160 px, между хостами 180 px, шаг по вертикали 100 px).
+- Провайдер с одним подключением рисуется рядом с этим хостом в том же блоке, без отдельного ряда.
+- Граница карты 30 px; при переполнении размеры карты увеличиваются автоматически.
+- Один узел на хост и один на провайдера (элементы не дублируются).
+
+**Подписи линков**
+
+Имя интерфейса и строки In/Out с макросами Zabbix `{?last(/host/key)}` (скорость по items Bits received/sent).
 
 **Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
 
@@ -278,7 +291,7 @@ python zabbix_map.py
 python zabbix_map.py --zabbix
 
 # Один хост
-python zabbix_map.py --zabbix --host MIA-EQX-7280QR-1
+python zabbix_map.py --zabbix --host router-001
 
 # Создать пустую карту (один раз)
 python zabbix_map.py --create-map
@@ -287,7 +300,7 @@ python zabbix_map.py --create-map
 python zabbix_map.py --zabbix --update-map --debug
 
 # Обновить только один хост и его линки
-python zabbix_map.py --zabbix --update-map --host MIA-EQX-7280QR-1 --debug
+python zabbix_map.py --zabbix --update-map --host router-001 --debug
 
 # Выгрузить карту из API (например, созданную вручную) для сравнения формата
 python zabbix_map.py --export-map 10 > map_10.json
