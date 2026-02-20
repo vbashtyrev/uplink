@@ -784,14 +784,16 @@ def main():
                     mac_f = str(mac_f_raw or "").strip() if mac_f_raw is not None else ""
                     if nb_iface is not None:
                         mac_n = _get_interface_mac(nb_iface)
-                    mac_f_norm = _normalize_mac(mac_f)
-                    mac_n_norm = _normalize_mac(mac_n)
-                    if mac_f_norm and (not mac_n_norm or mac_f_norm != mac_n_norm):
-                        nMac = str(MAC_NOTE_DIFF)
-                        note_codes_used.add(MAC_NOTE_DIFF)
-                    if args.mac and nb_iface and mac_n_norm and not _mac_both_filled(nb_iface):
-                        nMac = (nMac + "," if nMac else "") + str(MAC_NOTE_NOT_BOTH)
-                        note_codes_used.add(MAC_NOTE_NOT_BOTH)
+                    # У LAG (ae) MAC наследуется с физического порта — расхождение не считаем
+                    if not entry.get("isLag"):
+                        mac_f_norm = _normalize_mac(mac_f)
+                        mac_n_norm = _normalize_mac(mac_n)
+                        if mac_f_norm and (not mac_n_norm or mac_f_norm != mac_n_norm):
+                            nMac = str(MAC_NOTE_DIFF)
+                            note_codes_used.add(MAC_NOTE_DIFF)
+                        if nb_iface and mac_n_norm and not _mac_both_filled(nb_iface):
+                            nMac = (nMac + "," if nMac else "") + str(MAC_NOTE_NOT_BOTH)
+                            note_codes_used.add(MAC_NOTE_NOT_BOTH)
                 mtu_f = ""
                 mtu_n = ""
                 nMtu = ""
@@ -888,22 +890,27 @@ def main():
                         except Exception as e:
                             print("Ошибка обновления {} {}: {} — {}".format(dev_name, nb_name or int_name, updates, e), file=sys.stderr, flush=True)
                     # MAC в Netbox — отдельная сущность (dcim.mac-addresses); затем на интерфейсе ставим primary_mac_address
-                    if args.mac and (nMac or (mac_f and not mac_n)) and nb_iface is not None:
+                    # MAC только у физических интерфейсов; у LAG (ae) MAC наследуется с члена, не трогаем
+                    if args.mac and not entry.get("isLag") and (nMac or (mac_f and not mac_n)) and nb_iface is not None:
                         _apply_mac_to_interface(nb, dev_name, nb_name or int_name, nb_iface, mac_f)
                 elif args.apply and args.intname and note_code == NOTE_MISSING:
                     # Интерфейс в NetBox не найден — создаём и сразу заполняем все поля из файла
                     create_data = {"device": device.id, "name": int_name}
+                    # LAG (агрегат ae): в NetBox тип Link Aggregation Group (LAG), slug = "lag"
+                    if entry.get("isLag"):
+                        create_data["type"] = "lag"
+                    else:
+                        media_from_file = (entry.get("mediaType") or "").strip()
+                        mt_raw = mt_to_set or media_from_file
+                        if mt_ref_values and mt_ref_list and media_from_file:
+                            mt_resolved = _mt_to_value(media_from_file, mt_ref_values, mt_ref_list)
+                            if mt_resolved and mt_resolved in mt_ref_values:
+                                mt_raw = mt_resolved
+                        if mt_raw:
+                            create_data["type"] = mt_raw
                     desc_raw = (entry.get("description") or "").strip()
                     if desc_raw:
                         create_data["description"] = desc_raw
-                    media_from_file = (entry.get("mediaType") or "").strip()
-                    mt_raw = mt_to_set or media_from_file
-                    if mt_ref_values and mt_ref_list and media_from_file:
-                        mt_resolved = _mt_to_value(media_from_file, mt_ref_values, mt_ref_list)
-                        if mt_resolved and mt_resolved in mt_ref_values:
-                            mt_raw = mt_resolved
-                    if mt_raw:
-                        create_data["type"] = mt_raw
                     bw_raw = entry.get("bandwidth")
                     if bw_raw is not None:
                         create_data["speed"] = int(bw_raw) // 1000  # bps -> Kbps
@@ -933,7 +940,7 @@ def main():
                     try:
                         nb_iface = nb.dcim.interfaces.create(**create_data)
                         print("Создан интерфейс {} {}: {}".format(dev_name, int_name, list(create_data.keys())), flush=True)
-                        if args.mac and mac_f:
+                        if args.mac and not entry.get("isLag") and mac_f:
                             _apply_mac_to_interface(nb, dev_name, int_name, nb_iface, mac_f)
                     except Exception as e:
                         print("Ошибка создания {} {}: {} — {}".format(dev_name, int_name, create_data, e), file=sys.stderr, flush=True)
