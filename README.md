@@ -283,7 +283,7 @@ python zabbix_map.py --generate-description-map -f dry-ssh.json > description_to
 
 Отредактируйте JSON: для одного провайдера задайте одно и то же значение (напр. `"Uplink: Beeline 5": "Beeline"`, `"Beeline 5": "Beeline"`, `"Beeline": "Beeline"`). Если файл уже существует, в вывод попадёт его содержимое плюс недостающие description.
 
-**Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
+**Переменные:** `ZABBIX_URL` (базовый URL, например `https://zabbix.example.com`; скрипт сам дописывает `/api_jsonrpc.php` при необходимости), `ZABBIX_TOKEN` (Bearer-токен, Zabbix 7). Имя карты: `[test] uplinks`. Иконки элементов (хосты, провайдеры) задаются в Администрирование → Изображения; при смене окружения при необходимости поправьте константы в скрипте.
 
 | Ключ | Описание |
 |------|----------|
@@ -334,5 +334,5 @@ python zabbix_map.py --generate-description-map -f dry-ssh.json > description_to
 | `netbox_interface_types.json` | Справочник типов интерфейсов NetBox (value, label); используется `--mt-ref` в `netbox_checks.py` |
 | `description_to_name.example.json` | Пример сопоставления description → имя ISP; скопировать в `description_to_name.json` и заполнить |
 | `description_to_name.json` | Локальный файл сопоставления (не в git); по умолчанию для `zabbix_map.py -m` |
-| `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix`, не коммитить |
+| `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` в той же директории, что и файл `-f`, не коммитить |
 | `requirements.txt` | Зависимости: pynetbox, paramiko, requests |

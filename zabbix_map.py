@@ -480,6 +480,7 @@ def ensure_map_exists(url, token, debug=False, width=None, height=None):
         return existing[0]["sysmapid"], None
     w = width if width is not None else MAP_WIDTH
     h = height if height is not None else MAP_HEIGHT
+    # В Zabbix 7 при включённой проверке прав карта может требовать userGroups (см. _get_map_user_groups)
     result, err = zabbix_request(url, token, "map.create", {
         "name": MAP_NAME,
         "width": w,
