@@ -275,7 +275,7 @@ python netbox_interface_types.py -o my_types.json
 
 **Ссылки у хостов (URLs)**
 
-У каждого элемента-хоста на карте задаются ссылки на график по каждому uplink-интерфейсу: подпись — имя провайдера и «Bits received» (например «Beeline 5 Bits received»), URL — `history.php?action=showgraph&itemids[]=<itemid>`. Базовый URL берётся из `ZABBIX_URL` (обрезается `/api_jsonrpc.php`).
+У каждого элемента-хоста на карте задаются ссылки на график по каждому uplink-интерфейсу: подпись — имя провайдера и «Bits received» (например «Beeline 5 Bits received»), URL — `history.php?action=showgraph&itemids[]=<itemid>&from=now-1d&to=now` (график за последние сутки). Базовый URL берётся из `ZABBIX_URL` (обрезается `/api_jsonrpc.php`).
 
 **Сопоставление description → имя провайдера (`description_to_name.json`)**
 

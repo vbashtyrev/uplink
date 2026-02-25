@@ -52,10 +52,6 @@ def load_description_map(path):
         return {}
 
 
-def _cache_key(hostname, iface_norm):
-    return "{}|{}".format(hostname, iface_norm)
-
-
 def load_zabbix_cache(path):
     """
     Загрузить кэш из файла. Возврат (host_id_by_name, items_by_host_iface) или (None, None) при ошибке/отсутствии.
@@ -145,13 +141,24 @@ def validate_zabbix_token(url, token, debug=False):
     return True, None
 
 
+def _get_zabbix_url_token():
+    """Получить ZABBIX_URL и ZABBIX_TOKEN из окружения, нормализовать URL (добавить api_jsonrpc.php при необходимости). Возврат (url, token) или (None, None)."""
+    url = os.environ.get("ZABBIX_URL", "").rstrip("/")
+    token = os.environ.get("ZABBIX_TOKEN", "")
+    if not url or not token:
+        return None, None
+    if not url.endswith("/api_jsonrpc.php") and not url.endswith("api_jsonrpc.php"):
+        url = url.rstrip("/") + "/api_jsonrpc.php"
+    return url, token
+
+
 # PERM_READ = 1, PERM_READ_WRITE = 2 (константы Zabbix для шаринга карты)
 MAP_SHARE_PERMISSION = 2
 
 def _get_map_user_groups(url, token, debug=False):
     """
     Список групп пользователя для шаринга карты: userGroups = [{usrgrpid, permission}, ...].
-    В Zabbix 7 map.create ожидает userGroups, а не groupids (см. CMap.php validateCreate).
+    В Zabbix 7 map.create при включённой проверке прав может требовать userGroups. Пока не используется.
     Возврат (list, None) или (None, error_msg).
     """
     result, err = zabbix_request(
@@ -340,6 +347,18 @@ SELEMENT_HEIGHT = 200
 SELEMENT_WIDTH = 200
 
 
+def _selement_hostid(el):
+    """Из элемента карты типа «хост» извлечь hostid (строка). API может вернуть elementid или elements[0].hostid."""
+    eid = el.get("elementid")
+    if eid is None or eid == "":
+        elems = el.get("elements") or []
+        if elems and isinstance(elems[0], dict):
+            eid = elems[0].get("hostid")
+    if eid is not None and str(eid) != "":
+        return str(eid)
+    return None
+
+
 def _occupied_positions(host_pos, isp_pos, exclude_xy=None):
     """Список занятых координат (x, y) для проверки коллизий. exclude_xy — не учитывать эту точку."""
     out = []
@@ -500,7 +519,7 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
     """
     # Рёбра для линков. При наличии логических интерфейсов (ae5, ae5.0, et-0/0/3) на один uplink
     # оставляем одно ребро на (host, ISP): приоритет — интерфейс с items Zabbix, затем логический (ae5.0).
-    # edge: (hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out, has_items, is_logical, is_aggregate)
+    # edges_raw: + has_items, is_logical, is_aggregate, description. Итоговый edge — 9 полей (без этих трёх флагов).
     edges_raw = []
     for hostname in sorted(devices.keys()):
         hostid = host_id_by_name.get(hostname)
@@ -605,16 +624,12 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
                 continue
             old_by_image_label[key_img] = sid
         else:
-            eid = el.get("elementid")
-            if eid is None or eid == "":
-                elems = el.get("elements") or []
-                if elems and isinstance(elems[0], dict):
-                    eid = elems[0].get("hostid")
-            if eid is not None and str(eid) != "":
-                if str(eid) in old_by_eid:
-                    selementid_to_canonical[str(sid)] = str(old_by_eid[str(eid)])
+            eid = _selement_hostid(el)
+            if eid is not None:
+                if eid in old_by_eid:
+                    selementid_to_canonical[str(sid)] = str(old_by_eid[eid])
                     continue
-                old_by_eid[str(eid)] = sid
+                old_by_eid[eid] = sid
         old_selements.append(el)
 
     # Добавляем только те элементы, которых ещё нет на карте; позиции берём из layout
@@ -659,16 +674,12 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
     for el in selements_merged:
         etype = int(el.get("elementtype", 0))
         if etype == ELEMENT_TYPE_HOST:
-            eid = el.get("elementid")
-            if eid is None or eid == "":
-                elems = el.get("elements") or []
-                if elems and isinstance(elems[0], dict):
-                    eid = elems[0].get("hostid")
-            if eid is not None and str(eid) != "":
-                pos = host_pos.get(str(eid))
+            eid = _selement_hostid(el)
+            if eid is not None:
+                pos = host_pos.get(eid)
                 if pos is not None:
                     el["x"], el["y"] = pos
-                el["urls"] = host_to_urls.get(str(eid), [])
+                el["urls"] = host_to_urls.get(eid, [])
         elif etype == ELEMENT_TYPE_IMAGE:
             label = el.get("label", "")
             if label in isp_pos:
@@ -704,14 +715,9 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
             continue
         etype = int(el.get("elementtype", 0))
         if etype == ELEMENT_TYPE_HOST:
-            # hostid: API может вернуть elementid или только elements[0].hostid
-            eid = el.get("elementid")
-            if eid is None or eid == "":
-                elems = el.get("elements") or []
-                if elems and isinstance(elems[0], dict):
-                    eid = elems[0].get("hostid")
-            if eid is not None and str(eid) != "":
-                host_to_selement[str(eid)] = sid
+            eid = _selement_hostid(el)
+            if eid is not None:
+                host_to_selement[eid] = sid
         elif etype == ELEMENT_TYPE_IMAGE:
             isp_to_selement[el.get("label", "")] = sid
 
@@ -877,13 +883,10 @@ def main():
 
     # Режим экспорта: только map.get и вывод JSON
     if args.export_map:
-        url = os.environ.get("ZABBIX_URL", "").rstrip("/")
-        token = os.environ.get("ZABBIX_TOKEN", "")
-        if not url or not token:
+        url, token = _get_zabbix_url_token()
+        if not url:
             print("Для --export-map задайте ZABBIX_URL и ZABBIX_TOKEN", file=sys.stderr)
             sys.exit(1)
-        if not url.endswith("/api_jsonrpc.php") and not url.endswith("api_jsonrpc.php"):
-            url = url.rstrip("/") + "/api_jsonrpc.php"
         result, err = zabbix_request(url, token, "map.get", {
             "sysmapids": [args.export_map],
             "output": "extend",
@@ -898,13 +901,10 @@ def main():
 
     # Только создать карту — не грузим данные, не выводим таблицу
     if args.create_map and not args.update_map and not args.zabbix:
-        url = os.environ.get("ZABBIX_URL", "").rstrip("/")
-        token = os.environ.get("ZABBIX_TOKEN", "")
-        if not url or not token:
+        url, token = _get_zabbix_url_token()
+        if not url:
             print("Задайте ZABBIX_URL и ZABBIX_TOKEN", file=sys.stderr)
             sys.exit(1)
-        if not url.endswith("/api_jsonrpc.php") and not url.endswith("api_jsonrpc.php"):
-            url = url.rstrip("/") + "/api_jsonrpc.php"
         sysmapid, err = ensure_map_exists(url, token, debug=args.debug)
         if err:
             print(err, file=sys.stderr)
@@ -929,13 +929,10 @@ def main():
     use_zabbix = args.zabbix or args.create_map or args.update_map
     items_by_host_iface = {}
     if use_zabbix:
-        url = os.environ.get("ZABBIX_URL", "").rstrip("/")
-        token = os.environ.get("ZABBIX_TOKEN", "")
-        if not url or not token:
+        url, token = _get_zabbix_url_token()
+        if not url:
             print("Для --zabbix, --create-map и --update-map задайте ZABBIX_URL и ZABBIX_TOKEN", file=sys.stderr)
             sys.exit(1)
-        if not url.endswith("/api_jsonrpc.php") and not url.endswith("api_jsonrpc.php"):
-            url = url.rstrip("/") + "/api_jsonrpc.php"
         hostnames = set(devices.keys())
         cache_path = os.path.join(os.path.dirname(os.path.abspath(args.file)) if args.file else ".", ZABBIX_CACHE_FILE)
         host_id_by_name = None
