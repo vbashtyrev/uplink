@@ -390,7 +390,7 @@ def _compute_layout(edges, map_width, map_height):
     Возврат: (host_pos, isp_pos, required_width, required_height).
     """
     isp_to_hosts = {}
-    for hostname, hostid, _if, isp, _in, _out, _ki, _ko in edges:
+    for hostname, hostid, _if, isp, _in, _out, _ki, _ko, _desc in edges:
         if not isp:
             continue
         if isp not in isp_to_hosts:
@@ -520,11 +520,11 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
             is_logical = bool(iface.get("isLogical"))
             is_aggregate = bool(iface.get("isLag"))
             edges_raw.append((hostname, str(hostid), iface_name, isp, itemid_in, itemid_out, key_in, key_out,
-                              has_items, is_logical, is_aggregate))
+                              has_items, is_logical, is_aggregate, description))
 
     # Одно ребро на (hostname, hostid, isp): приоритет — has_items, затем is_logical, затем не aggregate
     def _edge_priority(e):
-        _, _, _, _, _, _, _, _, has_items, is_logical, is_aggregate = e
+        _, _, _, _, _, _, _, _, has_items, is_logical, is_aggregate, _ = e
         return (has_items, is_logical, not is_aggregate)
 
     seen_key = {}
@@ -532,11 +532,12 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
         key = (e[0], e[1], e[3])  # hostname, hostid, isp
         if key not in seen_key or _edge_priority(e) > _edge_priority(seen_key[key]):
             seen_key[key] = e
-    edges = [e[:8] for e in sorted(seen_key.values(), key=lambda x: (x[0], x[3], x[2]))]  # hostname, isp, iface
+    # edge: (hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out, description)
+    edges = [(e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[11]) for e in sorted(seen_key.values(), key=lambda x: (x[0], x[3], x[2]))]
 
     unique_hosts = []  # (hostname, hostid)
     seen_hosts = set()
-    for hostname, hostid, _if, _isp, _in, _out, _ki, _ko in edges:
+    for hostname, hostid, _if, _isp, _in, _out, _ki, _ko, _desc in edges:
         if (hostname, hostid) not in seen_hosts:
             seen_hosts.add((hostname, hostid))
             unique_hosts.append((hostname, hostid))
@@ -544,9 +545,22 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
     if not unique_hosts:
         return "нет данных для карты (ни одного хост с uplink)", None
 
+    # Базовый URL веб-интерфейса (без api_jsonrpc.php) для ссылок на графики
+    base_url = url.replace("/api_jsonrpc.php", "").rstrip("/")
+    if not base_url.endswith("/"):
+        base_url += "/"
+    # По каждому хосту — ссылки на график «Bits received» по интерфейсам; подпись: имя провайдера и Bits received
+    host_to_urls = {}
+    for hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out, description in edges:
+        if not itemid_in:
+            continue
+        link_name = "{} Bits received".format(isp or "Uplink").strip()
+        link_url = "{}history.php?action=showgraph&itemids[]={}&from=now-1d&to=now".format(base_url, itemid_in)
+        host_to_urls.setdefault(str(hostid), []).append({"name": link_name, "url": link_url})
+
     unique_isps = []
     seen_isp = set()
-    for _hn, _hid, _if, isp, _in, _out, _ki, _ko in edges:
+    for _hn, _hid, _if, isp, _in, _out, _ki, _ko, _desc in edges:
         if isp and isp not in seen_isp:
             seen_isp.add(isp)
             unique_isps.append(isp)
@@ -622,6 +636,7 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
             "y": y,
             "label": hostname,
             "iconid_off": MAP_ICON_HOST,
+            "urls": host_to_urls.get(str(hostid), []),
         })
     for isp in unique_isps:
         if (ELEMENT_TYPE_IMAGE, isp) in old_by_image_label:
@@ -640,7 +655,7 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
 
     selements_merged = list(old_selements) + new_selements
 
-    # Применить расстановку ко всем элементам (старым и новым)
+    # Применить расстановку и ссылки на графики ко всем элементам (старым и новым)
     for el in selements_merged:
         etype = int(el.get("elementtype", 0))
         if etype == ELEMENT_TYPE_HOST:
@@ -653,6 +668,7 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
                 pos = host_pos.get(str(eid))
                 if pos is not None:
                     el["x"], el["y"] = pos
+                el["urls"] = host_to_urls.get(str(eid), [])
         elif etype == ELEMENT_TYPE_IMAGE:
             label = el.get("label", "")
             if label in isp_pos:
@@ -701,7 +717,7 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
 
     new_links = []
     our_host_sids = set()
-    for hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out in edges:
+    for hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out, _desc in edges:
         sid1 = host_to_selement.get(str(hostid))
         sid2 = isp_to_selement.get(isp) if isp else None
         if not sid1 or not sid2:

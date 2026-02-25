@@ -273,6 +273,10 @@ python netbox_interface_types.py -o my_types.json
 
 Имя интерфейса и строки In/Out с макросами Zabbix `{?last(/host/key)}` (скорость по items Bits received/sent).
 
+**Ссылки у хостов (URLs)**
+
+У каждого элемента-хоста на карте задаются ссылки на график по каждому uplink-интерфейсу: подпись — имя провайдера и «Bits received» (например «Beeline 5 Bits received»), URL — `history.php?action=showgraph&itemids[]=<itemid>`. Базовый URL берётся из `ZABBIX_URL` (обрезается `/api_jsonrpc.php`).
+
 **Сопоставление description → имя провайдера (`description_to_name.json`)**
 
 На карте провайдер подписывается по полю `description` интерфейса. Если в файле есть несколько формулировок для одного провайдера (например «Beeline», «Beeline 5», «Uplink: Beeline 5»), без маппинга на карте появятся три отдельных блока. Файл `description_to_name.json` задаёт соответствие: ключ — точная строка `description` из данных, значение — подпись на карте. Файл **не генерируется автоматически**, его создают и правят вручную. Чтобы получить актуальный шаблон по всем `description` из `dry-ssh.json` (новые — как ключ, так и значение), выполните:
