@@ -254,7 +254,7 @@ python netbox_interface_types.py -o my_types.json
 
 ### 4. `zabbix_map.py`
 
-Построение таблицы uplink'ов по данным из `dry-ssh.json`; опционально — карта Zabbix. При обращении к Zabbix API: поиск хостов и items (Bits received/sent).
+Построение таблицы uplink'ов по данным из `dry-ssh.json`; опционально — карта Zabbix. При обращении к Zabbix API: поиск хостов и items (Bits received/sent). Файл может содержать логические интерфейсы (Juniper: ae5, ae5.0, et-0/0/3); на карте для одной пары (хост, провайдер) рисуется один линк — выбирается интерфейс с items Zabbix, при равных условиях логический unit (например ae5.0), иначе физический.
 
 **Карта Zabbix**
 
@@ -273,12 +273,23 @@ python netbox_interface_types.py -o my_types.json
 
 Имя интерфейса и строки In/Out с макросами Zabbix `{?last(/host/key)}` (скорость по items Bits received/sent).
 
+**Сопоставление description → имя провайдера (`description_to_name.json`)**
+
+На карте провайдер подписывается по полю `description` интерфейса. Если в файле есть несколько формулировок для одного провайдера (например «Beeline», «Beeline 5», «Uplink: Beeline 5»), без маппинга на карте появятся три отдельных блока. Файл `description_to_name.json` задаёт соответствие: ключ — точная строка `description` из данных, значение — подпись на карте. Файл **не генерируется автоматически**, его создают и правят вручную. Чтобы получить актуальный шаблон по всем `description` из `dry-ssh.json` (новые — как ключ, так и значение), выполните:
+
+```bash
+python zabbix_map.py --generate-description-map -f dry-ssh.json > description_to_name.json
+```
+
+Отредактируйте JSON: для одного провайдера задайте одно и то же значение (напр. `"Uplink: Beeline 5": "Beeline"`, `"Beeline 5": "Beeline"`, `"Beeline": "Beeline"`). Если файл уже существует, в вывод попадёт его содержимое плюс недостающие description.
+
 **Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
 
 | Ключ | Описание |
 |------|----------|
 | `-f`, `--file` | JSON с ключом `devices` (по умолчанию `dry-ssh.json`) |
 | `-m`, `--description-map` | Файл сопоставления description → имя ISP |
+| `--generate-description-map` | Собрать все description из файла и вывести шаблон JSON (в stdout); объединить с существующим маппингом |
 | `--zabbix` | Запросить Zabbix API, вывести ключи items (Bits received/sent) |
 | `--create-map` | Только создать карту [test] uplinks, если её нет (пустая) |
 | `--update-map` | Обновить карту: хосты, провайдеры, линки; с `--host` — только указанный хост и его линки |
@@ -308,6 +319,9 @@ python zabbix_map.py --zabbix --update-map --host router-001 --debug
 
 # Выгрузить карту из API (например, созданную вручную) для сравнения формата
 python zabbix_map.py --export-map 10 > map_10.json
+
+# Сгенерировать/обновить шаблон description_to_name по dry-ssh.json, сохранить и отредактировать
+python zabbix_map.py --generate-description-map -f dry-ssh.json > description_to_name.json
 ```
 
 ---
@@ -316,7 +330,7 @@ python zabbix_map.py --export-map 10 > map_10.json
 
 | Файл | Описание |
 |------|----------|
-| `dry-ssh.json` | Пример/результат: JSON с ключом `devices` (имя устройства → список интерфейсов с полями из SSH) |
+| `dry-ssh.json` | Пример/результат: JSON с ключом `devices` (имя устройства → список интерфейсов с полями из SSH; могут быть логические интерфейсы, поля isLogical, isLag и др.) |
 | `netbox_interface_types.json` | Справочник типов интерфейсов NetBox (value, label); используется `--mt-ref` в `netbox_checks.py` |
 | `description_to_name.example.json` | Пример сопоставления description → имя ISP; скопировать в `description_to_name.json` и заполнить |
 | `description_to_name.json` | Локальный файл сопоставления (не в git); по умолчанию для `zabbix_map.py -m` |

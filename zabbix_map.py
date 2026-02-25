@@ -3,6 +3,8 @@
 Построение карты в Zabbix по данным из файлов и других источников.
 Zabbix 7.0: при использовании API — переменные ZABBIX_URL, ZABBIX_TOKEN; токен проверяется при первом запросе.
 По умолчанию: hostname, interface, description, ISP. С --zabbix добавляются ключи items Bits received / Bits sent.
+Входной файл (dry-ssh.json) может содержать логические интерфейсы; для одного uplink на карте остаётся одно ребро
+(приоритет: интерфейс с items Zabbix, затем логический unit, затем физический).
 """
 
 import argparse
@@ -22,7 +24,11 @@ BITS_SENT_NAME = "Bits sent"
 MAP_ICON_HOST = 130          # Router_symbol_(64)
 
 def load_devices_json(path):
-    """Загрузить JSON с ключом devices. Возврат (data, None) или (None, error_msg)."""
+    """Загрузить JSON с ключом devices. Возврат (data, None) или (None, error_msg).
+    Формат: devices[hostname] = [{"name": "...", "description": "...", ...}, ...].
+    В файле могут быть логические интерфейсы (Juniper: ae5, ae5.0, et-0/0/3); опциональные поля:
+    isLogical, isLag, physicalInterface, aggregateInterface, logicalInterface — используются при выборе
+    одного ребра на (host, ISP) для карты."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -329,6 +335,9 @@ LAYOUT_HOST_STEP_Y = 100            # вертикальный шаг между
 LAYOUT_HOST_COLUMNS = 2
 # Минимальное расстояние между центрами элементов (чтобы не накладывались)
 LAYOUT_MIN_DISTANCE = 80
+# Размер элемента на карте Zabbix (x,y — верхний левый угол); нужен для расчёта высоты карты
+SELEMENT_HEIGHT = 200
+SELEMENT_WIDTH = 200
 
 
 def _occupied_positions(host_pos, isp_pos, exclude_xy=None):
@@ -398,9 +407,11 @@ def _compute_layout(edges, map_width, map_height):
     block_y = LAYOUT_MARGIN
     row_max_height = 0
     max_x = map_width - LAYOUT_MARGIN
+    max_row_width = 0  # макс. ширина по всем рядам (для итогового размера карты)
 
     for isp in isps_sorted:
         if block_x + LAYOUT_BLOCK_WIDTH > max_x and block_x > LAYOUT_MARGIN:
+            max_row_width = max(max_row_width, block_x + LAYOUT_MARGIN)
             block_x = LAYOUT_MARGIN
             block_y += row_max_height
             row_max_height = 0
@@ -450,13 +461,15 @@ def _compute_layout(edges, map_width, map_height):
 
         block_x += LAYOUT_BLOCK_WIDTH
 
-    required_width = block_x + LAYOUT_MARGIN
-    required_height = block_y + row_max_height + LAYOUT_MARGIN
+    # Учитываем размер элемента: в API (x,y) — верхний левый угол, элемент SELEMENT_WIDTH x SELEMENT_HEIGHT
+    required_width = max(block_x + LAYOUT_MARGIN, max_row_width) + SELEMENT_WIDTH
+    required_height = block_y + row_max_height + LAYOUT_MARGIN + SELEMENT_HEIGHT
     return host_pos, isp_pos, required_width, required_height
 
 
-def ensure_map_exists(url, token, debug=False):
-    """Создать карту [test] uplinks, если её ещё нет. Возврат (sysmapid или None, err)."""
+def ensure_map_exists(url, token, debug=False, width=None, height=None):
+    """Создать карту [test] uplinks, если её ещё нет. Возврат (sysmapid или None, err).
+    width/height — при создании карты; если не заданы — MAP_WIDTH/MAP_HEIGHT."""
     existing, err = zabbix_request(url, token, "map.get", {
         "filter": {"name": MAP_NAME},
         "output": ["sysmapid"],
@@ -465,10 +478,12 @@ def ensure_map_exists(url, token, debug=False):
         return None, err
     if existing:
         return existing[0]["sysmapid"], None
+    w = width if width is not None else MAP_WIDTH
+    h = height if height is not None else MAP_HEIGHT
     result, err = zabbix_request(url, token, "map.create", {
         "name": MAP_NAME,
-        "width": MAP_WIDTH,
-        "height": MAP_HEIGHT,
+        "width": w,
+        "height": h,
         "label_type": 0,
         "label_type_image": 0,
     }, debug=debug)
@@ -482,8 +497,10 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
     Обновить карту: добавить/обновить хосты и провайдеры (image), построить линки.
     Существующие элементы других хостов не трогаем. При --host — только этот хост и его линки.
     """
-    # Рёбра для линков: (hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out)
-    edges = []
+    # Рёбра для линков. При наличии логических интерфейсов (ae5, ae5.0, et-0/0/3) на один uplink
+    # оставляем одно ребро на (host, ISP): приоритет — интерфейс с items Zabbix, затем логический (ae5.0).
+    # edge: (hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out, has_items, is_logical, is_aggregate)
+    edges_raw = []
     for hostname in sorted(devices.keys()):
         hostid = host_id_by_name.get(hostname)
         if not hostid:
@@ -498,7 +515,23 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
             itemid_out = rec.get("itemid_out") or ""
             key_in = rec.get("bits_in") or ""
             key_out = rec.get("bits_out") or ""
-            edges.append((hostname, str(hostid), iface_name, isp, itemid_in, itemid_out, key_in, key_out))
+            has_items = bool(itemid_in or itemid_out)
+            is_logical = bool(iface.get("isLogical"))
+            is_aggregate = bool(iface.get("isLag"))
+            edges_raw.append((hostname, str(hostid), iface_name, isp, itemid_in, itemid_out, key_in, key_out,
+                              has_items, is_logical, is_aggregate))
+
+    # Одно ребро на (hostname, hostid, isp): приоритет — has_items, затем is_logical, затем не aggregate
+    def _edge_priority(e):
+        _, _, _, _, _, _, _, _, has_items, is_logical, is_aggregate = e
+        return (has_items, is_logical, not is_aggregate)
+
+    seen_key = {}
+    for e in edges_raw:
+        key = (e[0], e[1], e[3])  # hostname, hostid, isp
+        if key not in seen_key or _edge_priority(e) > _edge_priority(seen_key[key]):
+            seen_key[key] = e
+    edges = [e[:8] for e in sorted(seen_key.values(), key=lambda x: (x[0], x[3], x[2]))]  # hostname, isp, iface
 
     unique_hosts = []  # (hostname, hostid)
     seen_hosts = set()
@@ -532,7 +565,7 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
     if err:
         return "map.get: {}".format(err), None
     if not existing:
-        sysmapid, err = ensure_map_exists(url, token, debug=debug)
+        sysmapid, err = ensure_map_exists(url, token, debug=debug, width=map_width, height=map_height)
         if err:
             return "map.create: {}".format(err), None
         existing = [{"sysmapid": sysmapid, "selements": [], "links": []}]
@@ -796,7 +829,34 @@ def main():
         metavar="SYSMAPID",
         help="Вывести JSON карты из API (sysmapid) для сравнения с ручной картой; нужны ZABBIX_URL и ZABBIX_TOKEN",
     )
+    parser.add_argument(
+        "--generate-description-map",
+        action="store_true",
+        help="Собрать все description из файла devices и вывести шаблон JSON (description -> description). "
+             "Сохранить в description_to_name.json и отредактировать: свести варианты к одному имени (напр. Beeline 5, Uplink: Beeline 5 -> Beeline)",
+    )
     args = parser.parse_args()
+
+    # Генерация шаблона description_to_name: собрать все description из файла
+    if args.generate_description_map:
+        data, err = load_devices_json(args.file)
+        if err:
+            print(err, file=sys.stderr)
+            sys.exit(1)
+        descriptions = set()
+        for host_ifaces in data.get("devices", {}).values():
+            for iface in host_ifaces:
+                d = (iface.get("description") or "").strip()
+                if d:
+                    descriptions.add(d)
+        existing = load_description_map(args.description_map)
+        # Существующие маппинги сохраняем, новые description -> как есть (потом отредактировать)
+        out = dict(existing)
+        for d in sorted(descriptions):
+            if d not in out:
+                out[d] = d
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        sys.exit(0)
 
     # Режим экспорта: только map.get и вывод JSON
     if args.export_map:
