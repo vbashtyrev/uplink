@@ -38,11 +38,12 @@
    - **`zabbix_uplinks_dashboard.py`** — дашборд с графиками по uplink;  
    - **`grafana_uplinks_graph.py`** — Node graph в Grafana (узлы и рёбра по тем же данным).
 
-4. **Commit rates и circuits в NetBox**  
+4. **Commit rates и circuits в NetBox (обязательно до Zabbix)**  
    **`generate_commit_rates.py -f dry-ssh.json`** → **`commit_rates.json`** (провайдер, circuit_id, commit_rate_gbps по устройству/интерфейсу).  
-   **`netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json`** → в NetBox: провайдеры, контуры (cid, commit rate), Termination A на site, кабель до интерфейса.
+   **`netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json`** → в NetBox: провайдеры, контуры (cid, commit rate), Termination A на site, кабель до интерфейса.  
+   Circuits нужны до настройки Zabbix: в Zabbix commit rate будет браться из NetBox circuits.
 
-**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы + при желании circuits), Zabbix-карта/дашборд, Grafana Node graph; отдельная ветка — `commit_rates.json` → circuits в NetBox.
+**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; затем commit_rates → circuits в NetBox) → Zabbix-карта/дашборд и Grafana Node graph (commit rate в Zabbix — из circuits).
 
 ---
 
