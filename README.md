@@ -330,6 +330,32 @@ python zabbix_map.py --generate-description-map -f dry-ssh.json > description_to
 
 ---
 
+### 5. `zabbix_uplinks_dashboard.py` — дашборд Zabbix с графиками uplink
+
+Создание или обновление **дашборда** в Zabbix с виджетами-графиками: по каждому uplink-интерфейсу из `dry-ssh.json` (с учётом дедупликации по паре хост–провайдер, как в карте) добавляется один виджет — график входящего и исходящего трафика (Bits received / Bits sent). Данные по хостам и items берутся из Zabbix API; используется тот же кэш, что и в `zabbix_map.py`.
+
+**Вход:** `dry-ssh.json`, `description_to_name.json`. Переменные: `ZABBIX_URL`, `ZABBIX_TOKEN`.
+
+| Ключ | Описание |
+|------|----------|
+| `-f`, `--file` | Путь к dry-ssh.json (по умолчанию `dry-ssh.json`) |
+| `-m`, `--description-map` | Файл сопоставления description → имя ISP |
+| `--dashboard-name` | Название дашборда в Zabbix (по умолчанию `Uplinks`) |
+| `--no-cache` | Не использовать кэш Zabbix |
+| `--debug` | Отладочный вывод |
+
+Если дашборд с таким именем уже есть — он обновляется (страница с виджетами перезаписывается). Если нет — создаётся новый.
+
+```bash
+# Создать или обновить дашборд «Uplinks» с графиками по всем uplink из dry-ssh.json
+python zabbix_uplinks_dashboard.py -f dry-ssh.json
+
+# Другое имя дашборда
+python zabbix_uplinks_dashboard.py -f dry-ssh.json --dashboard-name "Uplinks traffic"
+```
+
+---
+
 ## Файлы
 
 | Файл | Описание |
@@ -338,5 +364,5 @@ python zabbix_map.py --generate-description-map -f dry-ssh.json > description_to
 | `netbox_interface_types.json` | Справочник типов интерфейсов NetBox (value, label); используется `--mt-ref` в `netbox_checks.py` |
 | `description_to_name.example.json` | Пример сопоставления description → имя ISP; скопировать в `description_to_name.json` и заполнить |
 | `description_to_name.json` | Локальный файл сопоставления (не в git); по умолчанию для `zabbix_map.py -m` |
-| `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` в той же директории, что и файл `-f`, не коммитить |
+| `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` / дашборде в той же директории, что и файл `-f`, не коммитить |
 | `requirements.txt` | Зависимости: pynetbox, paramiko, requests |
