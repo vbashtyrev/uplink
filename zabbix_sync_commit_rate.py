@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
 Синхронизация макросов commit rate в Zabbix из NetBox: для каждого интерфейса с circuit
-(кабель от termination A к интерфейсу) создаётся макрос с commit_rate в bps.
+(кабель от termination A к интерфейсу) создаются макросы с commit_rate в bps.
 
-Имя макроса — с контекстом по интерфейсу: **{$IF.UTIL.MAX:"Ethernet51/1"}**, **{$IF.UTIL.MAX:"ae5.0"}**.
-В триггере используйте тот же формат: ({$IF.UTIL.MAX:"Ethernet51/1"}/100)*...
+Макросы с контекстом по интерфейсу:
+- **{$IF.UTIL.MAX:"Ethernet51/1"}** — 100% порог (линия на графике, красный линк на карте);
+- **{$IF.UTIL.WARN:"Ethernet51/1"}** — 90% порог (жёлтый линк на карте).
 
-При каждом запуске скрипт создаёт простой триггер max(Bits received, 5m) > {$IF.UTIL.MAX:"<интерфейс>"}
-для линии порога на дашборде (Simple triggers рисует порог пунктиром) и удаляет старые item'ы
-net.if.threshold[...], если они остались.
+Скрипт создаёт два простых триггера на интерфейс:
+- max(Bits received, 5m) > {$IF.UTIL.WARN:"<интерфейс>"} — при 90% (Warning, жёлтый);
+- max(Bits received, 5m) > {$IF.UTIL.MAX:"<интерфейс>"} — при 100% (High, красный).
+Линия порога на дашборде рисуется Simple triggers по триггеру 100%. Карта (zabbix_map.py) привязывает
+эти триггеры к линкам, чтобы цвет линка менялся при достижении порогов.
+
+Удаляются старые item'ы net.if.threshold[...], если остались.
 
 Для устройств, где в NetBox кабель на физическом интерфейсе (напр. et-0/0/3), а в Zabbix — логическом
 (ae5.0, ae3.0), задайте -d dry-ssh.json: макрос будет по логическому имени.
@@ -33,6 +38,7 @@ from zabbix_map import (
 )
 
 MACRO_PREFIX = "{$IF.UTIL.MAX"  # Для поиска старых макросов при удалении
+MACRO_PREFIX_WARN = "{$IF.UTIL.WARN"  # Макрос 90% для предупреждения (жёлтый линк на карте)
 # Префикс ключа старых item'ов порога (удаляются при синке)
 THRESHOLD_ITEM_KEY = 'net.if.threshold'
 # NetBox commit_rate в Kbps → в bps для Zabbix
@@ -44,8 +50,14 @@ def _macro_name_for_interface(iface_name):
     """Полное имя макроса с контекстом: {$IF.UTIL.MAX:"Ethernet51/1"} — для использования в триггере."""
     if not iface_name:
         iface_name = ""
-    # Контекст в кавычках (если есть " или } в имени — экранировать при необходимости)
     return '{$IF.UTIL.MAX:"' + iface_name.strip() + '"}'
+
+
+def _macro_name_warn_for_interface(iface_name):
+    """Макрос 90% порога: {$IF.UTIL.WARN:"Ethernet51/1"} — для триггера «жёлтый» на карте."""
+    if not iface_name:
+        iface_name = ""
+    return '{$IF.UTIL.WARN:"' + iface_name.strip() + '"}'
 
 
 def load_dry_ssh(path):
@@ -282,20 +294,21 @@ def get_zabbix_host_macros(url, token, hostids, debug=False):
 
 def set_zabbix_host_if_util_macros(url, token, hostid, new_if_util_list, debug=False):
     """
-    Установить макросы commit rate по интерфейсам. Имя макроса с контекстом:
-    {$IF.UTIL.MAX:"Ethernet51/1"} (полная строка в поле macro, без параметра context в API).
-    new_if_util_list: список {"macro", "value", "type"} (macro = {$IF.UTIL.MAX:"<интерфейс>"}).
+    Установить макросы commit rate по интерфейсам. Имена макросов с контекстом:
+    {$IF.UTIL.MAX:"Ethernet51/1"} и {$IF.UTIL.WARN:"Ethernet51/1"} (90% для жёлтого на карте).
+    new_if_util_list: список {"macro", "value", "type"} (macro начинается с {$IF.UTIL.MAX или {$IF.UTIL.WARN).
     Возврат (True, None) или (False, error_message).
     """
-    # Удалить все макросы хоста, имя которых начинается с {$IF.UTIL.MAX
-    result, err = zabbix_request(
-        url, token, "usermacro.get",
-        {"hostids": [hostid], "output": ["hostmacroid", "macro"], "search": {"macro": MACRO_PREFIX}},
-        debug=debug,
-    )
-    if err:
-        return False, err
-    to_delete = [m["hostmacroid"] for m in (result or []) if m.get("hostmacroid")]
+    to_delete = []
+    for prefix in (MACRO_PREFIX, MACRO_PREFIX_WARN):
+        result, err = zabbix_request(
+            url, token, "usermacro.get",
+            {"hostids": [hostid], "output": ["hostmacroid", "macro"], "search": {"macro": prefix}},
+            debug=debug,
+        )
+        if err:
+            return False, err
+        to_delete.extend(m["hostmacroid"] for m in (result or []) if m.get("hostmacroid"))
     if to_delete:
         result_del, err_del = zabbix_request(url, token, "usermacro.delete", to_delete, debug=debug)
         if err_del:
@@ -312,10 +325,7 @@ def set_zabbix_host_if_util_macros(url, token, hostid, new_if_util_list, debug=F
     return True, None
 
 
-# Тип item: 2 = Zabbix trapper (принимает данные через API history.push или zabbix_sender)
-# value_type: 3 = unsigned integer (bps)
-ITEM_TYPE_TRAPPER = 2
-VALUE_TYPE_UNSIGNED = 3
+TRIGGER_TAG_SCRIPTS = {"tag": "scripts", "value": "automatization"}
 
 
 def get_bits_received_item_key(url, token, hostid, iface_name, debug=False):
@@ -345,23 +355,66 @@ def get_bits_received_item_key(url, token, hostid, iface_name, debug=False):
     return None
 
 
+# Приоритеты для отображения на карте: 2 = Warning (жёлтый), 4 = High (красный)
+TRIGGER_PRIORITY_WARN = 2   # 90% — линк жёлтый
+TRIGGER_PRIORITY_HIGH = 4   # 100% — линк красный
+
+
 def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_name, debug=False):
     """
-    Создать простой триггер max(Bits received, 5m) > {$IF.UTIL.MAX:"iface"}.
-    Линия порога рисуется на графике при включённом Simple triggers (без третьей серии на дашборде).
+    Создать/обновить простой триггер max(Bits received, 5m) > {$IF.UTIL.MAX:"iface"}.
+    Линия порога на графике (Simple triggers) и красный линк на карте при 100%.
     Возврат (True, None) или (False, error_message).
     """
     key = get_bits_received_item_key(url, token, hostid, iface_name, debug=debug)
     if not key:
         return False, "не найден item Bits received для интерфейса {}".format(iface_name)
-    # Выражение: один item, одна функция max(5m), сравнение с макросом — считается простым триггером
     macro_ref = _macro_name_for_interface(iface_name)
     expression = "max(/{}/{}, 5m)>{}".format(host_technical, key, macro_ref)
     description = "Interface {}: High bandwidth (threshold line)".format((iface_name or "").strip())
-    # Проверить, есть ли уже такой триггер (по описанию)
     existing, err = zabbix_request(
         url, token, "trigger.get",
-        {"hostids": [hostid], "output": ["triggerid", "description"], "search": {"description": "threshold line"}},
+        {"hostids": [hostid], "output": ["triggerid", "description", "priority"], "search": {"description": "threshold line"}},
+        debug=debug,
+    )
+    if err:
+        return False, err
+    for t in (existing or []):
+        if t.get("description") == description:
+            tid = t.get("triggerid")
+            if tid and str(t.get("priority", "0")) != str(TRIGGER_PRIORITY_HIGH):
+                zabbix_request(url, token, "trigger.update", {"triggerid": tid, "priority": TRIGGER_PRIORITY_HIGH}, debug=debug)
+            return True, None
+    create_res, create_err = zabbix_request(
+        url, token, "trigger.create",
+        {
+            "description": description,
+            "expression": expression,
+            "priority": TRIGGER_PRIORITY_HIGH,
+            "tags": [TRIGGER_TAG_SCRIPTS],
+        },
+        debug=debug,
+    )
+    if create_err or not create_res or not create_res.get("triggerids"):
+        return False, create_err or "trigger.create не вернул triggerid"
+    return True, None
+
+
+def ensure_simple_warn_trigger(url, token, host_technical, hostid, iface_name, debug=False):
+    """
+    Создать простой триггер 90%: max(Bits received, 5m) > {$IF.UTIL.WARN:"iface"}.
+    На карте линк становится жёлтым при достижении 90% порога.
+    Возврат (True, None) или (False, error_message).
+    """
+    key = get_bits_received_item_key(url, token, hostid, iface_name, debug=debug)
+    if not key:
+        return False, "не найден item Bits received для интерфейса {}".format(iface_name)
+    macro_ref = _macro_name_warn_for_interface(iface_name)
+    expression = "max(/{}/{}, 5m)>{}".format(host_technical, key, macro_ref)
+    description = "Interface {}: High bandwidth (90%)".format((iface_name or "").strip())
+    existing, err = zabbix_request(
+        url, token, "trigger.get",
+        {"hostids": [hostid], "output": ["triggerid", "description"], "search": {"description": "High bandwidth (90%)"}},
         debug=debug,
     )
     if err:
@@ -370,7 +423,12 @@ def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_na
         return True, None
     create_res, create_err = zabbix_request(
         url, token, "trigger.create",
-        {"description": description, "expression": expression, "priority": 1},
+        {
+            "description": description,
+            "expression": expression,
+            "priority": TRIGGER_PRIORITY_WARN,
+            "tags": [TRIGGER_TAG_SCRIPTS],
+        },
         debug=debug,
     )
     if create_err or not create_res or not create_res.get("triggerids"):
@@ -494,6 +552,12 @@ def main():
                 "value": str(bps),
                 "type": "0",
             })
+            # 90% порог — для триггера «жёлтый линк» на карте
+            new_if_util.append({
+                "macro": _macro_name_warn_for_interface(iface_name),
+                "value": str(int(bps * 0.9)),
+                "type": "0",
+            })
 
         if args.dry_run:
             print(
@@ -509,19 +573,24 @@ def main():
         if not ok:
             print("Ошибка обновления макросов для {}: {}".format(dev_name, err or "usermacro"), file=sys.stderr)
             continue
-        # Простой триггер для линии порога на графике (Simple triggers рисует порог пунктиром)
+        # Триггеры для линии порога на графике и цветов линков на карте (90% — жёлтый, 100% — красный)
         zabbix_host = host_technical_by_hostid.get(hostid) or dev_name
         for iface_name, _bps in iface_bps_list:
             ok_tr, err_tr = ensure_simple_threshold_trigger(
                 zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug
             )
             if not ok_tr:
-                print("  {}: простой триггер порога — {}".format(iface_name, err_tr or "ошибка"), file=sys.stderr)
+                print("  {}: триггер 100% — {}".format(iface_name, err_tr or "ошибка"), file=sys.stderr)
+            ok_w, err_w = ensure_simple_warn_trigger(
+                zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug
+            )
+            if not ok_w:
+                print("  {}: триггер 90% — {}".format(iface_name, err_w or "ошибка"), file=sys.stderr)
         # Удалить старые item'ы порога net.if.threshold[...] (линия теперь от простого триггера)
         removed, rem_err = remove_threshold_items(zabbix_url, zabbix_token, hostid, debug=args.debug)
         if rem_err:
             print("  {}: удаление item'ов порога — {}".format(dev_name, rem_err), file=sys.stderr)
-        msg = "OK: {} — установлено {} макросов ({{$IF.UTIL.MAX:\"<интерфейс>\"}}), простой триггер для линии".format(dev_name, len(new_if_util))
+        msg = "OK: {} — установлено {} макросов (MAX+WARN 90%), триггеры 90%/100% для карты".format(dev_name, len(new_if_util))
         if removed:
             msg += ", удалено {} item'ов порога".format(removed)
         print(msg)

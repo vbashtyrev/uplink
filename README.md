@@ -15,12 +15,12 @@
 | `uplinks_stats.py` | Сбор данных с устройств по SSH (Arista/Juniper) или отчёт NetBox vs устройство; выход — таблица или JSON (`dry-ssh.json`). |
 | `netbox_checks.py` | Сверка данных из JSON с NetBox (интерфейсы: имя, description, тип, speed, duplex, MAC, MTU, IP, LAG и др.) и при необходимости обновление полей в NetBox. |
 | `netbox_interface_types.py` | Скачивание справочника типов интерфейсов NetBox (value/label) из репозитория в JSON для `--mt-ref`. |
-| `zabbix_map.py` | Таблица uplink'ов по dry-ssh; карта Zabbix (хосты, провайдеры, линки с items Bits in/out). |
+| `zabbix_map.py` | Таблица uplink'ов по dry-ssh; карта Zabbix (хосты, провайдеры, линки с items Bits in/out). К линкам привязываются триггеры 90%/100% — цвет линка: жёлтый при 90%, красный при 100%. |
 | `zabbix_uplinks_dashboard.py` | Создание/обновление дашборда Zabbix с виджетами-графиками по каждому uplink (Bits received/sent). |
 | `grafana_uplinks_graph.py` | Генерация JSON для панели Node graph в Grafana (узлы — хосты и провайдеры, рёбра — линки); опционально создание дашборда через Grafana API. |
 | `generate_commit_rates.py` | Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по `commit_rates.json`: провайдер, тип «Internet», контур, Termination A на site, кабель до интерфейса. |
-| `zabbix_sync_commit_rate.py` | Синхронизация макросов **{$IF.UTIL.MAX:"Ethernet51/1"}** в Zabbix из NetBox: для каждого интерфейса с circuit (кабель от termination A) создаётся макрос с commit rate в bps (имя с контекстом: {$IF.UTIL.MAX:"<интерфейс>"}). |
+| `zabbix_sync_commit_rate.py` | Синхронизация макросов **{$IF.UTIL.MAX}** и **{$IF.UTIL.WARN}** (90%) в Zabbix из NetBox; создаёт триггеры 90% (жёлтый линк на карте) и 100% (красный, линия порога на дашборде). |
 
 ---
 
@@ -45,9 +45,9 @@
    Circuits нужны до настройки Zabbix: в Zabbix commit rate будет браться из NetBox circuits.
 
 5. **Синхронизация макросов commit rate в Zabbix**  
-   **`zabbix_sync_commit_rate.py`** → по NetBox (интерфейсы с circuit по кабелю) получает commit rate в Kbps, переводит в bps и создаёт на хосте макросы **{$IF.UTIL.MAX:"Ethernet51/1"}** (имя с контекстом по интерфейсу). В триггере используйте тот же формат: **{$IF.UTIL.MAX:"Ethernet51/1"}**.
+   **`zabbix_sync_commit_rate.py`** → по NetBox (интерфейсы с circuit по кабелю) получает commit rate в Kbps, переводит в bps и создаёт макросы **{$IF.UTIL.MAX:"<интерфейс>"}** (100%) и **{$IF.UTIL.WARN:"<интерфейс>"}** (90%). Создаёт два триггера на интерфейс: при 90% — Warning (жёлтый линк на карте), при 100% — High (красный линк, линия порога на дашборде). **`zabbix_map.py --update-map`** привязывает эти триггеры к линкам карты.
 
-**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы {$IF.UTIL.MAX} из NetBox) → Zabbix-карта/дашборд, триггеры по полосе из circuits.
+**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы и триггеры 90%/100%) → **zabbix_map.py** (карта с цветом линков), дашборд с линией порога.
 
 ---
 
@@ -297,7 +297,7 @@ python netbox_interface_types.py -o my_types.json
 
 ### 4. `zabbix_map.py`
 
-Построение таблицы uplink'ов по данным из `dry-ssh.json`; опционально — карта Zabbix. При обращении к Zabbix API: поиск хостов и items (Bits received/sent). Файл может содержать логические интерфейсы (Juniper: ae5, ae5.0, et-0/0/3); на карте для одной пары (хост, провайдер) рисуется один линк — выбирается интерфейс с items Zabbix, при равных условиях логический unit (например ae5.0), иначе физический.
+Построение таблицы uplink'ов по данным из `dry-ssh.json`; опционально — карта Zabbix. При обращении к Zabbix API: поиск хостов и items (Bits received/sent). Файл может содержать логические интерфейсы (Juniper: ae5, ae5.0, et-0/0/3); на карте для одной пары (хост, провайдер) рисуется один линк — выбирается интерфейс с items Zabbix, при равных условиях логический unit (например ae5.0), иначе физический. При создании/обновлении линков к каждому линку привязываются триггеры 90% и 100% (создаются `zabbix_sync_commit_rate.py`): при срабатывании 90% линк отображается жёлтым, при 100% — красным.
 
 **Карта Zabbix**
 
@@ -423,11 +423,11 @@ python netbox_create_circuits.py --location ALA
 
 ---
 
-### 7. `zabbix_sync_commit_rate.py` — макросы {$IF.UTIL.MAX:"<интерфейс>"} в Zabbix из NetBox
+### 7. `zabbix_sync_commit_rate.py` — макросы и триггеры 90%/100% в Zabbix из NetBox
 
-Для каждого интерфейса в NetBox, подключённого кабелем к circuit termination (сторона A), скрипт берёт **commit rate** контура (Kbps), переводит в bps и создаёт на хосте макрос с именем **{$IF.UTIL.MAX:"Ethernet51/1"}** (контекст — имя интерфейса как есть). Остальные макросы хоста не трогаются. При каждом запуске скрипт также создаёт **простой триггер** `max(Bits received, 5m) > {$IF.UTIL.MAX:"<интерфейс>"}` — по нему дашборд uplinks рисует линию порога пунктиром (Simple triggers). Старые item'ы **net.if.threshold["..."]**, если остались, удаляются.
+Для каждого интерфейса в NetBox, подключённого кабелем к circuit termination (сторона A), скрипт берёт **commit rate** контура (Kbps), переводит в bps и создаёт на хосте два макроса с контекстом по интерфейсу: **{$IF.UTIL.MAX:"Ethernet51/1"}** (100%) и **{$IF.UTIL.WARN:"Ethernet51/1"}** (90%, значение = 0.9×commit_rate). Создаёт два простых триггера на интерфейс: при 90% — `max(Bits received, 5m) > {$IF.UTIL.WARN:"<интерфейс>"}` (Warning, на карте линк жёлтый), при 100% — `max(Bits received, 5m) > {$IF.UTIL.MAX:"<интерфейс>"}` (High, линия порога на дашборде и красный линк на карте). Карта (`zabbix_map.py --update-map`) привязывает эти триггеры к линкам. Старые item'ы **net.if.threshold["..."]**, если остались, удаляются.
 
-В триггере используйте тот же формат: **{$IF.UTIL.MAX:"Ethernet51/1"}**, напр. **({$IF.UTIL.MAX:"Ethernet51/1"}/100)*last(/host/net.if.speed[...])** — порог по реальной полосе (commit rate).
+В своих триггерах используйте тот же формат макросов: **{$IF.UTIL.MAX:"Ethernet51/1"}**, **{$IF.UTIL.WARN:"Ethernet51/1"}**.
 
 **Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`, `ZABBIX_URL`, `ZABBIX_TOKEN`.
 
@@ -459,7 +459,7 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json --debug
 | `commit_rates.json` | Локальный файл (не в git): оплаченная скорость (commit_rate_gbps, Гбит/с), провайдер и circuit ID по паре устройство — интерфейс; для NetBox Circuit (Commit rate в Kbps = × 1 000 000) |
 | `generate_commit_rates.py` | Генерация commit_rates.json по всем линкам из dry-ssh.json (провайдер, circuit_id по локации, commit_rate_gbps) |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по commit_rates.json (провайдер, тип, circuit, Termination A + cable к интерфейсу; отчёт в конце) |
-| `zabbix_sync_commit_rate.py` | Синхронизация макросов {$IF.UTIL.MAX:"<интерфейс>"} в Zabbix из NetBox; простой триггер для линии порога на дашборде, удаление старых item'ов порога |
+| `zabbix_sync_commit_rate.py` | Синхронизация макросов {$IF.UTIL.MAX} и {$IF.UTIL.WARN} (90%) в Zabbix из NetBox; триггеры 90%/100% для карты и линии порога на дашборде, удаление старых item'ов порога |
 | `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` / дашборде в той же директории, что и файл `-f`, не коммитить |
 | `ROADMAP.md` | Планы доработок (например Tenancy для circuits) |
 | `requirements.txt` | Зависимости: pynetbox, paramiko, requests |

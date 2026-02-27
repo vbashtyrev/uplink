@@ -3,6 +3,8 @@
 Построение карты в Zabbix по данным из файлов и других источников.
 Zabbix 7.0: при использовании API — переменные ZABBIX_URL, ZABBIX_TOKEN; токен проверяется при первом запросе.
 По умолчанию: hostname, interface, description, ISP. С --zabbix добавляются ключи items Bits received / Bits sent.
+При создании/обновлении линков к ним привязываются триггеры 90% и 100% (создаются zabbix_sync_commit_rate):
+при 90% загрузки линк жёлтый, при 100% — красный.
 Входной файл (dry-ssh.json) может содержать логические интерфейсы; для одного uplink на карте остаётся одно ребро
 (приоритет: интерфейс с items Zabbix, затем логический unit, затем физический).
 """
@@ -204,6 +206,65 @@ def _normalize_interface_name(name):
     if not name:
         return ""
     return name.strip().lower()
+
+
+# Описания триггеров, создаваемых zabbix_sync_commit_rate (90% — жёлтый, 100% — красный на карте)
+TRIGGER_DESC_90 = "High bandwidth (90%)"
+TRIGGER_DESC_100 = "High bandwidth (threshold line)"
+# Цвета линков на карте (hex без #): жёлтый — предупреждение, красный — высокий
+LINK_COLOR_WARN = "DDBB00"
+LINK_COLOR_HIGH = "DD0000"
+
+
+def get_uplink_trigger_ids_by_host_iface(url, token, hostids, debug=False):
+    """
+    Получить triggerid триггеров «90%» и «100%» по хостам (создаются zabbix_sync_commit_rate).
+    Возврат: dict (hostid, iface_name_normalized) -> (triggerid_warn, triggerid_high),
+    где triggerid_warn/triggerid_high могут быть None если триггер не найден.
+    """
+    if not hostids:
+        return {}
+    result, err = zabbix_request(
+        url, token, "trigger.get",
+        {
+            "hostids": list(hostids),
+            "output": ["triggerid", "description", "priority"],
+            "search": {"description": "High bandwidth"},
+            "selectHosts": ["hostid"],
+        },
+        debug=debug,
+    )
+    if err or not result:
+        return {}
+    # Разбираем описание: "Interface Ethernet51/1: High bandwidth (90%)" / "... (threshold line)"
+    re_90 = re.compile(r"^Interface\s+(.+?):\s*High bandwidth \(90%\)\s*$", re.IGNORECASE)
+    re_100 = re.compile(r"^Interface\s+(.+?):\s*High bandwidth \(threshold line\)\s*$", re.IGNORECASE)
+    by_key = {}  # (hostid, iface_norm) -> {"warn": id, "high": id}
+    for t in result:
+        desc = (t.get("description") or "").strip()
+        hosts = t.get("hosts") or []
+        hostid = hosts[0].get("hostid") if hosts else None
+        if not hostid:
+            continue
+        hostid = str(hostid)
+        iface_name = None
+        tid = t.get("triggerid")
+        if re_90.search(desc):
+            m = re_90.match(desc)
+            iface_name = m.group(1).strip() if m else None
+            if iface_name:
+                key = (hostid, _normalize_interface_name(iface_name))
+                by_key.setdefault(key, {"warn": None, "high": None})["warn"] = tid
+        elif re_100.search(desc):
+            m = re_100.match(desc)
+            iface_name = m.group(1).strip() if m else None
+            if iface_name:
+                key = (hostid, _normalize_interface_name(iface_name))
+                by_key.setdefault(key, {"warn": None, "high": None})["high"] = tid
+    out = {}
+    for (hostid, iface_norm), ids in by_key.items():
+        out[(hostid, iface_norm)] = (ids.get("warn"), ids.get("high"))
+    return out
 
 
 def fetch_zabbix_hosts_and_items(url, token, hostnames, debug=False):
@@ -721,6 +782,10 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
         elif etype == ELEMENT_TYPE_IMAGE:
             isp_to_selement[el.get("label", "")] = sid
 
+    # Триггеры 90%/100% для окраски линков (создаются zabbix_sync_commit_rate)
+    edge_hostids = set(e[1] for e in edges)
+    trigger_ids_by_host_iface = get_uplink_trigger_ids_by_host_iface(url, token, edge_hostids, debug=debug)
+
     new_links = []
     our_host_sids = set()
     for hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out, _desc in edges:
@@ -739,13 +804,22 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
                 label_parts.append("In: {?last(/" + hostname + "/" + key_in + ")}")
             if key_out:
                 label_parts.append("Out: {?last(/" + hostname + "/" + key_out + ")}")
-        # Все объекты в links должны иметь один набор полей; для нового линка передаём linkid: 0 (API может трактовать как «создать»).
         link = {
             "linkid": 0,
             "selementid1": sid1,
             "selementid2": sid2,
             "label": "\n".join(label_parts),
         }
+        # Привязать триггеры к линку: 90% — жёлтый, 100% — красный на карте
+        key_tr = (str(hostid), _normalize_interface_name(iface_name or ""))
+        trigger_warn, trigger_high = trigger_ids_by_host_iface.get(key_tr, (None, None))
+        linktriggers = []
+        if trigger_warn:
+            linktriggers.append({"triggerid": trigger_warn, "color": LINK_COLOR_WARN})
+        if trigger_high:
+            linktriggers.append({"triggerid": trigger_high, "color": LINK_COLOR_HIGH})
+        if linktriggers:
+            link["linktriggers"] = linktriggers
         new_links.append(link)
 
     # Существующие линки: только те, что не от наших хостов; подменяем удалённые дубликаты на канонический selementid
@@ -760,13 +834,16 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
         s2 = selementid_to_canonical.get(s2, s2)
         label = str(l.get("label") or "")
         if l.get("linkid"):
-            # Обновление существующего линка: linkid, selementid1, selementid2, label. linkid — число (как у нового с linkid: 0).
             entry = {
                 "linkid": int(l["linkid"]),
                 "selementid1": s1,
                 "selementid2": s2,
                 "label": label,
             }
+            # Сохранить привязки триггеров к линку при обновлении
+            lt_list = l.get("linktriggers") or []
+            if lt_list:
+                entry["linktriggers"] = [{"triggerid": lt.get("triggerid"), "color": lt.get("color", LINK_COLOR_HIGH)} for lt in lt_list if lt.get("triggerid")]
         else:
             entry = {
                 "selementid1": s1,
