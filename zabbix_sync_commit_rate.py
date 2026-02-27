@@ -384,7 +384,7 @@ def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_na
     description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_100_SUFFIX)
     existing, err = zabbix_request(
         url, token, "trigger.get",
-        {"hostids": [hostid], "output": ["triggerid", "description", "priority"], "search": {"description": TRIGGER_DESC_100_SUFFIX}},
+        {"hostids": [hostid], "output": ["triggerid", "description", "priority", "status"], "search": {"description": TRIGGER_DESC_100_SUFFIX}},
         debug=debug,
     )
     if err:
@@ -392,8 +392,14 @@ def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_na
     for t in (existing or []):
         if t.get("description") == description:
             tid = t.get("triggerid")
-            if tid and str(t.get("priority", "0")) != str(TRIGGER_PRIORITY_HIGH):
-                zabbix_request(url, token, "trigger.update", {"triggerid": tid, "priority": TRIGGER_PRIORITY_HIGH}, debug=debug)
+            if tid:
+                upd = {}
+                if str(t.get("priority", "0")) != str(TRIGGER_PRIORITY_HIGH):
+                    upd["priority"] = TRIGGER_PRIORITY_HIGH
+                if str(t.get("status", "0")) != "0":  # включить, если был отключён
+                    upd["status"] = "0"
+                if upd:
+                    zabbix_request(url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug)
             return True, None
     create_res, create_err = zabbix_request(
         url, token, "trigger.create",
@@ -424,13 +430,17 @@ def ensure_simple_warn_trigger(url, token, host_technical, hostid, iface_name, d
     description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_90_SUFFIX)
     existing, err = zabbix_request(
         url, token, "trigger.get",
-        {"hostids": [hostid], "output": ["triggerid", "description"], "search": {"description": TRIGGER_DESC_90_SUFFIX}},
+        {"hostids": [hostid], "output": ["triggerid", "description", "status"], "search": {"description": TRIGGER_DESC_90_SUFFIX}},
         debug=debug,
     )
     if err:
         return False, err
-    if any(t.get("description") == description for t in (existing or [])):
-        return True, None
+    for t in (existing or []):
+        if t.get("description") == description:
+            tid = t.get("triggerid")
+            if tid and str(t.get("status", "0")) != "0":
+                zabbix_request(url, token, "trigger.update", {"triggerid": tid, "status": "0"}, debug=debug)
+            return True, None
     create_res, create_err = zabbix_request(
         url, token, "trigger.create",
         {
