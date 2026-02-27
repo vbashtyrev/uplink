@@ -23,6 +23,7 @@ from zabbix_map import (
     _normalize_interface_name,
     _get_zabbix_url_token,
 )
+from uplinks_config import DASHBOARD_NAME, DASHBOARD_NAME_BY_LOCATION
 
 
 def _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name):
@@ -282,8 +283,8 @@ def main():
     )
     parser.add_argument("-f", "--file", default=DEFAULT_INPUT, help="Путь к dry-ssh.json")
     parser.add_argument("-m", "--description-map", default=DESCRIPTION_MAP_FILE, help="Файл description_to_name.json")
-    parser.add_argument("--dashboard-name", default="Uplinks", help="Название основного дашборда в Zabbix")
-    parser.add_argument("--dashboard-by-location", default="Uplinks (по локациям)", metavar="NAME",
+    parser.add_argument("--dashboard-name", default=DASHBOARD_NAME, help="Название основного дашборда в Zabbix")
+    parser.add_argument("--dashboard-by-location", default=DASHBOARD_NAME_BY_LOCATION, metavar="NAME",
                         help="Создать второй дашборд с графиками по страницам (одна страница = одна локация). Пустая строка — не создавать")
     parser.add_argument("--no-cache", action="store_true", help="Не использовать кэш Zabbix")
     parser.add_argument("--no-show-threshold", action="store_true",

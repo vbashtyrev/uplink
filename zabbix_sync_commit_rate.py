@@ -36,28 +36,35 @@ from zabbix_map import (
     validate_zabbix_token,
     zabbix_request,
 )
+from uplinks_config import (
+    MACRO_PREFIX_MAX,
+    MACRO_PREFIX_WARN,
+    THRESHOLD_ITEM_KEY,
+    TRIGGER_DESC_90_SUFFIX,
+    TRIGGER_DESC_100_SUFFIX,
+    TRIGGER_TAG_NAME,
+    TRIGGER_TAG_VALUE,
+)
 
-MACRO_PREFIX = "{$IF.UTIL.MAX"  # Для поиска старых макросов при удалении
-MACRO_PREFIX_WARN = "{$IF.UTIL.WARN"  # Макрос 90% для предупреждения (жёлтый линк на карте)
-# Префикс ключа старых item'ов порога (удаляются при синке)
-THRESHOLD_ITEM_KEY = 'net.if.threshold'
+# Алиас для совместимости (поиск старых макросов при удалении)
+MACRO_PREFIX = MACRO_PREFIX_MAX
 # NetBox commit_rate в Kbps → в bps для Zabbix
 KBPS_TO_BPS = 1000
 DEFAULT_DRY_SSH = "dry-ssh.json"
 
 
 def _macro_name_for_interface(iface_name):
-    """Полное имя макроса с контекстом: {$IF.UTIL.MAX:"Ethernet51/1"} — для использования в триггере."""
+    """Полное имя макроса с контекстом по интерфейсу — для использования в триггере."""
     if not iface_name:
         iface_name = ""
-    return '{$IF.UTIL.MAX:"' + iface_name.strip() + '"}'
+    return MACRO_PREFIX_MAX + ':"' + iface_name.strip() + '"}'
 
 
 def _macro_name_warn_for_interface(iface_name):
-    """Макрос 90% порога: {$IF.UTIL.WARN:"Ethernet51/1"} — для триггера «жёлтый» на карте."""
+    """Макрос 90% порога — для триггера «жёлтый» на карте."""
     if not iface_name:
         iface_name = ""
-    return '{$IF.UTIL.WARN:"' + iface_name.strip() + '"}'
+    return MACRO_PREFIX_WARN + ':"' + iface_name.strip() + '"}'
 
 
 def load_dry_ssh(path):
@@ -300,7 +307,7 @@ def set_zabbix_host_if_util_macros(url, token, hostid, new_if_util_list, debug=F
     Возврат (True, None) или (False, error_message).
     """
     to_delete = []
-    for prefix in (MACRO_PREFIX, MACRO_PREFIX_WARN):
+    for prefix in (MACRO_PREFIX_MAX, MACRO_PREFIX_WARN):
         result, err = zabbix_request(
             url, token, "usermacro.get",
             {"hostids": [hostid], "output": ["hostmacroid", "macro"], "search": {"macro": prefix}},
@@ -325,7 +332,7 @@ def set_zabbix_host_if_util_macros(url, token, hostid, new_if_util_list, debug=F
     return True, None
 
 
-TRIGGER_TAG_SCRIPTS = {"tag": "scripts", "value": "automatization"}
+TRIGGER_TAG_SCRIPTS = {"tag": TRIGGER_TAG_NAME, "value": TRIGGER_TAG_VALUE}
 
 
 def get_bits_received_item_key(url, token, hostid, iface_name, debug=False):
@@ -371,10 +378,10 @@ def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_na
         return False, "не найден item Bits received для интерфейса {}".format(iface_name)
     macro_ref = _macro_name_for_interface(iface_name)
     expression = "max(/{}/{}, 5m)>{}".format(host_technical, key, macro_ref)
-    description = "Interface {}: High bandwidth (threshold line)".format((iface_name or "").strip())
+    description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_100_SUFFIX)
     existing, err = zabbix_request(
         url, token, "trigger.get",
-        {"hostids": [hostid], "output": ["triggerid", "description", "priority"], "search": {"description": "threshold line"}},
+        {"hostids": [hostid], "output": ["triggerid", "description", "priority"], "search": {"description": TRIGGER_DESC_100_SUFFIX}},
         debug=debug,
     )
     if err:
@@ -411,10 +418,10 @@ def ensure_simple_warn_trigger(url, token, host_technical, hostid, iface_name, d
         return False, "не найден item Bits received для интерфейса {}".format(iface_name)
     macro_ref = _macro_name_warn_for_interface(iface_name)
     expression = "max(/{}/{}, 5m)>{}".format(host_technical, key, macro_ref)
-    description = "Interface {}: High bandwidth (90%)".format((iface_name or "").strip())
+    description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_90_SUFFIX)
     existing, err = zabbix_request(
         url, token, "trigger.get",
-        {"hostids": [hostid], "output": ["triggerid", "description"], "search": {"description": "High bandwidth (90%)"}},
+        {"hostids": [hostid], "output": ["triggerid", "description"], "search": {"description": TRIGGER_DESC_90_SUFFIX}},
         debug=debug,
     )
     if err:

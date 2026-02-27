@@ -304,8 +304,10 @@ python netbox_interface_types.py -o my_types.json
 
 **Карта Zabbix**
 
-- `--create-map` — только создать пустую карту [test] uplinks, если её нет.
-- `--update-map` — обновить карту (хосты, провайдеры, линки). С `--host` обновляются только указанный хост и его линки.
+- **По умолчанию** (без ключей): если карты с именем из `uplinks_config.MAP_NAME` нет — создаётся карта со всеми элементами (хосты, провайдеры, линки); если карта уже есть — выводится сообщение, изменения не вносятся.
+- `--update-map` — принудительно обновить карту (хосты, провайдеры, линки). С `--host` — только указанный хост и его линки.
+- `--print-table` — вывести в консоль таблицу (hostname, interface, description, ISP); с `--zabbix` — с hostid и ключами items.
+- `--create-map` — только создать пустую карту, если её нет (без элементов).
 
 **Раскладка карты**
 
@@ -340,20 +342,25 @@ python zabbix_map.py --generate-description-map -f dry-ssh.json > description_to
 | `-f`, `--file` | JSON с ключом `devices` (по умолчанию `dry-ssh.json`) |
 | `-m`, `--description-map` | Файл сопоставления description → имя ISP |
 | `--generate-description-map` | Собрать все description из файла и вывести шаблон JSON (в stdout); объединить с существующим маппингом |
-| `--zabbix` | Запросить Zabbix API, вывести ключи items (Bits received/sent) |
-| `--create-map` | Только создать карту [test] uplinks, если её нет (пустая) |
-| `--update-map` | Обновить карту: хосты, провайдеры, линки; с `--host` — только указанный хост и его линки |
+| `--zabbix` | Запросить Zabbix API (для карты или таблицы) |
+| `--print-table` | Вывести таблицу в консоль (с `--zabbix` — с hostid и ключами items) |
+| `--create-map` | Только создать пустую карту, если её нет |
+| `--update-map` | Принудительно обновить карту (хосты, провайдеры, линки); с `--host` — только указанный хост |
 | `--host HOSTNAME` | Работать только с одним хостом |
 | `--debug` | Отладочный вывод и тело запросов map.create/update |
 | `--no-cache` | Не использовать кэш Zabbix |
 | `--export-map SYSMAPID` | Вывести JSON карты из API (для сравнения с ручной картой) |
 
 ```bash
-# Только таблица из файла
+# По умолчанию: создать карту со всеми элементами, если её нет (иначе — сообщение)
 python zabbix_map.py
 
-# Таблица с hostid и ключами items из Zabbix
-python zabbix_map.py --zabbix
+# Принудительно обновить карту (например после создания триггеров в шаге 5)
+python zabbix_map.py --update-map
+
+# Таблица в консоль (без Zabbix / с Zabbix)
+python zabbix_map.py --print-table
+python zabbix_map.py --print-table --zabbix
 
 # Один хост
 python zabbix_map.py --zabbix --host router-001
@@ -361,8 +368,8 @@ python zabbix_map.py --zabbix --host router-001
 # Создать пустую карту (один раз)
 python zabbix_map.py --create-map
 
-# Обновить карту по всем хостам из dry-ssh.json (хосты, провайдеры, линки)
-python zabbix_map.py --zabbix --update-map --debug
+# Обновить карту по всем хостам (с отладкой)
+python zabbix_map.py --update-map --debug
 
 # Обновить только один хост и его линки
 python zabbix_map.py --zabbix --update-map --host router-001 --debug
@@ -408,6 +415,8 @@ python zabbix_uplinks_dashboard.py -f dry-ssh.json --dashboard-name "Uplinks tra
 ### 6. `netbox_create_circuits.py` — создание circuits в NetBox
 
 Создание контуров (circuits) в NetBox по `commit_rates.json`: провайдер, тип «Internet», контур (cid, commit rate), Termination A на site устройства, кабель до интерфейса. Termination Z не создаётся. При существующем кабеле или mark_connected у интерфейса — удаление кабеля и сброс mark_connected, затем создание кабеля по нашим данным. Для виртуальных интерфейсов (ae5.0 и т.п.) кабель подключается к физическому (из dry-ssh `physicalInterface`). В конце выводится отчёт: создано / удалено / отключено / где использована физика вместо логики.
+
+**Тег автоматизации:** скрипт создаёт в NetBox тег с именем из `uplinks_config.NETBOX_AUTOMATION_TAG` (по умолчанию `automatization`), если его ещё нет, и проставляет его всем создаваемым объектам (провайдеры, типы контуров, контуры, кабели). Уже существующим объектам тег добавляется при повторном запуске (без перезаписи остальных тегов).
 
 **Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`.
 
@@ -484,6 +493,7 @@ python zabbix_uplinks_cleanup.py
 | `netbox_create_circuits.py` | Создание circuits в NetBox по commit_rates.json (провайдер, тип, circuit, Termination A + cable к интерфейсу; отчёт в конце) |
 | `zabbix_sync_commit_rate.py` | Синхронизация макросов {$IF.UTIL.MAX} и {$IF.UTIL.WARN} (90%) в Zabbix из NetBox; триггеры 90%/100% для карты и линии порога на дашборде, удаление старых item'ов порога |
 | `zabbix_uplinks_cleanup.py` | Очистка артефактов в Zabbix: триггеры 90%/100%, item'ы порога, карта uplinks, дашборды uplinks |
+| `uplinks_config.py` | **Настраиваемые** названия и значения для Zabbix и NetBox: имя карты, дашбордов, тег триггеров Zabbix и тег NetBox для circuits (`scripts`/`automatization`), описания триггеров, макросы, иконки карты, цвета линков. Меняйте под своё окружение. |
 | `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` / дашборде в той же директории, что и файл `-f`, не коммитить |
 | `ROADMAP.md` | Планы доработок (например Tenancy для circuits) |
 | `requirements.txt` | Зависимости: pynetbox, paramiko, requests |
@@ -492,4 +502,4 @@ python zabbix_uplinks_cleanup.py
 
 **Генерация по dry-ssh:** скрипт `generate_commit_rates.py` по всем линкам из `dry-ssh.json` собирает записи в `commit_rates.json`. Провайдер из `description_to_name.json`; `circuit_id` в формате провайдер-локация-N; для новых пар `commit_rate_gbps` — null (заполнить вручную, в Гбит/с). При merge старый ключ `commit_rate_kbps` конвертируется в `commit_rate_gbps` (значения &lt; 1000 считаются уже Гбит/с). Пример: `cp commit_rates.json.example commit_rates.json` затем `python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json`.
 
-**Создание circuits в NetBox:** скрипт `netbox_create_circuits.py` по `commit_rates.json` создаёт в NetBox провайдеров (при отсутствии), тип контура «Internet», контуры (cid, commit rate в Kbps), **Termination A** на site устройства и кабель до интерфейса. **Termination Z** не создаётся (вторая сторона контура — провайдер или вторая площадка — в скрипте не задаётся). По умолчанию обрабатываются все площадки; ограничить одной: `--location ALA`. Если у интерфейса уже есть кабель или «mark connected» — скрипт удаляет кабель и сбрасывает mark_connected (через REST PATCH), затем подключает кабель по нашим данным. Для виртуальных интерфейсов (ae5.0 и т.п.) кабель вешается на **физический** интерфейс: при указании `-d dry-ssh.json` (или при наличии файла `dry-ssh.json`) из dry-ssh берётся `physicalInterface` для логического. В конце выводится отчёт: что создано (провайдеры, контуры, кабели), что удалено (кабели), где сброшен mark_connected, где использован физический вместо виртуального интерфейса. Переменные: `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`. Пример: `python netbox_create_circuits.py -d dry-ssh.json` (проверка: `--dry-run`).
+**Создание circuits в NetBox:** скрипт `netbox_create_circuits.py` по `commit_rates.json` создаёт в NetBox провайдеров (при отсутствии), тип контура «Internet», контуры (cid, commit rate в Kbps), **Termination A** на site устройства и кабель до интерфейса. Тег из `uplinks_config.NETBOX_AUTOMATION_TAG` (по умолчанию `automatization`) создаётся при отсутствии и проставляется новым и существующим объектам. **Termination Z** не создаётся. По умолчанию обрабатываются все площадки; ограничить одной: `--location ALA`. Если у интерфейса уже есть кабель или «mark connected» — скрипт удаляет кабель и сбрасывает mark_connected (через REST PATCH), затем подключает кабель по нашим данным. Для виртуальных интерфейсов (ae5.0 и т.п.) кабель вешается на **физический** интерфейс: при указании `-d dry-ssh.json` из dry-ssh берётся `physicalInterface` для логического. В конце выводится отчёт: что создано, что удалено, где использована физика вместо виртуального. Переменные: `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`. Пример: `python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json` (проверка: `--dry-run`).

@@ -16,6 +16,7 @@ import pynetbox
 import requests
 
 from netbox_checks import resolve_interface
+from uplinks_config import NETBOX_AUTOMATION_TAG as AUTOMATION_TAG
 
 DEFAULT_COMMIT_RATES = "commit_rates.json"
 DEFAULT_DRY_SSH = "dry-ssh.json"
@@ -43,6 +44,56 @@ def load_dry_ssh(path):
     except (FileNotFoundError, json.JSONDecodeError):
         return None
     return data.get("devices") or None
+
+
+def _get_or_create_automation_tag(nb):
+    """
+    Найти или создать в NetBox тег с именем/slug AUTOMATION_TAG.
+    Возврат: объект тега (pynetbox Record) или None.
+    """
+    if not AUTOMATION_TAG:
+        return None
+    try:
+        tag_obj = nb.extras.tags.get(name=AUTOMATION_TAG) or nb.extras.tags.get(
+            slug=AUTOMATION_TAG
+        )
+        if tag_obj is None:
+            slug = AUTOMATION_TAG.lower().replace(" ", "-")[:50]
+            try:
+                tag_obj = nb.extras.tags.create(name=AUTOMATION_TAG, slug=slug)
+            except Exception:
+                tag_obj = None
+    except Exception:
+        return None
+    return tag_obj
+
+
+def _ensure_record_tag(nb, record, tag_obj, endpoint):
+    """
+    Добавить тег tag_obj к объекту NetBox, если его ещё нет.
+    При PATCH NetBox ожидает список ID тегов. endpoint — например nb.circuits.providers.
+    """
+    if not record or not tag_obj:
+        return
+    tag_id = getattr(tag_obj, "id", None)
+    if not tag_id:
+        return
+    rid = getattr(record, "id", None)
+    if not rid:
+        return
+    try:
+        # Перезагрузка по id, чтобы в ответе были теги (filter часто их не возвращает)
+        full = endpoint.get(rid)
+        current = getattr(full, "tags", []) or []
+    except Exception:
+        return
+    current_ids = [getattr(t, "id", None) for t in current if getattr(t, "id", None) is not None]
+    if tag_id in current_ids:
+        return
+    try:
+        full.update({"tags": current_ids + [tag_id]})
+    except Exception:
+        pass
 
 
 def resolve_physical_interface(dev_name, iface_name, dry_ssh_devices):
@@ -75,11 +126,17 @@ def location_from_hostname(hostname):
 def get_or_create_provider(nb, name):
     """Вернуть провайдера по имени; при отсутствии создать."""
     existing = list(nb.circuits.providers.filter(name=name))
+    tag_obj = _get_or_create_automation_tag(nb)
     if existing:
+        if tag_obj:
+            _ensure_record_tag(nb, existing[0], tag_obj, nb.circuits.providers)
         return existing[0], None
     try:
         slug = name.lower().replace(" ", "-").replace("/", "-")[:50]
-        p = nb.circuits.providers.create(name=name, slug=slug)
+        kwargs = {"name": name, "slug": slug}
+        if tag_obj:
+            kwargs["tags"] = [tag_obj.id]
+        p = nb.circuits.providers.create(**kwargs)
         return p, "создан"
     except Exception as e:
         return None, str(e)
@@ -88,11 +145,17 @@ def get_or_create_provider(nb, name):
 def get_or_create_circuit_type(nb, name=CIRCUIT_TYPE_DEFAULT):
     """Вернуть circuit type по имени; при отсутствии создать."""
     existing = list(nb.circuits.circuit_types.filter(name=name))
+    tag_obj = _get_or_create_automation_tag(nb)
     if existing:
+        if tag_obj:
+            _ensure_record_tag(nb, existing[0], tag_obj, nb.circuits.circuit_types)
         return existing[0], None
     try:
         slug = name.lower().replace(" ", "-")[:50]
-        ct = nb.circuits.circuit_types.create(name=name, slug=slug)
+        kwargs = {"name": name, "slug": slug}
+        if tag_obj:
+            kwargs["tags"] = [tag_obj.id]
+        ct = nb.circuits.circuit_types.create(**kwargs)
         return ct, "создан"
     except Exception as e:
         return None, str(e)
@@ -101,8 +164,11 @@ def get_or_create_circuit_type(nb, name=CIRCUIT_TYPE_DEFAULT):
 def get_or_create_circuit(nb, cid, provider, circuit_type, commit_rate_kbps, status=CIRCUIT_STATUS_ACTIVE):
     """Вернуть circuit по cid и provider; при отсутствии создать; при наличии — обновить commit_rate по файлу."""
     existing = list(nb.circuits.circuits.filter(cid=cid, provider_id=provider.id))
+    tag_obj = _get_or_create_automation_tag(nb)
     if existing:
         c = existing[0]
+        if tag_obj:
+            _ensure_record_tag(nb, c, tag_obj, nb.circuits.circuits)
         # Обновить commit_rate в NetBox по файлу, если отличается
         if commit_rate_kbps is not None:
             want = int(commit_rate_kbps)
@@ -124,6 +190,8 @@ def get_or_create_circuit(nb, cid, provider, circuit_type, commit_rate_kbps, sta
         kwargs = {"cid": cid, "provider": provider.id, "type": circuit_type.id, "status": status}
         if commit_rate_kbps is not None:
             kwargs["commit_rate"] = int(commit_rate_kbps)
+        if tag_obj:
+            kwargs["tags"] = [tag_obj.id]
         c = nb.circuits.circuits.create(**kwargs)
         # После create явно выставить commit_rate через PATCH (pynetbox create иногда не передаёт)
         if commit_rate_kbps is not None and c and getattr(c, "id", None):
@@ -220,7 +288,16 @@ def create_termination_and_cable(nb, circuit, device, nb_iface, term_side="A", r
 
     # Кабель: circuit termination <-> interface. Сначала отключаем существующий кабель и mark_connected
     if getattr(ct, "cable", None) is not None:
-        return ct, None  # termination уже подключен нашим кабелем
+        tag_obj = _get_or_create_automation_tag(nb)
+        if tag_obj:
+            try:
+                cable_id = ct.cable.id if hasattr(ct.cable, "id") else ct.cable
+                if cable_id:
+                    cable_rec = nb.dcim.cables.get(cable_id)
+                    _ensure_record_tag(nb, cable_rec, tag_obj, nb.dcim.cables)
+            except Exception:
+                pass
+        return ct, None
     # У интерфейса уже есть кабель или mark_connected — отключаем, чтобы подключить как в файле
     try:
         existing_cable = getattr(nb_iface, "cable", None)
@@ -238,10 +315,18 @@ def create_termination_and_cable(nb, circuit, device, nb_iface, term_side="A", r
     except Exception as e:
         return ct, "отключение старого кабеля/mark_connected: {}".format(e)
     try:
-        nb.dcim.cables.create(
-            a_terminations=[{"object_type": "circuits.circuittermination", "object_id": ct.id}],
-            b_terminations=[{"object_type": "dcim.interface", "object_id": nb_iface.id}],
-        )
+        tag_obj = _get_or_create_automation_tag(nb)
+        cable_kwargs = {
+            "a_terminations": [
+                {"object_type": "circuits.circuittermination", "object_id": ct.id}
+            ],
+            "b_terminations": [
+                {"object_type": "dcim.interface", "object_id": nb_iface.id}
+            ],
+        }
+        if tag_obj:
+            cable_kwargs["tags"] = [tag_obj.id]
+        nb.dcim.cables.create(**cable_kwargs)
         if report is not None:
             report["created_cables"].append((dev_name, iface_name))
     except Exception as e:

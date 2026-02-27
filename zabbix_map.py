@@ -22,8 +22,18 @@ DESCRIPTION_MAP_FILE = "description_to_name.json"
 ZABBIX_CACHE_FILE = "zabbix_uplinks_cache.json"
 BITS_RECEIVED_NAME = "Bits received"
 BITS_SENT_NAME = "Bits sent"
-# Иконки элементов карты (imageid): хосты — роутер, провайдеры — облако. ID взять в Администрирование → Изображения
-MAP_ICON_HOST = 130          # Router_symbol_(64)
+
+from uplinks_config import (
+    LINK_COLOR_HIGH,
+    LINK_COLOR_WARN,
+    MAP_ICON_CLOUD,
+    MAP_ICON_HOST,
+    MAP_NAME,
+    TRIGGER_DESC_90_SUFFIX,
+    TRIGGER_DESC_100_SUFFIX,
+    TRIGGER_DESC_SEARCH,
+)
+
 
 def load_devices_json(path):
     """Загрузить JSON с ключом devices. Возврат (data, None) или (None, error_msg).
@@ -208,14 +218,6 @@ def _normalize_interface_name(name):
     return name.strip().lower()
 
 
-# Описания триггеров, создаваемых zabbix_sync_commit_rate (90% — жёлтый, 100% — красный на карте)
-TRIGGER_DESC_90 = "High bandwidth (90%)"
-TRIGGER_DESC_100 = "High bandwidth (threshold line)"
-# Цвета линков на карте (hex без #): жёлтый — предупреждение, красный — высокий
-LINK_COLOR_WARN = "DDBB00"
-LINK_COLOR_HIGH = "DD0000"
-
-
 def get_uplink_trigger_ids_by_host_iface(url, token, hostids, debug=False):
     """
     Получить triggerid триггеров «90%» и «100%» по хостам (создаются zabbix_sync_commit_rate).
@@ -229,16 +231,16 @@ def get_uplink_trigger_ids_by_host_iface(url, token, hostids, debug=False):
         {
             "hostids": list(hostids),
             "output": ["triggerid", "description", "priority"],
-            "search": {"description": "High bandwidth"},
+            "search": {"description": TRIGGER_DESC_SEARCH},
             "selectHosts": ["hostid"],
         },
         debug=debug,
     )
     if err or not result:
         return {}
-    # Разбираем описание: "Interface Ethernet51/1: High bandwidth (90%)" / "... (threshold line)"
-    re_90 = re.compile(r"^Interface\s+(.+?):\s*High bandwidth \(90%\)\s*$", re.IGNORECASE)
-    re_100 = re.compile(r"^Interface\s+(.+?):\s*High bandwidth \(threshold line\)\s*$", re.IGNORECASE)
+    # Разбираем описание: "Interface Ethernet51/1: " + TRIGGER_DESC_90_SUFFIX / TRIGGER_DESC_100_SUFFIX
+    re_90 = re.compile(r"^Interface\s+(.+?):\s*" + re.escape(TRIGGER_DESC_90_SUFFIX) + r"\s*$", re.IGNORECASE)
+    re_100 = re.compile(r"^Interface\s+(.+?):\s*" + re.escape(TRIGGER_DESC_100_SUFFIX) + r"\s*$", re.IGNORECASE)
     by_key = {}  # (hostid, iface_norm) -> {"warn": id, "high": id}
     for t in result:
         desc = (t.get("description") or "").strip()
@@ -383,14 +385,11 @@ def fetch_zabbix_hosts_and_items(url, token, hostnames, debug=False):
     return host_id_by_name, items_by_host_iface, None
 
 
-MAP_NAME = "[test] uplinks"
 MAP_WIDTH = 1200
 MAP_HEIGHT = 800
 ELEMENT_TYPE_HOST = 0
-# В API: 0=host, 4=image (картинка с подписью, иконка cloud_(64))
+# В API: 0=host, 4=image (картинка с подписью)
 ELEMENT_TYPE_IMAGE = 4
-# Иконка облака для провайдеров (imageid в Администрирование → Изображения)
-MAP_ICON_CLOUD = 4
 
 # Расстановка: блоки по провайдерам слева направо; граница карты 30, хосты не ближе 160 от провайдера по горизонтали, по вертикали шаг 100, между хостами по горизонтали 180
 LAYOUT_MARGIN = 30
@@ -897,7 +896,12 @@ def main():
     parser.add_argument(
         "--zabbix",
         action="store_true",
-        help="Запросить Zabbix API: найти хосты и items Bits received/sent, вывести ключи в таблицу",
+        help="Запросить Zabbix API: найти хосты и items Bits received/sent (для карты или таблицы)",
+    )
+    parser.add_argument(
+        "--print-table",
+        action="store_true",
+        help="Вывести в консоль таблицу (hostname, interface, description, ISP; с --zabbix — hostid и ключи items)",
     )
     parser.add_argument(
         "--debug",
@@ -977,7 +981,7 @@ def main():
         sys.exit(0)
 
     # Только создать карту — не грузим данные, не выводим таблицу
-    if args.create_map and not args.update_map and not args.zabbix:
+    if args.create_map and not args.update_map and not args.zabbix and not args.print_table:
         url, token = _get_zabbix_url_token()
         if not url:
             print("Задайте ZABBIX_URL и ZABBIX_TOKEN", file=sys.stderr)
@@ -1003,7 +1007,10 @@ def main():
             sys.exit(1)
         devices = {args.host: devices[args.host]}
 
-    use_zabbix = args.zabbix or args.create_map or args.update_map
+    # По умолчанию (без --update-map и --print-table) создаём карту, если её ещё нет.
+    default_create_map = not args.update_map and not args.print_table
+
+    use_zabbix = args.zabbix or args.create_map or args.update_map or default_create_map
     items_by_host_iface = {}
     if use_zabbix:
         url, token = _get_zabbix_url_token()
@@ -1035,29 +1042,34 @@ def main():
     else:
         host_id_by_name = {}
 
-    rows = [("hostname", "interface", "description", "ISP")]
-    if use_zabbix:
-        rows[0] = ("hostname", "hostid", "interface", "description", "ISP", "key Bits received", "key Bits sent")
-    lookup_debug_count = 0
-    for hostname in sorted(devices.keys()):
-        interfaces = devices[hostname]
-        for iface in interfaces:
-            iface_name = iface.get("name", "")
-            description = iface.get("description", "")
-            isp = desc_to_name.get(description, description)
-            row = (hostname, iface_name, description, isp)
-            if use_zabbix:
-                hostid = str(host_id_by_name.get(hostname, ""))
-                key_norm = _normalize_interface_name(iface_name)
-                rec = items_by_host_iface.get((hostname, key_norm), {})
-                if args.debug and lookup_debug_count < 8:
-                    found = bool(rec.get("bits_in") or rec.get("bits_out"))
-                    print("DEBUG lookup: hostname={!r} iface_name={!r} key_norm={!r} found={}".format(
-                        hostname, iface_name, key_norm, found), file=sys.stderr)
-                    lookup_debug_count += 1
-                row = (hostname, hostid, iface_name, description, isp, rec.get("bits_in", ""), rec.get("bits_out", ""))
-            rows.append(row)
+    # Таблица для вывода в консоль (только при --print-table)
+    rows = []
+    if args.print_table:
+        header = ("hostname", "interface", "description", "ISP")
+        if use_zabbix:
+            header = ("hostname", "hostid", "interface", "description", "ISP", "key Bits received", "key Bits sent")
+        rows.append(header)
+        lookup_debug_count = 0
+        for hostname in sorted(devices.keys()):
+            interfaces = devices[hostname]
+            for iface in interfaces:
+                iface_name = iface.get("name", "")
+                description = iface.get("description", "")
+                isp = desc_to_name.get(description, description)
+                row = (hostname, iface_name, description, isp)
+                if use_zabbix:
+                    hostid = str(host_id_by_name.get(hostname, ""))
+                    key_norm = _normalize_interface_name(iface_name)
+                    rec = items_by_host_iface.get((hostname, key_norm), {})
+                    if args.debug and lookup_debug_count < 8:
+                        found = bool(rec.get("bits_in") or rec.get("bits_out"))
+                        print("DEBUG lookup: hostname={!r} iface_name={!r} key_norm={!r} found={}".format(
+                            hostname, iface_name, key_norm, found), file=sys.stderr)
+                        lookup_debug_count += 1
+                    row = (hostname, hostid, iface_name, description, isp, rec.get("bits_in", ""), rec.get("bits_out", ""))
+                rows.append(row)
 
+    # Обновление карты по требованию
     if args.update_map:
         err_msg, sysmapid = update_uplinks_map(
             url, token, devices, host_id_by_name, items_by_host_iface, desc_to_name, debug=args.debug,
@@ -1066,12 +1078,37 @@ def main():
             print(err_msg, file=sys.stderr)
             sys.exit(1)
         print("Карта обновлена: sysmapid={}".format(sysmapid), file=sys.stderr)
+    # Поведение по умолчанию: создать карту с элементами, если её ещё нет
+    elif default_create_map and use_zabbix:
+        # Проверяем, есть ли уже карта с таким именем
+        existing, err = zabbix_request(
+            url, token, "map.get",
+            {"filter": {"name": MAP_NAME}, "output": ["sysmapid"]},
+            debug=args.debug,
+        )
+        if err:
+            print("map.get: {}".format(err), file=sys.stderr)
+            sys.exit(1)
+        if existing:
+            sysmapid = existing[0].get("sysmapid")
+            print("Карта уже существует: name={!r}, sysmapid={}. Используйте --update-map для обновления.".format(
+                MAP_NAME, sysmapid), file=sys.stderr)
+        else:
+            err_msg, sysmapid = update_uplinks_map(
+                url, token, devices, host_id_by_name, items_by_host_iface, desc_to_name, debug=args.debug,
+            )
+            if err_msg:
+                print(err_msg, file=sys.stderr)
+                sys.exit(1)
+            print("Карта создана: name={!r}, sysmapid={}".format(MAP_NAME, sysmapid), file=sys.stderr)
 
-    num_cols = len(rows[0])
-    widths = [max(len(str(rows[i][c])) for i in range(len(rows))) for c in range(num_cols)]
-    pad = "  "
-    for row in rows:
-        print(pad.join(str(row[c]).ljust(widths[c]) for c in range(num_cols)))
+    # Печать таблицы только по запросу
+    if args.print_table and rows:
+        num_cols = len(rows[0])
+        widths = [max(len(str(rows[i][c])) for i in range(len(rows))) for c in range(num_cols)]
+        pad = "  "
+        for row in rows:
+            print(pad.join(str(row[c]).ljust(widths[c]) for c in range(num_cols)))
 
 
 if __name__ == "__main__":

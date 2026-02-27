@@ -17,20 +17,21 @@ import os
 import sys
 
 from zabbix_map import (
-    MAP_NAME,
     _get_zabbix_url_token,
     validate_zabbix_token,
     zabbix_request,
 )
-
-# Ключ старых item'ов порога (то же значение, что в zabbix_sync_commit_rate)
-THRESHOLD_ITEM_KEY = "net.if.threshold"
-
-
-TRIGGER_DESC_90_SUFFIX = "High bandwidth (90%)"
-TRIGGER_DESC_100_SUFFIX = "High bandwidth (threshold line)"
-TRIGGER_TAG_NAME = "scripts"
-TRIGGER_TAG_VALUE = "automatization"
+from uplinks_config import (
+    DASHBOARD_NAME,
+    DASHBOARD_NAME_BY_LOCATION,
+    MAP_NAME,
+    THRESHOLD_ITEM_KEY,
+    TRIGGER_DESC_90_SUFFIX,
+    TRIGGER_DESC_100_SUFFIX,
+    TRIGGER_DESC_SEARCH,
+    TRIGGER_TAG_NAME,
+    TRIGGER_TAG_VALUE,
+)
 
 
 def _validate_zabbix(debug=False):
@@ -95,7 +96,7 @@ def cleanup_triggers(url, token, dry_run=False, debug=False):
         "trigger.get",
         {
             "output": ["triggerid", "description"],
-            "search": {"description": "High bandwidth ("},
+            "search": {"description": TRIGGER_DESC_SEARCH},
             "selectTags": "extend",
         },
         debug=debug,
@@ -196,12 +197,12 @@ def main():
     )
     parser.add_argument(
         "--dashboard-name",
-        default="Uplinks",
+        default=DASHBOARD_NAME,
         help="Имя основного дашборда uplinks (как в zabbix_uplinks_dashboard.py)",
     )
     parser.add_argument(
         "--dashboard-by-location",
-        default="Uplinks (по локациям)",
+        default=DASHBOARD_NAME_BY_LOCATION,
         help="Имя дашборда по локациям (пустая строка — не трогать)",
     )
     parser.add_argument(
