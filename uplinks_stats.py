@@ -9,8 +9,8 @@
    Arista и Juniper (по тегу из NetBox). Для каждого uplink'а собираются поля в едином
    формате (name, description, bandwidth, mtu и т.д.). Вывод — таблица или JSON.
 
-Переменные: NETBOX_URL, NETBOX_TOKEN, SSH_USERNAME, SSH_PASSWORD, SSH_HOST_SUFFIX,
-PARALLEL_DEVICES, NETBOX_TAG. Опционально: DEBUG_SSH_JSON=1 (режим отчёта).
+Переменные: NETBOX_URL, NETBOX_TOKEN, SSH_USERNAME (обязательно при --report и --fetch), SSH_PASSWORD,
+SSH_HOST_SUFFIX, PARALLEL_DEVICES, NETBOX_TAG. Опционально: DEBUG_SSH_JSON=1 (режим отчёта).
 """
 
 import argparse
@@ -27,8 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import paramiko
 import pynetbox
 
-# VRF/routing-instance для uplink'ов (только internet учитываем при сборе ip_vrf)
-UPLINK_VRF_NAME = "internet"
+from uplinks_config import UPLINK_VRF_NAME
 
 
 def _format_ssh_connect_error(host, e):
@@ -1489,7 +1488,7 @@ def _run_report(netbox_tag, ssh_suffix):
                 process_one_device,
                 device,
                 nb,
-                os.environ.get("SSH_USERNAME", "admin"),
+                (os.environ.get("SSH_USERNAME") or "").strip(),
                 os.environ.get("SSH_PASSWORD"),
                 ssh_suffix,
                 netbox_not_found,
@@ -1627,7 +1626,11 @@ def main():
         if not url or not token:
             print("Задайте переменные NETBOX_URL и NETBOX_TOKEN")
             return 1
+        ssh_user = (os.environ.get("SSH_USERNAME") or "").strip()
         ssh_pass = os.environ.get("SSH_PASSWORD")
+        if not ssh_user:
+            print("Задайте переменную SSH_USERNAME для доступа по SSH")
+            return 1
         if not ssh_pass:
             print("Задайте переменную SSH_PASSWORD для доступа по SSH")
             return 1
@@ -1642,7 +1645,7 @@ def main():
         print("Задайте переменные NETBOX_URL и NETBOX_TOKEN")
         return 1
 
-    ssh_user = os.environ.get("SSH_USERNAME", "admin")
+    ssh_user = (os.environ.get("SSH_USERNAME") or "").strip()
     ssh_pass = os.environ.get("SSH_PASSWORD")
     ssh_suffix = os.environ.get("SSH_HOST_SUFFIX") or ".3hc.io"
     try:
@@ -1654,6 +1657,9 @@ def main():
     except ValueError:
         ssh_command_timeout = 90
     netbox_tag = os.environ.get("NETBOX_TAG") or "border"
+    if not ssh_user:
+        print("Задайте переменную SSH_USERNAME для доступа по SSH")
+        return 1
     if not ssh_pass:
         print("Задайте переменную SSH_PASSWORD для доступа по SSH")
         return 1
@@ -1695,7 +1701,8 @@ def main():
     host_note = " хост {}".format(args.host) if args.host else ""
     print("Устройств{}: {} (Arista: {}, Juniper: {}). Потоков: {}.".format(host_note, len(devices_to_fetch), n_arista, n_juniper, max_workers), flush=True, file=progress_file)
 
-    use_ssh_config = os.environ.get("USE_SSH_CONFIG", "").strip().lower() in ("1", "true", "yes")
+    # По умолчанию используем ~/.ssh/config (HostName, User); отключить: USE_SSH_CONFIG=0
+    use_ssh_config = os.environ.get("USE_SSH_CONFIG", "1").strip().lower() not in ("0", "false", "no")
     ssh_config = _load_ssh_config() if use_ssh_config else None
 
     print_lock = threading.Lock()

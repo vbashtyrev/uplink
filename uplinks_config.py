@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Настраиваемые названия и значения для создания элементов Zabbix (карта, дашборды, триггеры, теги).
-Меняйте под своё окружение — все скрипты uplinks (zabbix_map, zabbix_sync_commit_rate,
-zabbix_uplinks_dashboard, zabbix_uplinks_cleanup) используют эти константы.
+Настраиваемые названия и значения для создания элементов Zabbix (карта, дашборды, триггеры, теги)
+и для сбора данных с устройств (VRF uplink'ов). Меняйте под своё окружение — скрипты uplinks
+(uplinks_stats, zabbix_map, zabbix_sync_commit_rate, zabbix_uplinks_dashboard, zabbix_uplinks_cleanup и др.)
+используют эти константы.
 """
 
 # --- Карта ---
@@ -53,6 +54,10 @@ MACRO_PREFIX_WARN = "{$IF.UTIL.WARN"  # 90% порог
 # Ключ старых item'ов порога — удаляются при синке и в cleanup
 THRESHOLD_ITEM_KEY = "net.if.threshold"
 
+
+# --- Сбор данных с устройств (uplinks_stats) ---
+# VRF / routing-instance для uplink'ов: при сборе с устройств в поле ip_vrf учитывается только этот VRF (Juniper: routing-instance, Arista: show vrf)
+UPLINK_VRF_NAME = "internet"
 
 # --- NetBox / circuits ---
 # Имя/slug тега NetBox для объектов, созданных автоматизацией uplinks

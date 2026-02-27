@@ -4,6 +4,7 @@ __pycache__/
 
 # Данные (вывод/экспорт, кэш, не коммитить)
 dry-ssh.json
+run_logs/
 zabbix_uplinks_cache.json
 description_to_name.json
 commit_rates.json

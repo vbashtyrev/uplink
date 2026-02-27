@@ -12,6 +12,7 @@
 
 | Скрипт | Описание |
 |--------|----------|
+| `run_uplinks_full.py` | **Один запуск** — полная цепочка: сбор → commit_rates → NetBox circuits → Zabbix (sync, карта, дашборды); отчёт о работе и об ошибках. См. COMMANDS.md. |
 | `uplinks_stats.py` | Сбор данных с устройств по SSH (Arista/Juniper) или отчёт NetBox vs устройство; выход — таблица или JSON (`dry-ssh.json`). |
 | `netbox_checks.py` | Сверка данных из JSON с NetBox (интерфейсы: имя, description, тип, speed, duplex, MAC, MTU, IP, LAG и др.) и при необходимости обновление полей в NetBox. |
 | `netbox_interface_types.py` | Скачивание справочника типов интерфейсов NetBox (value/label) из репозитория в JSON для `--mt-ref`. |
@@ -74,8 +75,8 @@ export SSH_PASSWORD="password-for-devices"
 
 **Опциональные переменные**
 
-- `SSH_USERNAME` (по умолчанию `admin`), `PARALLEL_DEVICES` (по умолчанию `6`), `SSH_HOST_SUFFIX`, `NETBOX_TAG`, `SSH_TIMEOUT`, `SSH_COMMAND_TIMEOUT` (сек).
-- Если в терминале `ssh DEVICE` работает, а скрипт даёт «Network is unreachable» — задайте `USE_SSH_CONFIG=1`: скрипт возьмёт HostName и User из `~/.ssh/config` (как при ручном `ssh DEVICE`).
+- `SSH_USERNAME` (обязательно при --report и --fetch; по умолчанию не задан — нужно указать явно), `PARALLEL_DEVICES` (по умолчанию `6`), `SSH_HOST_SUFFIX`, `NETBOX_TAG`, `SSH_TIMEOUT`, `SSH_COMMAND_TIMEOUT` (сек).
+- По умолчанию используется `~/.ssh/config`: HostName и User берутся из конфига (как при ручном `ssh DEVICE`). Чтобы отключить — задайте `USE_SSH_CONFIG=0`.
 - При ошибке SSH в лог выводится тип исключения и errno (например `TimeoutError`, `OSError [Errno 51]`), чтобы различать таймаут подключения и отсутствие маршрута.
 
 Без активации venv можно вызывать интерпретатор напрямую:
@@ -143,7 +144,7 @@ export SSH_PASSWORD="password-for-devices"
 - **Обязательные:** `NETBOX_URL`, `NETBOX_TOKEN`, `SSH_USERNAME`, `SSH_PASSWORD`, `SSH_HOST_SUFFIX`, `PARALLEL_DEVICES`, `NETBOX_TAG`.
 - **Опционально:**
   - `SSH_TIMEOUT`, `SSH_COMMAND_TIMEOUT` — таймауты в секундах;
-  - `USE_SSH_CONFIG=1` — брать HostName и User из `~/.ssh/config` (если в терминале `ssh DEVICE` работает, а скрипт даёт «Network is unreachable»);
+  - по умолчанию HostName и User берутся из `~/.ssh/config`; отключить: `USE_SSH_CONFIG=0`;
   - `DEBUG_SSH_JSON=1` — режим отчёта (`--report`): отладочный вывод JSON;
   - `DEBUG_JUNIPER_UPLINKS=1` — при `--fetch` для Juniper: пошаговый лог (JSON/XML, блоки, парсинг, причины пропуска интерфейсов).
 
