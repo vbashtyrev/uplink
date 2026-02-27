@@ -20,7 +20,7 @@
 | `grafana_uplinks_graph.py` | Генерация JSON для панели Node graph в Grafana (узлы — хосты и провайдеры, рёбра — линки); опционально создание дашборда через Grafana API. |
 | `generate_commit_rates.py` | Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по `commit_rates.json`: провайдер, тип «Internet», контур, Termination A на site, кабель до интерфейса. |
-| `zabbix_sync_commit_rate.py` | Синхронизация макроса **{$IF.UTIL.MAX}** в Zabbix из NetBox: для интерфейсов с circuit (кабель от termination A) записывает commit rate контура в bps как макрос с контекстом по имени интерфейса; триггеры используют реальную полосу. |
+| `zabbix_sync_commit_rate.py` | Синхронизация макросов **{$IF.UTIL.MAX:"Ethernet51/1"}** в Zabbix из NetBox: для каждого интерфейса с circuit (кабель от termination A) создаётся макрос с commit rate в bps (имя с контекстом: {$IF.UTIL.MAX:"<интерфейс>"}). |
 
 ---
 
@@ -44,8 +44,8 @@
    **`netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json`** → в NetBox: провайдеры, контуры (cid, commit rate), Termination A на site, кабель до интерфейса.  
    Circuits нужны до настройки Zabbix: в Zabbix commit rate будет браться из NetBox circuits.
 
-5. **Синхронизация {$IF.UTIL.MAX} в Zabbix**  
-   **`zabbix_sync_commit_rate.py`** → по NetBox (интерфейсы с circuit по кабелю) получает commit rate контура в Kbps, переводит в bps и выставляет на хостах Zabbix макрос **{$IF.UTIL.MAX}** с контекстом по имени интерфейса. Триггеры в шаблоне/хосте могут использовать **{$IF.UTIL.MAX:"{#IFNAME}"}** для порога по реальной полосе (commit rate).
+5. **Синхронизация макросов commit rate в Zabbix**  
+   **`zabbix_sync_commit_rate.py`** → по NetBox (интерфейсы с circuit по кабелю) получает commit rate в Kbps, переводит в bps и создаёт на хосте макросы **{$IF.UTIL.MAX:"Ethernet51/1"}** (имя с контекстом по интерфейсу). В триггере используйте тот же формат: **{$IF.UTIL.MAX:"Ethernet51/1"}**.
 
 **Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы {$IF.UTIL.MAX} из NetBox) → Zabbix-карта/дашборд, триггеры по полосе из circuits.
 
@@ -420,21 +420,21 @@ python netbox_create_circuits.py --location ALA
 
 ---
 
-### 7. `zabbix_sync_commit_rate.py` — макрос {$IF.UTIL.MAX} в Zabbix из NetBox
+### 7. `zabbix_sync_commit_rate.py` — макросы {$IF.UTIL.MAX:"<интерфейс>"} в Zabbix из NetBox
 
-Для каждого интерфейса в NetBox, подключённого кабелем к circuit termination (сторона A), скрипт берёт **commit rate** контура (Kbps), переводит в bps и выставляет на соответствующем хосте в Zabbix макрос **{$IF.UTIL.MAX}** с **контекстом по имени интерфейса**. Остальные макросы хоста не трогаются (только значения {$IF.UTIL.MAX} заменяются на актуальные из NetBox).
+Для каждого интерфейса в NetBox, подключённого кабелем к circuit termination (сторона A), скрипт берёт **commit rate** контура (Kbps), переводит в bps и создаёт на хосте макрос с именем **{$IF.UTIL.MAX:"Ethernet51/1"}** (контекст — имя интерфейса как есть). Остальные макросы хоста не трогаются.
 
-Триггеры в Zabbix (в шаблоне или на хосте) могут использовать **{$IF.UTIL.MAX:"{#IFNAME}"}** в выражении — тогда порог срабатывания будет по реальной полосе (commit rate), а не по фиксированному числу. Контекст в макросе должен совпадать с именем интерфейса в Zabbix (например из LLD {#IFNAME} или из key item).
+В триггере используйте тот же формат: **{$IF.UTIL.MAX:"Ethernet51/1"}**, напр. **({$IF.UTIL.MAX:"Ethernet51/1"}/100)*last(/host/net.if.speed[...])** — порог по реальной полосе (commit rate).
 
 **Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`, `ZABBIX_URL`, `ZABBIX_TOKEN`.
 
 | Ключ | Описание |
 |------|----------|
-| `-d`, `--dry-ssh` | Путь к dry-ssh.json: для кабеля на физическом интерфейсе (напр. et-0/0/3) задаётся контекст макроса по логическому имени (ae5.0, ae3.0), как в Zabbix |
+| `-d`, `--dry-ssh` | Путь к dry-ssh.json: для кабеля на физическом интерфейсе (напр. et-0/0/3) макрос будет по логическому имени (ae5.0, ae3.0), как в Zabbix |
 | `--dry-run` | Не менять макросы в Zabbix, только вывести что бы установили |
 | `--debug` | Отладочный вывод (статистика по NetBox, подстановка логических имён) |
 
-Учитываются только пары, где в NetBox есть **кабель** от circuit termination (A) к интерфейсу; **обязателен фильтр по тегу** `NETBOX_TAG`. Для устройств, где в NetBox кабель на физике (MX204: et-0/0/3), а в Zabbix — логические ae5.0/ae3.0, укажите `-d dry-ssh.json`, тогда контекст макроса будет по логическому имени.
+Учитываются только пары, где в NetBox есть **кабель** от circuit termination (A) к интерфейсу; **обязателен фильтр по тегу** `NETBOX_TAG`. Для устройств, где в NetBox кабель на физике (MX204: et-0/0/3), а в Zabbix — логические ae5.0/ae3.0, укажите `-d dry-ssh.json`, тогда макрос будет {$IF.UTIL.MAX:"ae5.0"} и т.д.
 
 ```bash
 python zabbix_sync_commit_rate.py
@@ -456,7 +456,7 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json --debug
 | `commit_rates.json` | Локальный файл (не в git): оплаченная скорость (commit_rate_gbps, Гбит/с), провайдер и circuit ID по паре устройство — интерфейс; для NetBox Circuit (Commit rate в Kbps = × 1 000 000) |
 | `generate_commit_rates.py` | Генерация commit_rates.json по всем линкам из dry-ssh.json (провайдер, circuit_id по локации, commit_rate_gbps) |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по commit_rates.json (провайдер, тип, circuit, Termination A + cable к интерфейсу; отчёт в конце) |
-| `zabbix_sync_commit_rate.py` | Синхронизация макроса {$IF.UTIL.MAX} в Zabbix из NetBox (commit rate контура по кабелю к интерфейсу; контекст — имя интерфейса) |
+| `zabbix_sync_commit_rate.py` | Синхронизация макросов {$IF.UTIL.MAX:"<интерфейс>"} в Zabbix из NetBox (commit rate по кабелю к интерфейсу) |
 | `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` / дашборде в той же директории, что и файл `-f`, не коммитить |
 | `ROADMAP.md` | Планы доработок (например Tenancy для circuits) |
 | `requirements.txt` | Зависимости: pynetbox, paramiko, requests |

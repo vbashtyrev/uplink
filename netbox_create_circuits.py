@@ -99,18 +99,60 @@ def get_or_create_circuit_type(nb, name=CIRCUIT_TYPE_DEFAULT):
 
 
 def get_or_create_circuit(nb, cid, provider, circuit_type, commit_rate_kbps, status=CIRCUIT_STATUS_ACTIVE):
-    """Вернуть circuit по cid и provider; при отсутствии создать."""
+    """Вернуть circuit по cid и provider; при отсутствии создать; при наличии — обновить commit_rate по файлу."""
     existing = list(nb.circuits.circuits.filter(cid=cid, provider_id=provider.id))
     if existing:
-        return existing[0], None
+        c = existing[0]
+        # Обновить commit_rate в NetBox по файлу, если отличается
+        if commit_rate_kbps is not None:
+            want = int(commit_rate_kbps)
+            current = getattr(c, "commit_rate", None)
+            if current is not None:
+                try:
+                    current = int(current)
+                except (TypeError, ValueError):
+                    current = None
+            if current != want:
+                try:
+                    _patch_circuit_commit_rate(nb, c.id, want)
+                    return c, "commit_rate обновлён"
+                except Exception as e:
+                    print("Ошибка обновления commit_rate для {}: {}".format(cid, e), file=sys.stderr)
+                    return c, None
+        return c, None
     try:
         kwargs = {"cid": cid, "provider": provider.id, "type": circuit_type.id, "status": status}
         if commit_rate_kbps is not None:
             kwargs["commit_rate"] = int(commit_rate_kbps)
         c = nb.circuits.circuits.create(**kwargs)
+        # После create явно выставить commit_rate через PATCH (pynetbox create иногда не передаёт)
+        if commit_rate_kbps is not None and c and getattr(c, "id", None):
+            try:
+                _patch_circuit_commit_rate(nb, c.id, commit_rate_kbps)
+            except Exception as e:
+                print("Предупреждение: commit_rate не установлен для {}: {}".format(cid, e), file=sys.stderr)
         return c, "создан"
     except Exception as e:
         return None, str(e)
+
+
+def _patch_circuit_commit_rate(nb, circuit_id, commit_rate_kbps):
+    """Установить commit_rate у контура через REST PATCH (надёжнее, чем pynetbox update)."""
+    base_url = (getattr(nb, "base_url", None) or getattr(nb, "url", None) or os.environ.get("NETBOX_URL", "")).rstrip("/")
+    token = getattr(nb, "token", None) or os.environ.get("NETBOX_TOKEN")
+    if not base_url or not token:
+        raise RuntimeError("нет base_url или token у pynetbox api")
+    if base_url.endswith("/api"):
+        url = "{}/circuits/circuits/{}/".format(base_url, circuit_id)
+    else:
+        url = "{}/api/circuits/circuits/{}/".format(base_url, circuit_id)
+    r = requests.patch(
+        url,
+        headers={"Authorization": "Token {}".format(token), "Content-Type": "application/json"},
+        json={"commit_rate": int(commit_rate_kbps)},
+        timeout=30,
+    )
+    r.raise_for_status()
 
 
 def _patch_interface_mark_connected(nb, interface_id, value):
@@ -250,6 +292,7 @@ def main():
     report = {
         "created_providers": [],
         "created_circuits": [],
+        "updated_commit_rate": [],
         "created_cables": [],
         "deleted_cables": [],
         "disabled_mark_connected": [],
@@ -308,7 +351,10 @@ def main():
                 errors.append("{} {}: circuit {}: {}".format(dev_name, iface_name, circuit_id, circ_msg))
                 continue
             if circ_msg:
-                report["created_circuits"].append(circuit_id)
+                if circ_msg == "commit_rate обновлён":
+                    report["updated_commit_rate"].append(circuit_id)
+                else:
+                    report["created_circuits"].append(circuit_id)
                 print("Circuit {}: {}".format(circuit_id, circ_msg))
 
             ct, cable_err = create_termination_and_cable(nb, circuit_obj, device, nb_iface, report=report)
@@ -333,6 +379,7 @@ def main():
 
     _report_section("Создано провайдеров", report["created_providers"], lambda x: "  {}".format(x))
     _report_section("Создано контуров (circuits)", report["created_circuits"], lambda x: "  {}".format(x))
+    _report_section("Обновлён commit_rate в NetBox (по файлу)", report["updated_commit_rate"], lambda x: "  {}".format(x))
     _report_section("Создано кабелей", report["created_cables"], lambda x: "  {} {}".format(x[0], x[1]))
     _report_section("Удалено кабелей", report["deleted_cables"], lambda x: "  {} {} (cable id {})".format(x[0], x[1], x[2]))
     _report_section("Отключено mark_connected", report["disabled_mark_connected"], lambda x: "  {} {}".format(x[0], x[1]))
