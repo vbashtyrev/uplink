@@ -1,0 +1,31 @@
+{
+  "_comment": "Оплаченная скорость (commit_rate_gbps, Гбит/с), провайдер и Unique circuit ID. В NetBox Circuit Commit rate в Kbps (× 1000000). Скопировать в commit_rates.json и заполнить своими данными.",
+  "host-router-1": {
+    "Ethernet51/1": {
+      "provider": "ProviderA",
+      "circuit_id": "ProviderA-LOC-1",
+      "commit_rate_gbps": 8
+    }
+  },
+  "host-router-2": {
+    "Ethernet51/1": {
+      "provider": "ProviderA",
+      "circuit_id": "ProviderA-LOC-2",
+      "commit_rate_gbps": 8
+    }
+  },
+  "host-router-3": {
+    "Ethernet72/1": {
+      "provider": "ProviderB",
+      "circuit_id": "ProviderB-LOC-1",
+      "commit_rate_gbps": null
+    }
+  },
+  "host-mx-1": {
+    "ae5.0": {
+      "provider": "ProviderC",
+      "circuit_id": "ProviderC-LOC-1",
+      "commit_rate_gbps": null
+    }
+  }
+}

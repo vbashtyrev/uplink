@@ -20,6 +20,7 @@
 | `grafana_uplinks_graph.py` | Генерация JSON для панели Node graph в Grafana (узлы — хосты и провайдеры, рёбра — линки); опционально создание дашборда через Grafana API. |
 | `generate_commit_rates.py` | Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по `commit_rates.json`: провайдер, тип «Internet», контур, Termination A на site, кабель до интерфейса. |
+| `zabbix_sync_commit_rate.py` | Синхронизация макроса **{$IF.UTIL.MAX}** в Zabbix из NetBox: для интерфейсов с circuit (кабель от termination A) записывает commit rate контура в bps как макрос с контекстом по имени интерфейса; триггеры используют реальную полосу. |
 
 ---
 
@@ -43,7 +44,10 @@
    **`netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json`** → в NetBox: провайдеры, контуры (cid, commit rate), Termination A на site, кабель до интерфейса.  
    Circuits нужны до настройки Zabbix: в Zabbix commit rate будет браться из NetBox circuits.
 
-**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; затем commit_rates → circuits в NetBox) → Zabbix-карта/дашборд и Grafana Node graph (commit rate в Zabbix — из circuits).
+5. **Синхронизация {$IF.UTIL.MAX} в Zabbix**  
+   **`zabbix_sync_commit_rate.py`** → по NetBox (интерфейсы с circuit по кабелю) получает commit rate контура в Kbps, переводит в bps и выставляет на хостах Zabbix макрос **{$IF.UTIL.MAX}** с контекстом по имени интерфейса. Триггеры в шаблоне/хосте могут использовать **{$IF.UTIL.MAX:"{#IFNAME}"}** для порога по реальной полосе (commit rate).
+
+**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы {$IF.UTIL.MAX} из NetBox) → Zabbix-карта/дашборд, триггеры по полосе из circuits.
 
 ---
 
@@ -416,6 +420,30 @@ python netbox_create_circuits.py --location ALA
 
 ---
 
+### 7. `zabbix_sync_commit_rate.py` — макрос {$IF.UTIL.MAX} в Zabbix из NetBox
+
+Для каждого интерфейса в NetBox, подключённого кабелем к circuit termination (сторона A), скрипт берёт **commit rate** контура (Kbps), переводит в bps и выставляет на соответствующем хосте в Zabbix макрос **{$IF.UTIL.MAX}** с **контекстом по имени интерфейса**. Остальные макросы хоста не трогаются (только значения {$IF.UTIL.MAX} заменяются на актуальные из NetBox).
+
+Триггеры в Zabbix (в шаблоне или на хосте) могут использовать **{$IF.UTIL.MAX:"{#IFNAME}"}** в выражении — тогда порог срабатывания будет по реальной полосе (commit rate), а не по фиксированному числу. Контекст в макросе должен совпадать с именем интерфейса в Zabbix (например из LLD {#IFNAME} или из key item).
+
+**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`, `ZABBIX_URL`, `ZABBIX_TOKEN`.
+
+| Ключ | Описание |
+|------|----------|
+| `-d`, `--dry-ssh` | Путь к dry-ssh.json: для кабеля на физическом интерфейсе (напр. et-0/0/3) задаётся контекст макроса по логическому имени (ae5.0, ae3.0), как в Zabbix |
+| `--dry-run` | Не менять макросы в Zabbix, только вывести что бы установили |
+| `--debug` | Отладочный вывод (статистика по NetBox, подстановка логических имён) |
+
+Учитываются только пары, где в NetBox есть **кабель** от circuit termination (A) к интерфейсу; **обязателен фильтр по тегу** `NETBOX_TAG`. Для устройств, где в NetBox кабель на физике (MX204: et-0/0/3), а в Zabbix — логические ae5.0/ae3.0, укажите `-d dry-ssh.json`, тогда контекст макроса будет по логическому имени.
+
+```bash
+python zabbix_sync_commit_rate.py
+python zabbix_sync_commit_rate.py -d dry-ssh.json --dry-run
+python zabbix_sync_commit_rate.py -d dry-ssh.json --debug
+```
+
+---
+
 ## Файлы
 
 | Файл | Описание |
@@ -424,15 +452,17 @@ python netbox_create_circuits.py --location ALA
 | `netbox_interface_types.json` | Справочник типов интерфейсов NetBox (value, label); используется `--mt-ref` в `netbox_checks.py` |
 | `description_to_name.example.json` | Пример сопоставления description → имя ISP; скопировать в `description_to_name.json` и заполнить |
 | `description_to_name.json` | Локальный файл сопоставления (не в git); по умолчанию для `zabbix_map.py -m` |
-| `commit_rates.json` | Оплаченная скорость (commit_rate_gbps, Гбит/с), провайдер и Unique circuit ID по паре устройство — интерфейс; для NetBox Circuit (Commit rate в Kbps = × 1 000 000) |
+| `commit_rates.json.example` | Пример структуры commit_rates (обезличенный); скопировать в `commit_rates.json` и заполнить |
+| `commit_rates.json` | Локальный файл (не в git): оплаченная скорость (commit_rate_gbps, Гбит/с), провайдер и circuit ID по паре устройство — интерфейс; для NetBox Circuit (Commit rate в Kbps = × 1 000 000) |
 | `generate_commit_rates.py` | Генерация commit_rates.json по всем линкам из dry-ssh.json (провайдер, circuit_id по локации, commit_rate_gbps) |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по commit_rates.json (провайдер, тип, circuit, Termination A + cable к интерфейсу; отчёт в конце) |
+| `zabbix_sync_commit_rate.py` | Синхронизация макроса {$IF.UTIL.MAX} в Zabbix из NetBox (commit rate контура по кабелю к интерфейсу; контекст — имя интерфейса) |
 | `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` / дашборде в той же директории, что и файл `-f`, не коммитить |
 | `ROADMAP.md` | Планы доработок (например Tenancy для circuits) |
 | `requirements.txt` | Зависимости: pynetbox, paramiko, requests |
 
-**Формат `commit_rates.json`:** ключ — имя устройства, значение — объект «имя интерфейса → { `provider`, `circuit_id`, `commit_rate_gbps` }». `circuit_id` — уникальный идентификатор контура (Unique circuit ID в NetBox). `commit_rate_gbps` — оплаченная скорость в **Гбит/с** (в NetBox Circuit Commit rate хранится в Kbps: умножить на 1 000 000). Провайдер — короткое имя (KZT, Cogent, Beeline и т.д.). Ключи с префиксом `_` игнорируются при чтении.
+**Формат `commit_rates.json`:** ключ — имя устройства, значение — объект «имя интерфейса → { `provider`, `circuit_id`, `commit_rate_gbps` }». `circuit_id` — уникальный идентификатор контура (Unique circuit ID в NetBox). `commit_rate_gbps` — оплаченная скорость в **Гбит/с** (в NetBox Circuit Commit rate хранится в Kbps: умножить на 1 000 000). Провайдер — короткое имя. Ключи с префиксом `_` игнорируются при чтении. Файл не коммитится; пример структуры — `commit_rates.json.example` (скопировать в `commit_rates.json`).
 
-**Генерация по dry-ssh:** скрипт `generate_commit_rates.py` по всем линкам из `dry-ssh.json` собирает записи в `commit_rates.json`. Провайдер из `description_to_name.json`; `circuit_id` в формате провайдер-локация-N; для новых пар `commit_rate_gbps` — null (заполнить вручную, в Гбит/с). При merge старый ключ `commit_rate_kbps` конвертируется в `commit_rate_gbps` (значения &lt; 1000 считаются уже Гбит/с). Пример: `python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json`.
+**Генерация по dry-ssh:** скрипт `generate_commit_rates.py` по всем линкам из `dry-ssh.json` собирает записи в `commit_rates.json`. Провайдер из `description_to_name.json`; `circuit_id` в формате провайдер-локация-N; для новых пар `commit_rate_gbps` — null (заполнить вручную, в Гбит/с). При merge старый ключ `commit_rate_kbps` конвертируется в `commit_rate_gbps` (значения &lt; 1000 считаются уже Гбит/с). Пример: `cp commit_rates.json.example commit_rates.json` затем `python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json`.
 
 **Создание circuits в NetBox:** скрипт `netbox_create_circuits.py` по `commit_rates.json` создаёт в NetBox провайдеров (при отсутствии), тип контура «Internet», контуры (cid, commit rate в Kbps), **Termination A** на site устройства и кабель до интерфейса. **Termination Z** не создаётся (вторая сторона контура — провайдер или вторая площадка — в скрипте не задаётся). По умолчанию обрабатываются все площадки; ограничить одной: `--location ALA`. Если у интерфейса уже есть кабель или «mark connected» — скрипт удаляет кабель и сбрасывает mark_connected (через REST PATCH), затем подключает кабель по нашим данным. Для виртуальных интерфейсов (ae5.0 и т.п.) кабель вешается на **физический** интерфейс: при указании `-d dry-ssh.json` (или при наличии файла `dry-ssh.json`) из dry-ssh берётся `physicalInterface` для логического. В конце выводится отчёт: что создано (провайдеры, контуры, кабели), что удалено (кабели), где сброшен mark_connected, где использован физический вместо виртуального интерфейса. Переменные: `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`. Пример: `python netbox_create_circuits.py -d dry-ssh.json` (проверка: `--dry-run`).

@@ -6,6 +6,7 @@ __pycache__/
 dry-ssh.json
 zabbix_uplinks_cache.json
 description_to_name.json
+commit_rates.json
 *-export.json
 *.log
 .env
