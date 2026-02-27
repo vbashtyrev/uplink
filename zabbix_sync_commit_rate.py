@@ -8,9 +8,9 @@
 - **{$IF.UTIL.WARN:"<интерфейс>"}** — порог WARN (по умолчанию 90%: жёлтый линк).
 Пороги задаются в uplinks_config.py: THRESHOLD_PERCENT_WARN, THRESHOLD_PERCENT_HIGH.
 
-Скрипт создаёт два простых триггера на интерфейс:
-- max(Bits received, 5m) > {$IF.UTIL.WARN:"<интерфейс>"} — при пороге WARN (Warning, жёлтый);
-- max(Bits received, 5m) > {$IF.UTIL.MAX:"<интерфейс>"} — при пороге HIGH (High, красный).
+Скрипт создаёт два простых триггера на интерфейс (период max() задаётся в uplinks_config: TRIGGER_FUNCTION_PERIOD):
+- max(Bits received, <period>) > {$IF.UTIL.WARN:"<интерфейс>"} — при пороге WARN (Warning, жёлтый);
+- max(Bits received, <period>) > {$IF.UTIL.MAX:"<интерфейс>"} — при пороге HIGH (High, красный).
 Линия порога на дашборде рисуется Simple triggers по триггеру HIGH. Карта (zabbix_map.py) привязывает
 эти триггеры к линкам, чтобы цвет линка менялся при достижении порогов.
 
@@ -45,6 +45,7 @@ from uplinks_config import (
     THRESHOLD_PERCENT_WARN,
     TRIGGER_DESC_90_SUFFIX,
     TRIGGER_DESC_100_SUFFIX,
+    TRIGGER_FUNCTION_PERIOD,
     TRIGGER_TAG_NAME,
     TRIGGER_TAG_VALUE,
 )
@@ -372,7 +373,7 @@ TRIGGER_PRIORITY_HIGH = 4   # 100% — линк красный
 
 def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_name, debug=False):
     """
-    Создать/обновить простой триггер max(Bits received, 5m) > {$IF.UTIL.MAX:"iface"}.
+    Создать/обновить простой триггер max(Bits received, TRIGGER_FUNCTION_PERIOD) > {$IF.UTIL.MAX:"iface"}.
     Линия порога на графике (Simple triggers) и красный линк на карте при 100%.
     Возврат (True, None) или (False, error_message).
     """
@@ -380,11 +381,11 @@ def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_na
     if not key:
         return False, "не найден item Bits received для интерфейса {}".format(iface_name)
     macro_ref = _macro_name_for_interface(iface_name)
-    expression = "max(/{}/{}, 5m)>{}".format(host_technical, key, macro_ref)
+    expression = "max(/{}/{}, {})>{}".format(host_technical, key, TRIGGER_FUNCTION_PERIOD, macro_ref)
     description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_100_SUFFIX)
     existing, err = zabbix_request(
         url, token, "trigger.get",
-        {"hostids": [hostid], "output": ["triggerid", "description", "priority", "status"], "search": {"description": TRIGGER_DESC_100_SUFFIX}},
+        {"hostids": [hostid], "output": ["triggerid", "description", "priority", "status", "expression"], "search": {"description": TRIGGER_DESC_100_SUFFIX}},
         debug=debug,
     )
     if err:
@@ -394,6 +395,8 @@ def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_na
             tid = t.get("triggerid")
             if tid:
                 upd = {}
+                if (t.get("expression") or "").strip() != expression:
+                    upd["expression"] = expression
                 if str(t.get("priority", "0")) != str(TRIGGER_PRIORITY_HIGH):
                     upd["priority"] = TRIGGER_PRIORITY_HIGH
                 if str(t.get("status", "0")) != "0":  # включить, если был отключён
@@ -418,19 +421,19 @@ def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_na
 
 def ensure_simple_warn_trigger(url, token, host_technical, hostid, iface_name, debug=False):
     """
-    Создать простой триггер 90%: max(Bits received, 5m) > {$IF.UTIL.WARN:"iface"}.
-    На карте линк становится жёлтым при достижении 90% порога.
+    Создать простой триггер WARN: max(Bits received, TRIGGER_FUNCTION_PERIOD) > {$IF.UTIL.WARN:"iface"}.
+    На карте линк становится жёлтым при достижении порога WARN.
     Возврат (True, None) или (False, error_message).
     """
     key = get_bits_received_item_key(url, token, hostid, iface_name, debug=debug)
     if not key:
         return False, "не найден item Bits received для интерфейса {}".format(iface_name)
     macro_ref = _macro_name_warn_for_interface(iface_name)
-    expression = "max(/{}/{}, 5m)>{}".format(host_technical, key, macro_ref)
+    expression = "max(/{}/{}, {})>{}".format(host_technical, key, TRIGGER_FUNCTION_PERIOD, macro_ref)
     description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_90_SUFFIX)
     existing, err = zabbix_request(
         url, token, "trigger.get",
-        {"hostids": [hostid], "output": ["triggerid", "description", "status"], "search": {"description": TRIGGER_DESC_90_SUFFIX}},
+        {"hostids": [hostid], "output": ["triggerid", "description", "status", "expression"], "search": {"description": TRIGGER_DESC_90_SUFFIX}},
         debug=debug,
     )
     if err:
@@ -438,8 +441,14 @@ def ensure_simple_warn_trigger(url, token, host_technical, hostid, iface_name, d
     for t in (existing or []):
         if t.get("description") == description:
             tid = t.get("triggerid")
-            if tid and str(t.get("status", "0")) != "0":
-                zabbix_request(url, token, "trigger.update", {"triggerid": tid, "status": "0"}, debug=debug)
+            if tid:
+                upd = {}
+                if (t.get("expression") or "").strip() != expression:
+                    upd["expression"] = expression
+                if str(t.get("status", "0")) != "0":
+                    upd["status"] = "0"
+                if upd:
+                    zabbix_request(url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug)
             return True, None
     create_res, create_err = zabbix_request(
         url, token, "trigger.create",

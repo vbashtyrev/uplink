@@ -108,7 +108,7 @@ def _make_graph_widget(index, hostname, iface_name, isp, itemid_in, itemid_out, 
             {"type": 0, "name": "ds.{}.fill".format(ds_idx), "value": 3},
         ])
         num_ds += 1
-    # Линия порога рисуется через Simple trigger (простой триггер max(bits_in,5m)>{$IF.UTIL.MAX:"..."} создаётся zabbix_sync_commit_rate.py)
+    # Линия порога рисуется через Simple trigger (простой триггер max(bits_in,<period>)>{$IF.UTIL.MAX:"..."} создаётся zabbix_sync_commit_rate.py; период в uplinks_config: TRIGGER_FUNCTION_PERIOD)
     if not itemid_in and not itemid_out:
         return None
     return {
