@@ -32,7 +32,8 @@
    `uplinks_stats.py --fetch --json` → опрос по SSH (NetBox по тегу) → **`dry-ssh.json`** (устройство → список uplink-интерфейсов с полями из show interfaces).
 
 2. **Сверка и обновление NetBox (интерфейсы)**  
-   `netbox_checks.py -f dry-ssh.json` → сравнение с NetBox → таблица расхождений или **`--apply`** для записи в NetBox (description, type, speed, duplex, MAC, MTU, IP, LAG и т.д.).  
+   `netbox_checks.py -f dry-ssh.json` → сравнение с NetBox → таблица расхождений или **`--apply`** для записи в NetBox (description, type, speed, duplex, MAC, MTU, IP, LAG и т.д.).
+
    При необходимости: **`netbox_interface_types.py`** → `netbox_interface_types.json` для приведения типов (`--mt-ref`).
 
 3. **Визуализация (Zabbix / Grafana)**  
@@ -42,12 +43,18 @@
    - **`grafana_uplinks_graph.py`** — Node graph в Grafana (узлы и рёбра по тем же данным).
 
 4. **Commit rates и circuits в NetBox (обязательно до Zabbix)**  
-   **`generate_commit_rates.py -f dry-ssh.json`** → **`commit_rates.json`** (провайдер, circuit_id, commit_rate_gbps по устройству/интерфейсу).  
-   **`netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json`** → в NetBox: провайдеры, контуры (cid, commit rate), Termination A на site, кабель до интерфейса.  
+   **`generate_commit_rates.py -f dry-ssh.json`** → **`commit_rates.json`** (провайдер, circuit_id, commit_rate_gbps по устройству/интерфейсу).
+
+   **`netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json`** → в NetBox: провайдеры, контуры (cid, commit rate), Termination A на site, кабель до интерфейса.
+
    Circuits нужны до настройки Zabbix: в Zabbix commit rate будет браться из NetBox circuits.
 
 5. **Синхронизация макросов commit rate в Zabbix**  
-   **`zabbix_sync_commit_rate.py`** → по NetBox (интерфейсы с circuit по кабелю) получает commit rate в Kbps, переводит в bps и создаёт макросы **{$IF.UTIL.MAX:"<интерфейс>"}** и **{$IF.UTIL.WARN:"<интерфейс>"}**. Создаёт два триггера на интерфейс: при пороге WARN — Warning (жёлтый линк на карте), при пороге HIGH — High (красный линк, линия порога на дашборде). Пороги в процентах задаются в **`uplinks_config.py`** (`THRESHOLD_PERCENT_WARN`, `THRESHOLD_PERCENT_HIGH`; по умолчанию 90% и 100%). **`zabbix_map.py --update-map`** привязывает эти триггеры к линкам карты.
+   **`zabbix_sync_commit_rate.py`** по NetBox (интерфейсы с circuit по кабелю) получает commit rate в Kbps, переводит в bps и создаёт макросы **{$IF.UTIL.MAX:"<интерфейс>"}** и **{$IF.UTIL.WARN:"<интерфейс>"}**.
+
+   Создаёт два триггера на интерфейс: при пороге WARN — Warning (жёлтый линк на карте), при пороге HIGH — High (красный линк, линия порога на дашборде). Пороги и период в выражении триггера задаются в **`uplinks_config.py`** (`THRESHOLD_PERCENT_WARN`, `THRESHOLD_PERCENT_HIGH`, `TRIGGER_FUNCTION_PERIOD`).
+
+   **`zabbix_map.py --update-map`** привязывает эти триггеры к линкам карты.
 
 **Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы и триггеры 90%/100%) → **zabbix_map.py --update-map** (карта с цветом линков), дашборд с линией порога.
 
@@ -75,7 +82,8 @@ export SSH_PASSWORD="password-for-devices"
 
 **Опциональные переменные**
 
-- `SSH_USERNAME` (обязательно при --report и --fetch; по умолчанию не задан — нужно указать явно), `PARALLEL_DEVICES` (по умолчанию `6`), `SSH_HOST_SUFFIX`, `NETBOX_TAG`, `SSH_TIMEOUT`, `SSH_COMMAND_TIMEOUT` (сек).
+- `SSH_USERNAME` — обязательно при `--report` и `--fetch` (по умолчанию не задан, нужно указать явно).
+- `PARALLEL_DEVICES` (по умолчанию `6`), `SSH_HOST_SUFFIX`, `NETBOX_TAG`, `SSH_TIMEOUT`, `SSH_COMMAND_TIMEOUT` (сек).
 - По умолчанию используется `~/.ssh/config`: HostName и User берутся из конфига (как при ручном `ssh DEVICE`). Чтобы отключить — задайте `USE_SSH_CONFIG=0`.
 - При ошибке SSH в лог выводится тип исключения и errno (например `TimeoutError`, `OSError [Errno 51]`), чтобы различать таймаут подключения и отсутствие маршрута.
 
@@ -438,9 +446,13 @@ python netbox_create_circuits.py --location ALA
 
 ### 7. `zabbix_sync_commit_rate.py` — макросы и триггеры 90%/100% в Zabbix из NetBox
 
-Для каждого интерфейса в NetBox, подключённого кабелем к circuit termination (сторона A), скрипт берёт **commit rate** контура (Kbps), переводит в bps и создаёт на хосте два макроса с контекстом по интерфейсу: **{$IF.UTIL.MAX:"Ethernet51/1"}** (порог HIGH, по умолчанию 100%) и **{$IF.UTIL.WARN:"Ethernet51/1"}** (порог WARN, по умолчанию 90%). Значения макросов = commit_rate × (THRESHOLD_PERCENT_* / 100). Создаёт два простых триггера на интерфейс: при пороге WARN — `max(Bits received, <period>) > {$IF.UTIL.WARN:"<интерфейс>"}` (Warning, на карте линк жёлтый), при пороге HIGH — `max(Bits received, <period>) > {$IF.UTIL.MAX:"<интерфейс>"}` (High, линия порога на дашборде и красный линк на карте). Период и пороги задаются в **`uplinks_config.py`** (`TRIGGER_FUNCTION_PERIOD` — по умолчанию 15m; `THRESHOLD_PERCENT_WARN`, `THRESHOLD_PERCENT_HIGH`). Карта (`zabbix_map.py --update-map`) привязывает эти триггеры к линкам. Старые item'ы **net.if.threshold["..."]**, если остались, удаляются.
+Для каждого интерфейса в NetBox, подключённого кабелем к circuit termination (сторона A), скрипт берёт **commit rate** контура (Kbps), переводит в bps и создаёт на хосте два макроса с контекстом по интерфейсу: **{$IF.UTIL.MAX:"Ethernet51/1"}** (порог HIGH, по умолчанию 100%) и **{$IF.UTIL.WARN:"Ethernet51/1"}** (порог WARN, по умолчанию 90%). Значения макросов = commit_rate × (THRESHOLD_PERCENT_* / 100).
 
-В своих триггерах используйте тот же формат макросов: **{$IF.UTIL.MAX:"Ethernet51/1"}**, **{$IF.UTIL.WARN:"Ethernet51/1"}**.
+Создаёт два простых триггера на интерфейс: при пороге WARN — `max(Bits received, <period>) > {$IF.UTIL.WARN:"<интерфейс>"}` (Warning, на карте линк жёлтый), при пороге HIGH — `max(Bits received, <period>) > {$IF.UTIL.MAX:"<интерфейс>"}` (High, линия порога на дашборде и красный линк на карте). Период и пороги задаются в **`uplinks_config.py`** (`TRIGGER_FUNCTION_PERIOD` — по умолчанию 15m; `THRESHOLD_PERCENT_WARN`, `THRESHOLD_PERCENT_HIGH`). Карта (`zabbix_map.py --update-map`) привязывает эти триггеры к линкам.
+
+Старые item'ы **net.if.threshold["..."]**, если остались, удаляются.
+
+**В своих триггерах** используйте тот же формат макросов: **{$IF.UTIL.MAX:"Ethernet51/1"}**, **{$IF.UTIL.WARN:"Ethernet51/1"}**.
 
 **Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`, `ZABBIX_URL`, `ZABBIX_TOKEN`.
 
@@ -494,13 +506,20 @@ python zabbix_uplinks_cleanup.py
 | `netbox_create_circuits.py` | Создание circuits в NetBox по commit_rates.json (провайдер, тип, circuit, Termination A + cable к интерфейсу; отчёт в конце) |
 | `zabbix_sync_commit_rate.py` | Синхронизация макросов {$IF.UTIL.MAX} и {$IF.UTIL.WARN} (90%) в Zabbix из NetBox; триггеры 90%/100% для карты и линии порога на дашборде, удаление старых item'ов порога |
 | `zabbix_uplinks_cleanup.py` | Очистка артефактов в Zabbix: триггеры 90%/100%, item'ы порога, карта uplinks, дашборды uplinks |
-| `uplinks_config.py` | **Настраиваемые** названия и значения для Zabbix и NetBox: имя карты, дашбордов, тег триггеров Zabbix и тег NetBox для circuits (`scripts`/`automatization`), описания триггеров, макросы, иконки карты, цвета линков. Меняйте под своё окружение. |
+| `uplinks_config.py` | **Настраиваемые** названия и значения для Zabbix и NetBox: имя карты, дашбордов, тег триггеров Zabbix и тег NetBox для circuits (`scripts`/`automatization`), описания триггеров, макросы, период триггера (`TRIGGER_FUNCTION_PERIOD`), иконки карты, цвета линков. Меняйте под своё окружение. |
 | `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` / дашборде в той же директории, что и файл `-f`, не коммитить |
 | `ROADMAP.md` | Планы доработок (например Tenancy для circuits) |
 | `requirements.txt` | Зависимости: pynetbox, paramiko, requests |
 
-**Формат `commit_rates.json`:** ключ — имя устройства, значение — объект «имя интерфейса → { `provider`, `circuit_id`, `commit_rate_gbps` }». `circuit_id` — уникальный идентификатор контура (Unique circuit ID в NetBox). `commit_rate_gbps` — оплаченная скорость в **Гбит/с** (в NetBox Circuit Commit rate хранится в Kbps: умножить на 1 000 000). Провайдер — короткое имя. Ключи с префиксом `_` игнорируются при чтении. Файл не коммитится; пример структуры — `commit_rates.json.example` (скопировать в `commit_rates.json`).
+---
 
-**Генерация по dry-ssh:** скрипт `generate_commit_rates.py` по всем линкам из `dry-ssh.json` собирает записи в `commit_rates.json`. Провайдер из `description_to_name.json`; `circuit_id` в формате провайдер-локация-N; для новых пар `commit_rate_gbps` — null (заполнить вручную, в Гбит/с). При merge старый ключ `commit_rate_kbps` конвертируется в `commit_rate_gbps` (значения &lt; 1000 считаются уже Гбит/с). Пример: `cp commit_rates.json.example commit_rates.json` затем `python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json`.
+**Формат `commit_rates.json`**  
+Ключ — имя устройства, значение — объект «имя интерфейса → { `provider`, `circuit_id`, `commit_rate_gbps` }». `circuit_id` — уникальный идентификатор контура (Unique circuit ID в NetBox). `commit_rate_gbps` — оплаченная скорость в **Гбит/с** (в NetBox Circuit Commit rate хранится в Kbps: умножить на 1 000 000). Провайдер — короткое имя. Ключи с префиксом `_` игнорируются при чтении. Файл не коммитится; пример структуры — `commit_rates.json.example` (скопировать в `commit_rates.json`).
 
-**Создание circuits в NetBox:** скрипт `netbox_create_circuits.py` по `commit_rates.json` создаёт в NetBox провайдеров (при отсутствии), тип контура «Internet», контуры (cid, commit rate в Kbps), **Termination A** на site устройства и кабель до интерфейса. Тег из `uplinks_config.NETBOX_AUTOMATION_TAG` (по умолчанию `automatization`) создаётся при отсутствии и проставляется новым и существующим объектам. **Termination Z** не создаётся. По умолчанию обрабатываются все площадки; ограничить одной: `--location ALA`. Если у интерфейса уже есть кабель или «mark connected» — скрипт удаляет кабель и сбрасывает mark_connected (через REST PATCH), затем подключает кабель по нашим данным. Для виртуальных интерфейсов (ae5.0 и т.п.) кабель вешается на **физический** интерфейс: при указании `-d dry-ssh.json` из dry-ssh берётся `physicalInterface` для логического. В конце выводится отчёт: что создано, что удалено, где использована физика вместо виртуального. Переменные: `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`. Пример: `python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json` (проверка: `--dry-run`).
+**Генерация по dry-ssh**  
+Скрипт `generate_commit_rates.py` по всем линкам из `dry-ssh.json` собирает записи в `commit_rates.json`. Провайдер из `description_to_name.json`; `circuit_id` в формате провайдер-локация-N; для новых пар `commit_rate_gbps` — null (заполнить вручную, в Гбит/с). При merge старый ключ `commit_rate_kbps` конвертируется в `commit_rate_gbps` (значения &lt; 1000 считаются уже Гбит/с). Пример: `cp commit_rates.json.example commit_rates.json` затем `python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json`.
+
+**Создание circuits в NetBox**  
+Скрипт `netbox_create_circuits.py` по `commit_rates.json` создаёт в NetBox провайдеров (при отсутствии), тип контура «Internet», контуры (cid, commit rate в Kbps), **Termination A** на site устройства и кабель до интерфейса. Тег из `uplinks_config.NETBOX_AUTOMATION_TAG` (по умолчанию `automatization`) создаётся при отсутствии и проставляется новым и существующим объектам. **Termination Z** не создаётся.
+
+По умолчанию обрабатываются все площадки; ограничить одной: `--location ALA`. Если у интерфейса уже есть кабель или «mark connected» — скрипт удаляет кабель и сбрасывает mark_connected (через REST PATCH), затем подключает кабель по нашим данным. Для виртуальных интерфейсов (ae5.0 и т.п.) кабель вешается на **физический** интерфейс: при указании `-d dry-ssh.json` из dry-ssh берётся `physicalInterface` для логического. В конце выводится отчёт: что создано, что удалено, где использована физика вместо виртуального. Переменные: `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`. Пример: `python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json` (проверка: `--dry-run`).
