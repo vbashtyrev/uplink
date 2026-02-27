@@ -21,6 +21,7 @@
 | `generate_commit_rates.py` | Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по `commit_rates.json`: провайдер, тип «Internet», контур, Termination A на site, кабель до интерфейса. |
 | `zabbix_sync_commit_rate.py` | Синхронизация макросов **{$IF.UTIL.MAX}** и **{$IF.UTIL.WARN}** (90%) в Zabbix из NetBox; создаёт триггеры 90% (жёлтый линк на карте) и 100% (красный, линия порога на дашборде). |
+| `zabbix_uplinks_cleanup.py` | Очистка артефактов автоматизации в Zabbix: триггеры 90%/100%, старые item'ы порога, карта uplinks, дашборды uplinks (тег `scripts:automatization`). |
 
 ---
 
@@ -35,7 +36,7 @@
 
 3. **Визуализация (Zabbix / Grafana)**  
    По **`dry-ssh.json`** + Zabbix API:  
-   - **`zabbix_map.py`** — карта [test] uplinks (хосты, провайдеры, линки);  
+   - **`zabbix_map.py`** — карта [test] uplinks (хосты, провайдеры, линки); после шагов 4–5 повторно **`--update-map`**, чтобы привязать триггеры к линкам (цвет 90%/100%);  
    - **`zabbix_uplinks_dashboard.py`** — дашборд с графиками по uplink;  
    - **`grafana_uplinks_graph.py`** — Node graph в Grafana (узлы и рёбра по тем же данным).
 
@@ -47,7 +48,9 @@
 5. **Синхронизация макросов commit rate в Zabbix**  
    **`zabbix_sync_commit_rate.py`** → по NetBox (интерфейсы с circuit по кабелю) получает commit rate в Kbps, переводит в bps и создаёт макросы **{$IF.UTIL.MAX:"<интерфейс>"}** (100%) и **{$IF.UTIL.WARN:"<интерфейс>"}** (90%). Создаёт два триггера на интерфейс: при 90% — Warning (жёлтый линк на карте), при 100% — High (красный линк, линия порога на дашборде). **`zabbix_map.py --update-map`** привязывает эти триггеры к линкам карты.
 
-**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы и триггеры 90%/100%) → **zabbix_map.py** (карта с цветом линков), дашборд с линией порога.
+**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы и триггеры 90%/100%) → **zabbix_map.py --update-map** (карта с цветом линков), дашборд с линией порога.
+
+**Откат изменений в Zabbix:** скрипт **zabbix_uplinks_cleanup.py** удаляет созданные автоматизацией триггеры, карту uplinks и дашборды (по именам). Макросы {$IF.UTIL.MAX}, {$IF.UTIL.WARN} не трогает. Запуск: `python zabbix_uplinks_cleanup.py` (перед удалением — `--dry-run`).
 
 ---
 
@@ -447,6 +450,26 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json --debug
 
 ---
 
+### 8. `zabbix_uplinks_cleanup.py` — очистка артефактов Zabbix
+
+Удаляет в Zabbix объекты, созданные скриптами uplinks: триггеры 90%/100% (с тегом `scripts:automatization` или по описанию), старые item'ы **net.if.threshold["..."]**, карту **[test] uplinks**, дашборды **Uplinks** и **Uplinks (по локациям)** (имена задаются ключами). Макросы {$IF.UTIL.MAX}, {$IF.UTIL.WARN} не удаляются.
+
+**Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
+
+| Ключ | Описание |
+|------|----------|
+| `--dashboard-name NAME` | Имя основного дашборда (по умолчанию `Uplinks`) |
+| `--dashboard-by-location NAME` | Имя дашборда по локациям (по умолчанию `Uplinks (по локациям)`); пустая строка — не удалять |
+| `--dry-run` | Показать, что будет удалено, без изменений в Zabbix |
+| `--debug` | Отладочный вывод запросов к API |
+
+```bash
+python zabbix_uplinks_cleanup.py --dry-run
+python zabbix_uplinks_cleanup.py
+```
+
+---
+
 ## Файлы
 
 | Файл | Описание |
@@ -460,6 +483,7 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json --debug
 | `generate_commit_rates.py` | Генерация commit_rates.json по всем линкам из dry-ssh.json (провайдер, circuit_id по локации, commit_rate_gbps) |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по commit_rates.json (провайдер, тип, circuit, Termination A + cable к интерфейсу; отчёт в конце) |
 | `zabbix_sync_commit_rate.py` | Синхронизация макросов {$IF.UTIL.MAX} и {$IF.UTIL.WARN} (90%) в Zabbix из NetBox; триггеры 90%/100% для карты и линии порога на дашборде, удаление старых item'ов порога |
+| `zabbix_uplinks_cleanup.py` | Очистка артефактов в Zabbix: триггеры 90%/100%, item'ы порога, карта uplinks, дашборды uplinks |
 | `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` / дашборде в той же директории, что и файл `-f`, не коммитить |
 | `ROADMAP.md` | Планы доработок (например Tenancy для circuits) |
 | `requirements.txt` | Зависимости: pynetbox, paramiko, requests |
