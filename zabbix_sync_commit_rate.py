@@ -6,6 +6,10 @@
 Имя макроса — с контекстом по интерфейсу: **{$IF.UTIL.MAX:"Ethernet51/1"}**, **{$IF.UTIL.MAX:"ae5.0"}**.
 В триггере используйте тот же формат: ({$IF.UTIL.MAX:"Ethernet51/1"}/100)*...
 
+При каждом запуске скрипт создаёт простой триггер max(Bits received, 5m) > {$IF.UTIL.MAX:"<интерфейс>"}
+для линии порога на дашборде (Simple triggers рисует порог пунктиром) и удаляет старые item'ы
+net.if.threshold[...], если они остались.
+
 Для устройств, где в NetBox кабель на физическом интерфейсе (напр. et-0/0/3), а в Zabbix — логическом
 (ae5.0, ae3.0), задайте -d dry-ssh.json: макрос будет по логическому имени.
 
@@ -21,11 +25,16 @@ import pynetbox
 # Общая логика Zabbix API из zabbix_map
 from zabbix_map import (
     _get_zabbix_url_token,
+    _interface_from_key,
+    _interface_from_item_name,
+    _normalize_interface_name,
     validate_zabbix_token,
     zabbix_request,
 )
 
 MACRO_PREFIX = "{$IF.UTIL.MAX"  # Для поиска старых макросов при удалении
+# Префикс ключа старых item'ов порога (удаляются при синке)
+THRESHOLD_ITEM_KEY = 'net.if.threshold'
 # NetBox commit_rate в Kbps → в bps для Zabbix
 KBPS_TO_BPS = 1000
 DEFAULT_DRY_SSH = "dry-ssh.json"
@@ -303,6 +312,99 @@ def set_zabbix_host_if_util_macros(url, token, hostid, new_if_util_list, debug=F
     return True, None
 
 
+# Тип item: 2 = Zabbix trapper (принимает данные через API history.push или zabbix_sender)
+# value_type: 3 = unsigned integer (bps)
+ITEM_TYPE_TRAPPER = 2
+VALUE_TYPE_UNSIGNED = 3
+
+
+def get_bits_received_item_key(url, token, hostid, iface_name, debug=False):
+    """
+    Найти ключ item'а «Bits received» для данного хоста и интерфейса (для выражения простого триггера).
+    Сопоставление по ключу (Ethernet51/1 в []) или по имени item (Interface Ethernet51/1(...)).
+    Возврат key_ или None.
+    """
+    res, err = zabbix_request(
+        url, token, "item.get",
+        {"hostids": [hostid], "output": ["key_", "name"], "search": {"name": "Bits received"}},
+        debug=debug,
+    )
+    if err or not res:
+        return None
+    iface_norm = _normalize_interface_name((iface_name or "").strip())
+    for it in res:
+        key_str = it.get("key_") or ""
+        name_str = it.get("name") or ""
+        iface_from_k = _interface_from_key(key_str)
+        iface_from_n = _interface_from_item_name(name_str)
+        match = (iface_from_k and _normalize_interface_name(iface_from_k) == iface_norm) or (
+            iface_from_n and _normalize_interface_name(iface_from_n) == iface_norm
+        )
+        if match:
+            return key_str
+    return None
+
+
+def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_name, debug=False):
+    """
+    Создать простой триггер max(Bits received, 5m) > {$IF.UTIL.MAX:"iface"}.
+    Линия порога рисуется на графике при включённом Simple triggers (без третьей серии на дашборде).
+    Возврат (True, None) или (False, error_message).
+    """
+    key = get_bits_received_item_key(url, token, hostid, iface_name, debug=debug)
+    if not key:
+        return False, "не найден item Bits received для интерфейса {}".format(iface_name)
+    # Выражение: один item, одна функция max(5m), сравнение с макросом — считается простым триггером
+    macro_ref = _macro_name_for_interface(iface_name)
+    expression = "max(/{}/{}, 5m)>{}".format(host_technical, key, macro_ref)
+    description = "Interface {}: High bandwidth (threshold line)".format((iface_name or "").strip())
+    # Проверить, есть ли уже такой триггер (по описанию)
+    existing, err = zabbix_request(
+        url, token, "trigger.get",
+        {"hostids": [hostid], "output": ["triggerid", "description"], "search": {"description": "threshold line"}},
+        debug=debug,
+    )
+    if err:
+        return False, err
+    if any(t.get("description") == description for t in (existing or [])):
+        return True, None
+    create_res, create_err = zabbix_request(
+        url, token, "trigger.create",
+        {"description": description, "expression": expression, "priority": 1},
+        debug=debug,
+    )
+    if create_err or not create_res or not create_res.get("triggerids"):
+        return False, create_err or "trigger.create не вернул triggerid"
+    return True, None
+
+
+def remove_threshold_items(url, token, hostid, debug=False):
+    """
+    Удалить на хосте все item'ы порога (ключ net.if.threshold[...]), больше не используются — линия рисуется простым триггером.
+    Возврат (удалено_count, None) или (0, error_message).
+    """
+    res, err = zabbix_request(
+        url, token, "item.get",
+        {"hostids": [hostid], "output": ["itemid", "key_"], "search": {"key_": THRESHOLD_ITEM_KEY}},
+        debug=debug,
+    )
+    if err:
+        return 0, err
+    ids = []
+    for it in (res or []):
+        key_str = it.get("key_") or ""
+        if key_str.startswith(THRESHOLD_ITEM_KEY):
+            itemid = it.get("itemid")
+            if itemid:
+                ids.append(str(itemid))
+    if not ids:
+        return 0, None
+    _, del_err = zabbix_request(url, token, "item.delete", ids, debug=debug)
+    if del_err:
+        return 0, del_err
+    return len(ids), None
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(
@@ -352,7 +454,7 @@ def main():
     for (dev_name, iface_name), bps in commit_rates.items():
         host_to_iface_bps.setdefault(dev_name, []).append((iface_name, bps))
 
-    # Хосты в Zabbix по имени (host или name)
+    # Хосты в Zabbix по имени (host или name); техническое имя хоста для history.push
     hostnames = list(host_to_iface_bps.keys())
     result, err = zabbix_request(
         zabbix_url, zabbix_token, "host.get",
@@ -363,6 +465,7 @@ def main():
         print("Zabbix host.get: {}".format(err), file=sys.stderr)
         sys.exit(1)
     hostid_by_host = {h["host"]: h["hostid"] for h in result}
+    host_technical_by_hostid = {h["hostid"]: h["host"] for h in result}
     missing = set(hostnames) - set(hostid_by_host.keys())
     if missing:
         result2, err2 = zabbix_request(
@@ -373,6 +476,7 @@ def main():
         if not err2 and result2:
             for h in result2:
                 hostid_by_host[h["name"]] = h["hostid"]
+                host_technical_by_hostid[h["hostid"]] = h["host"]
         missing = set(hostnames) - set(hostid_by_host.keys())
     if missing:
         print("Хосты не найдены в Zabbix: {}".format(", ".join(sorted(missing))), file=sys.stderr)
@@ -402,11 +506,26 @@ def main():
             updated += 1
             continue
         ok, err = set_zabbix_host_if_util_macros(zabbix_url, zabbix_token, hostid, new_if_util, debug=args.debug)
-        if ok:
-            print("OK: {} — установлено {} макросов ({{$IF.UTIL.MAX:\"<интерфейс>\"}})".format(dev_name, len(new_if_util)))
-            updated += 1
-        else:
+        if not ok:
             print("Ошибка обновления макросов для {}: {}".format(dev_name, err or "usermacro"), file=sys.stderr)
+            continue
+        # Простой триггер для линии порога на графике (Simple triggers рисует порог пунктиром)
+        zabbix_host = host_technical_by_hostid.get(hostid) or dev_name
+        for iface_name, _bps in iface_bps_list:
+            ok_tr, err_tr = ensure_simple_threshold_trigger(
+                zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug
+            )
+            if not ok_tr:
+                print("  {}: простой триггер порога — {}".format(iface_name, err_tr or "ошибка"), file=sys.stderr)
+        # Удалить старые item'ы порога net.if.threshold[...] (линия теперь от простого триггера)
+        removed, rem_err = remove_threshold_items(zabbix_url, zabbix_token, hostid, debug=args.debug)
+        if rem_err:
+            print("  {}: удаление item'ов порога — {}".format(dev_name, rem_err), file=sys.stderr)
+        msg = "OK: {} — установлено {} макросов ({{$IF.UTIL.MAX:\"<интерфейс>\"}}), простой триггер для линии".format(dev_name, len(new_if_util))
+        if removed:
+            msg += ", удалено {} item'ов порога".format(removed)
+        print(msg)
+        updated += 1
 
     print("Готово: {} хостов обновлено, {} пар (интерфейс, commit rate) из NetBox.".format(
         updated, len(commit_rates)))

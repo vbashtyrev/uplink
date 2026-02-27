@@ -67,18 +67,21 @@ def _item_pattern_escape(name):
     return name
 
 
-def _make_graph_widget(index, hostname, iface_name, isp, itemid_in, itemid_out, x, y, width=18, height=5):
-    """Виджет svggraph: Item patterns (host + шаблон по интерфейсу), data_set_label даёт короткие подписи «Bits received»/«Bits sent»."""
+def _make_graph_widget(index, hostname, iface_name, isp, itemid_in, itemid_out, x, y, width=18, height=5, show_threshold=True):
+    """Виджет svggraph: Item patterns (host + шаблон по интерфейсу), data_set_label даёт короткие подписи «Bits received»/«Bits sent».
+    При show_threshold включается Simple triggers — линия порога рисуется пунктиром (простой триггер создаётся zabbix_sync_commit_rate.py)."""
     ref = "W{:04d}".format(index)[:5]
     title = "{} - {} ({})".format(hostname, iface_name, isp or "—").strip()
-    # legend_lines = 2 (Number of rows). Без агрегации — графики без искажений; подписи в легенде могут быть длинными (host: item name).
     fields = [
         {"type": 1, "name": "reference", "value": ref},
         {"type": 0, "name": "legend_statistic", "value": 1},
         {"type": 0, "name": "legend_lines", "value": 2},
     ]
+    if show_threshold:
+        fields.append({"type": 0, "name": "simple_triggers", "value": 1})
     colors = ["1A7F37", "E02F44"]
     iface_escaped = _item_pattern_escape(iface_name)
+    num_ds = 0
     if itemid_in:
         fields.extend([
             {"type": 0, "name": "ds.0.dataset_type", "value": 1},
@@ -90,8 +93,9 @@ def _make_graph_widget(index, hostname, iface_name, isp, itemid_in, itemid_out, 
             {"type": 0, "name": "ds.0.transparency", "value": 5},
             {"type": 0, "name": "ds.0.fill", "value": 3},
         ])
+        num_ds += 1
     if itemid_out:
-        ds_idx = 1 if itemid_in else 0
+        ds_idx = num_ds
         fields.extend([
             {"type": 0, "name": "ds.{}.dataset_type".format(ds_idx), "value": 1},
             {"type": 1, "name": "ds.{}.hosts.0".format(ds_idx), "value": hostname},
@@ -102,6 +106,8 @@ def _make_graph_widget(index, hostname, iface_name, isp, itemid_in, itemid_out, 
             {"type": 0, "name": "ds.{}.transparency".format(ds_idx), "value": 5},
             {"type": 0, "name": "ds.{}.fill".format(ds_idx), "value": 3},
         ])
+        num_ds += 1
+    # Линия порога рисуется через Simple trigger (простой триггер max(bits_in,5m)>{$IF.UTIL.MAX:"..."} создаётся zabbix_sync_commit_rate.py)
     if not itemid_in and not itemid_out:
         return None
     return {
@@ -124,7 +130,7 @@ def _location_from_hostname(hostname):
     return hostname or "other"
 
 
-def create_or_update_dashboard(url, token, edges, dashboard_name, debug=False):
+def create_or_update_dashboard(url, token, edges, dashboard_name, debug=False, show_threshold=True):
     """Создать или обновить дашборд. Одна строка — одна локация; графики локации делят ширину строки. X в пределах 0–71."""
     widgets = []
     widget_h = 5
@@ -151,7 +157,7 @@ def create_or_update_dashboard(url, token, edges, dashboard_name, debug=False):
                 x = row_max_width - width
             wg = _make_graph_widget(
                 widget_index, hostname, iface_name, isp, itemid_in, itemid_out,
-                x, y, width=width, height=widget_h,
+                x, y, width=width, height=widget_h, show_threshold=show_threshold,
             )
             if wg:
                 widgets.append(wg)
@@ -196,7 +202,7 @@ def create_or_update_dashboard(url, token, edges, dashboard_name, debug=False):
         return dashboardid, None
 
 
-def create_dashboard_by_location(url, token, edges, dashboard_name, debug=False):
+def create_dashboard_by_location(url, token, edges, dashboard_name, debug=False, show_threshold=True):
     """Создать/обновить дашборд с одной страницей на локацию (те же графики, разбиты по вкладкам)."""
     widget_h = 5
     row_max_width = 72
@@ -220,7 +226,7 @@ def create_dashboard_by_location(url, token, edges, dashboard_name, debug=False)
             y = row_idx * widget_h
             wg = _make_graph_widget(
                 widget_index, hostname, iface_name, isp, itemid_in, itemid_out,
-                0, y, width=row_max_width, height=widget_h,
+                0, y, width=row_max_width, height=widget_h, show_threshold=show_threshold,
             )
             if wg:
                 page_widgets.append(wg)
@@ -280,8 +286,11 @@ def main():
     parser.add_argument("--dashboard-by-location", default="Uplinks (по локациям)", metavar="NAME",
                         help="Создать второй дашборд с графиками по страницам (одна страница = одна локация). Пустая строка — не создавать")
     parser.add_argument("--no-cache", action="store_true", help="Не использовать кэш Zabbix")
+    parser.add_argument("--no-show-threshold", action="store_true",
+                        help="Не рисовать пороги триггеров (Simple triggers) на графиках")
     parser.add_argument("--debug", action="store_true", help="Отладочный вывод")
     args = parser.parse_args()
+    show_threshold = not args.no_show_threshold
 
     data, err = load_devices_json(args.file)
     if err:
@@ -323,7 +332,7 @@ def main():
         sys.exit(1)
 
     dashboardid, err = create_or_update_dashboard(
-        url, token, edges, args.dashboard_name, debug=args.debug
+        url, token, edges, args.dashboard_name, debug=args.debug, show_threshold=show_threshold
     )
     if err:
         print(err, file=sys.stderr)
@@ -332,7 +341,7 @@ def main():
 
     if args.dashboard_by_location:
         dashboardid2, err2 = create_dashboard_by_location(
-            url, token, edges, args.dashboard_by_location, debug=args.debug
+            url, token, edges, args.dashboard_by_location, debug=args.debug, show_threshold=show_threshold
         )
         if err2:
             print(err2, file=sys.stderr)
