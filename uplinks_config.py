@@ -21,14 +21,19 @@ DASHBOARD_NAME = "Uplinks"
 DASHBOARD_NAME_BY_LOCATION = "Uplinks (по локациям)"
 
 
+# --- Пороги по загрузке (триггеры и макросы) ---
+# Проценты от commit rate: при достижении WARN — жёлтый линк на карте, при HIGH — красный и линия порога на дашборде
+THRESHOLD_PERCENT_WARN = 90   # порог предупреждения (Warning)
+THRESHOLD_PERCENT_HIGH = 100  # порог высокий (High), линия на графике
+
 # --- Триггеры: тег и описания ---
 # Тег Zabbix для «наших» триггеров (по нему cleanup находит и удаляет их)
 TRIGGER_TAG_NAME = "scripts"
 TRIGGER_TAG_VALUE = "automatization"
 
 # Суффиксы описания триггера (полное: "Interface <имя>: " + суффикс)
-# 90% — жёлтый линк на карте; 100% — красный линк и линия порога на дашборде
-TRIGGER_DESC_90_SUFFIX = "High bandwidth (90%)"
+# Суффикс WARN строится из THRESHOLD_PERCENT_WARN; HIGH — фиксированный (линия порога на дашборде)
+TRIGGER_DESC_90_SUFFIX = "High bandwidth ({}%)".format(THRESHOLD_PERCENT_WARN)
 TRIGGER_DESC_100_SUFFIX = "High bandwidth (threshold line)"
 # Подстрока для поиска триггеров в API (search по description)
 TRIGGER_DESC_SEARCH = "High bandwidth ("

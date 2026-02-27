@@ -20,7 +20,7 @@
 | `grafana_uplinks_graph.py` | Генерация JSON для панели Node graph в Grafana (узлы — хосты и провайдеры, рёбра — линки); опционально создание дашборда через Grafana API. |
 | `generate_commit_rates.py` | Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по `commit_rates.json`: провайдер, тип «Internet», контур, Termination A на site, кабель до интерфейса. |
-| `zabbix_sync_commit_rate.py` | Синхронизация макросов **{$IF.UTIL.MAX}** и **{$IF.UTIL.WARN}** (90%) в Zabbix из NetBox; создаёт триггеры 90% (жёлтый линк на карте) и 100% (красный, линия порога на дашборде). |
+| `zabbix_sync_commit_rate.py` | Синхронизация макросов **{$IF.UTIL.MAX}** и **{$IF.UTIL.WARN}** в Zabbix из NetBox; создаёт триггеры по порогам WARN/HIGH (жёлтый/красный линк на карте, линия порога на дашборде). Пороги задаются в `uplinks_config.py` (по умолчанию 90% и 100%). |
 | `zabbix_uplinks_cleanup.py` | Очистка артефактов автоматизации в Zabbix: триггеры 90%/100%, старые item'ы порога, карта uplinks, дашборды uplinks (тег `scripts:automatization`). |
 
 ---
@@ -46,7 +46,7 @@
    Circuits нужны до настройки Zabbix: в Zabbix commit rate будет браться из NetBox circuits.
 
 5. **Синхронизация макросов commit rate в Zabbix**  
-   **`zabbix_sync_commit_rate.py`** → по NetBox (интерфейсы с circuit по кабелю) получает commit rate в Kbps, переводит в bps и создаёт макросы **{$IF.UTIL.MAX:"<интерфейс>"}** (100%) и **{$IF.UTIL.WARN:"<интерфейс>"}** (90%). Создаёт два триггера на интерфейс: при 90% — Warning (жёлтый линк на карте), при 100% — High (красный линк, линия порога на дашборде). **`zabbix_map.py --update-map`** привязывает эти триггеры к линкам карты.
+   **`zabbix_sync_commit_rate.py`** → по NetBox (интерфейсы с circuit по кабелю) получает commit rate в Kbps, переводит в bps и создаёт макросы **{$IF.UTIL.MAX:"<интерфейс>"}** и **{$IF.UTIL.WARN:"<интерфейс>"}**. Создаёт два триггера на интерфейс: при пороге WARN — Warning (жёлтый линк на карте), при пороге HIGH — High (красный линк, линия порога на дашборде). Пороги в процентах задаются в **`uplinks_config.py`** (`THRESHOLD_PERCENT_WARN`, `THRESHOLD_PERCENT_HIGH`; по умолчанию 90% и 100%). **`zabbix_map.py --update-map`** привязывает эти триггеры к линкам карты.
 
 **Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы и триггеры 90%/100%) → **zabbix_map.py --update-map** (карта с цветом линков), дашборд с линией порога.
 
@@ -437,7 +437,7 @@ python netbox_create_circuits.py --location ALA
 
 ### 7. `zabbix_sync_commit_rate.py` — макросы и триггеры 90%/100% в Zabbix из NetBox
 
-Для каждого интерфейса в NetBox, подключённого кабелем к circuit termination (сторона A), скрипт берёт **commit rate** контура (Kbps), переводит в bps и создаёт на хосте два макроса с контекстом по интерфейсу: **{$IF.UTIL.MAX:"Ethernet51/1"}** (100%) и **{$IF.UTIL.WARN:"Ethernet51/1"}** (90%, значение = 0.9×commit_rate). Создаёт два простых триггера на интерфейс: при 90% — `max(Bits received, 5m) > {$IF.UTIL.WARN:"<интерфейс>"}` (Warning, на карте линк жёлтый), при 100% — `max(Bits received, 5m) > {$IF.UTIL.MAX:"<интерфейс>"}` (High, линия порога на дашборде и красный линк на карте). Карта (`zabbix_map.py --update-map`) привязывает эти триггеры к линкам. Старые item'ы **net.if.threshold["..."]**, если остались, удаляются.
+Для каждого интерфейса в NetBox, подключённого кабелем к circuit termination (сторона A), скрипт берёт **commit rate** контура (Kbps), переводит в bps и создаёт на хосте два макроса с контекстом по интерфейсу: **{$IF.UTIL.MAX:"Ethernet51/1"}** (порог HIGH, по умолчанию 100%) и **{$IF.UTIL.WARN:"Ethernet51/1"}** (порог WARN, по умолчанию 90%). Значения макросов = commit_rate × (THRESHOLD_PERCENT_* / 100). Создаёт два простых триггера на интерфейс: при пороге WARN — `max(Bits received, 5m) > {$IF.UTIL.WARN:"<интерфейс>"}` (Warning, на карте линк жёлтый), при пороге HIGH — `max(Bits received, 5m) > {$IF.UTIL.MAX:"<интерфейс>"}` (High, линия порога на дашборде и красный линк на карте). Пороги задаются в **`uplinks_config.py`** (`THRESHOLD_PERCENT_WARN`, `THRESHOLD_PERCENT_HIGH`). Карта (`zabbix_map.py --update-map`) привязывает эти триггеры к линкам. Старые item'ы **net.if.threshold["..."]**, если остались, удаляются.
 
 В своих триггерах используйте тот же формат макросов: **{$IF.UTIL.MAX:"Ethernet51/1"}**, **{$IF.UTIL.WARN:"Ethernet51/1"}**.
 

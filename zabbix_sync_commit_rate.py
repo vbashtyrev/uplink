@@ -4,13 +4,14 @@
 (кабель от termination A к интерфейсу) создаются макросы с commit_rate в bps.
 
 Макросы с контекстом по интерфейсу:
-- **{$IF.UTIL.MAX:"Ethernet51/1"}** — 100% порог (линия на графике, красный линк на карте);
-- **{$IF.UTIL.WARN:"Ethernet51/1"}** — 90% порог (жёлтый линк на карте).
+- **{$IF.UTIL.MAX:"<интерфейс>"}** — порог HIGH (по умолчанию 100%: линия на графике, красный линк);
+- **{$IF.UTIL.WARN:"<интерфейс>"}** — порог WARN (по умолчанию 90%: жёлтый линк).
+Пороги задаются в uplinks_config.py: THRESHOLD_PERCENT_WARN, THRESHOLD_PERCENT_HIGH.
 
 Скрипт создаёт два простых триггера на интерфейс:
-- max(Bits received, 5m) > {$IF.UTIL.WARN:"<интерфейс>"} — при 90% (Warning, жёлтый);
-- max(Bits received, 5m) > {$IF.UTIL.MAX:"<интерфейс>"} — при 100% (High, красный).
-Линия порога на дашборде рисуется Simple triggers по триггеру 100%. Карта (zabbix_map.py) привязывает
+- max(Bits received, 5m) > {$IF.UTIL.WARN:"<интерфейс>"} — при пороге WARN (Warning, жёлтый);
+- max(Bits received, 5m) > {$IF.UTIL.MAX:"<интерфейс>"} — при пороге HIGH (High, красный).
+Линия порога на дашборде рисуется Simple triggers по триггеру HIGH. Карта (zabbix_map.py) привязывает
 эти триггеры к линкам, чтобы цвет линка менялся при достижении порогов.
 
 Удаляются старые item'ы net.if.threshold[...], если остались.
@@ -40,6 +41,8 @@ from uplinks_config import (
     MACRO_PREFIX_MAX,
     MACRO_PREFIX_WARN,
     THRESHOLD_ITEM_KEY,
+    THRESHOLD_PERCENT_HIGH,
+    THRESHOLD_PERCENT_WARN,
     TRIGGER_DESC_90_SUFFIX,
     TRIGGER_DESC_100_SUFFIX,
     TRIGGER_TAG_NAME,
@@ -554,15 +557,16 @@ def main():
         iface_bps_list = host_to_iface_bps[dev_name]
         new_if_util = []
         for iface_name, bps in iface_bps_list:
+            # MAX — порог HIGH (по умолчанию 100% от commit rate)
             new_if_util.append({
                 "macro": _macro_name_for_interface(iface_name),
-                "value": str(bps),
+                "value": str(int(bps * THRESHOLD_PERCENT_HIGH / 100)),
                 "type": "0",
             })
-            # 90% порог — для триггера «жёлтый линк» на карте
+            # Порог WARN (по умолчанию 90%) — для триггера «жёлтый линк» на карте
             new_if_util.append({
                 "macro": _macro_name_warn_for_interface(iface_name),
-                "value": str(int(bps * 0.9)),
+                "value": str(int(bps * THRESHOLD_PERCENT_WARN / 100)),
                 "type": "0",
             })
 
