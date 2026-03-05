@@ -23,6 +23,7 @@
 | `netbox_create_circuits.py` | Создание circuits в NetBox по `commit_rates.json`: провайдер, тип «Internet», контур, Termination A на site, кабель до интерфейса. |
 | `zabbix_sync_commit_rate.py` | Синхронизация макросов **{$IF.UTIL.MAX}** и **{$IF.UTIL.WARN}** в Zabbix из NetBox; создаёт триггеры по порогам WARN/HIGH (жёлтый/красный линк на карте, линия порога на дашборде). Пороги задаются в `uplinks_config.py` (по умолчанию 90% и 100%). |
 | `zabbix_uplinks_cleanup.py` | Очистка артефактов автоматизации в Zabbix: триггеры 90%/100%, старые item'ы порога, карта uplinks, дашборды uplinks (тег `scripts:automatization`). |
+| `netbox_uplinks_cleanup.py` | Откат автоматизации в NetBox: кабели, circuit terminations, контуры, при возможности — типы контуров и провайдеры (по тегу из `uplinks_config.NETBOX_AUTOMATION_TAG`). |
 
 ---
 
@@ -58,7 +59,9 @@
 
 **Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы и триггеры 90%/100%) → **zabbix_map.py --update-map** (карта с цветом линков), дашборд с линией порога.
 
-**Откат изменений в Zabbix:** скрипт **zabbix_uplinks_cleanup.py** удаляет созданные автоматизацией триггеры, карту uplinks и дашборды (по именам). Макросы {$IF.UTIL.MAX}, {$IF.UTIL.WARN} не трогает. Запуск: `python zabbix_uplinks_cleanup.py` (перед удалением — `--dry-run`).
+**Откат в Zabbix:** **zabbix_uplinks_cleanup.py** — удаляет триггеры, карту uplinks и дашборды (по именам). Макросы не трогает. Перед удалением: `--dry-run`.
+
+**Откат в NetBox:** **netbox_uplinks_cleanup.py** — удаляет кабели, circuit terminations, контуры (и при необходимости типы контуров и провайдеры), помеченные тегом из `uplinks_config.NETBOX_AUTOMATION_TAG`. Интерфейсы и устройства не трогает. Перед удалением: `--dry-run`.
 
 ---
 
@@ -492,6 +495,26 @@ python zabbix_uplinks_cleanup.py
 
 ---
 
+### 9. `netbox_uplinks_cleanup.py` — откат автоматизации в NetBox
+
+Удаляет в NetBox объекты, созданные **netbox_create_circuits.py** и помеченные тегом из **`uplinks_config.NETBOX_AUTOMATION_TAG`** (по умолчанию `automatization`): кабели (cables), circuit terminations (сторона A), контуры (circuits). Типы контуров и провайдеры с этим тегом удаляются только если у них не осталось контуров (после удаления наших контуров). Интерфейсы и устройства не трогает; сам тег не удаляется.
+
+**Порядок удаления:** кабели → terminations → circuits → circuit types → providers.
+
+**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`.
+
+| Ключ | Описание |
+|------|----------|
+| `--dry-run` | Показать, что будет удалено, без изменений в NetBox |
+| `--debug` | Отладочный вывод |
+
+```bash
+python netbox_uplinks_cleanup.py --dry-run
+python netbox_uplinks_cleanup.py
+```
+
+---
+
 ## Файлы
 
 | Файл | Описание |
@@ -506,6 +529,7 @@ python zabbix_uplinks_cleanup.py
 | `netbox_create_circuits.py` | Создание circuits в NetBox по commit_rates.json (провайдер, тип, circuit, Termination A + cable к интерфейсу; отчёт в конце) |
 | `zabbix_sync_commit_rate.py` | Синхронизация макросов {$IF.UTIL.MAX} и {$IF.UTIL.WARN} (90%) в Zabbix из NetBox; триггеры 90%/100% для карты и линии порога на дашборде, удаление старых item'ов порога |
 | `zabbix_uplinks_cleanup.py` | Очистка артефактов в Zabbix: триггеры 90%/100%, item'ы порога, карта uplinks, дашборды uplinks |
+| `netbox_uplinks_cleanup.py` | Откат в NetBox: кабели, terminations, контуры (и при возможности типы/провайдеры) по тегу автоматизации |
 | `uplinks_config.py` | **Настраиваемые** названия и значения для Zabbix и NetBox: имя карты, дашбордов, тег триггеров Zabbix и тег NetBox для circuits (`scripts`/`automatization`), описания триггеров, макросы, период триггера (`TRIGGER_FUNCTION_PERIOD`), иконки карты, цвета линков. Меняйте под своё окружение. |
 | `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` / дашборде в той же директории, что и файл `-f`, не коммитить |
 | `ROADMAP.md` | Планы доработок (например Tenancy для circuits) |

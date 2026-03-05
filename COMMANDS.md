@@ -264,6 +264,22 @@ python zabbix_uplinks_cleanup.py --dashboard-name "Uplinks" --dashboard-by-locat
 
 ---
 
+### 10. Откат в NetBox (netbox_uplinks_cleanup.py)
+
+Удаляет объекты, созданные **netbox_create_circuits.py** и помеченные тегом из `uplinks_config.NETBOX_AUTOMATION_TAG`: кабели, circuit terminations, контуры; при возможности — типы контуров и провайдеры (только если у них не осталось контуров). Интерфейсы и устройства не трогает.
+
+```bash
+# Сначала посмотреть, что будет удалено
+python netbox_uplinks_cleanup.py --dry-run
+
+# Выполнить удаление
+python netbox_uplinks_cleanup.py
+```
+
+Переменные: `NETBOX_URL`, `NETBOX_TOKEN`.
+
+---
+
 ## Одной цепочкой (после настройки dry-ssh.json и commit_rates.json)
 
 ```bash

@@ -8,7 +8,7 @@
 
 # --- Карта ---
 # Название карты в Zabbix (Monitoring → Maps)
-MAP_NAME = "[test] uplinks"
+MAP_NAME = "Uplinks"
 
 # Иконки элементов карты (imageid в Администрирование → Изображения)
 MAP_ICON_HOST = 130   # хосты, напр. Router_symbol_(64)

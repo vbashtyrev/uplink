@@ -6,7 +6,7 @@
 
 - Шаг 1 (сбор dry-ssh.json): кэш на 24ч — при наличии свежего файла пропускается; обход: --refresh.
 - Шаг 2 (NetBox checks): по умолчанию выполняется (netbox_checks --apply); пропуск: --no-netbox-apply.
-- Логи каждого запуска: run_logs/YYYY-MM-DD_HH-MM-SS_run.log.
+- Логи каждого запуска: run_logs/YYYY-MM-DD_HH-MM-SS_run.log и run_logs/YYYY-MM-DD_HH-MM-SS_debug.log (stdout/stderr шагов для расследования).
 
 Переменные окружения (как у дочерних скриптов): NETBOX_URL, NETBOX_TOKEN, NETBOX_TAG,
 SSH_USERNAME, SSH_PASSWORD — для сбора; ZABBIX_URL, ZABBIX_TOKEN — для Zabbix;
@@ -25,7 +25,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DRY_SSH = "dry-ssh.json"
 DEFAULT_COMMIT_RATES = "commit_rates.json"
 DEFAULT_DESC_MAP = "description_to_name.json"
-RUN_LOGS_DIR = "run_logs"       # папка логов запусков (дата_время_run.log)
+RUN_LOGS_DIR = "run_logs"       # папка логов: дата_время_run.log и дата_время_debug.log
 CACHE_AGE_SECONDS = 24 * 3600    # кэш dry-ssh.json на 24 часа для шага 1
 
 
@@ -68,6 +68,25 @@ def run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
         return (False, "", "Не найден исполняемый файл или скрипт: {}".format(e))
     except Exception as e:
         return (False, "", str(e))
+
+
+def _append_debug(debug_log_path, step_name, stdout="", stderr="", ok=None, skip_reason=None):
+    """Дописать в отладочный лог блок по шагу: либо SKIP, либо stdout/stderr/ok."""
+    if not debug_log_path:
+        return
+    try:
+        with open(debug_log_path, "a", encoding="utf-8") as f:
+            f.write("=== {} ===\n".format(step_name))
+            if skip_reason is not None:
+                f.write("SKIP: {}\n\n".format(skip_reason))
+            else:
+                f.write("stdout:\n{}\n\nstderr:\n{}\n\nok: {}\n\n".format(
+                    stdout if stdout else "(пусто)",
+                    stderr if stderr else "(пусто)",
+                    ok,
+                ))
+    except Exception as e:
+        print("Не удалось дописать в отладочный лог {}: {}".format(debug_log_path, e), file=sys.stderr)
 
 
 def _write_run_report(report_lines, run_log_path, report_file, log_func=None):
@@ -170,6 +189,7 @@ def main():
     os.makedirs(logs_dir, exist_ok=True)
     run_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_log_path = os.path.join(logs_dir, "{}_run.log".format(run_ts))
+    debug_log_path = os.path.join(logs_dir, "{}_debug.log".format(run_ts))
 
     report_lines = []
     errors = []
@@ -188,16 +208,25 @@ def main():
     log("=== Uplinks full run {} ===".format(datetime.now().isoformat(timespec="seconds")))
     log("Рабочая директория: {}".format(SCRIPT_DIR))
     log("Лог запуска: {}".format(run_log_path))
+    log("Отладочный лог: {}".format(debug_log_path))
     log("")
+    try:
+        with open(debug_log_path, "w", encoding="utf-8") as f:
+            f.write("=== Debug log {} ===\n\n".format(datetime.now().isoformat(timespec="seconds")))
+    except Exception as e:
+        print("Не удалось создать отладочный лог {}: {}".format(debug_log_path, e), file=sys.stderr)
+        debug_log_path = None
 
     # 1. Сбор данных с устройств; кэш на 24ч — при наличии свежего dry-ssh.json шаг пропускается (обход: --refresh)
     if args.no_fetch:
         if not os.path.isfile(dry_ssh_path):
+            _append_debug(debug_log_path, "Шаг 1: Сбор данных", skip_reason="--no-fetch, файл {} не найден".format(dry_ssh_path))
             step("Шаг 1: Пропуск (--no-fetch)", False, "файл {} не найден".format(dry_ssh_path))
             if args.stop_on_error:
                 _finish(report_lines, errors, args.report, run_log_path)
                 sys.exit(1)
         else:
+            _append_debug(debug_log_path, "Шаг 1: Сбор данных", skip_reason="--no-fetch, используется {}".format(dry_ssh_path))
             log("[SKIP] Шаг 1: Сбор данных (--no-fetch), используется {}".format(dry_ssh_path))
             report_lines.append("")
     else:
@@ -210,6 +239,7 @@ def main():
             except OSError:
                 pass
         if use_cache:
+            _append_debug(debug_log_path, "Шаг 1: Сбор данных", skip_reason="кэш актуален, {} < 24ч".format(dry_ssh_path))
             log("[SKIP] Шаг 1: Сбор данных (кэш актуален, {} < 24ч). Для обновления запустите с --refresh".format(dry_ssh_path))
             report_lines.append("")
         else:
@@ -219,6 +249,7 @@ def main():
                 cwd=SCRIPT_DIR,
                 timeout=timeout,
             )
+            _append_debug(debug_log_path, "Шаг 1: Сбор данных", stdout=out or "", stderr=err or "", ok=ok)
             if not ok:
                 err_msg = err or out or "код возврата != 0"
                 if out and err:
@@ -249,12 +280,14 @@ def main():
             cwd=SCRIPT_DIR,
             timeout=timeout,
         )
+        _append_debug(debug_log_path, "Шаг 2: NetBox checks --apply", stdout=out or "", stderr=err or "", ok=ok)
         step("Шаг 2: NetBox checks --apply", ok, err or out or ("код != 0" if not ok else ""))
         if not ok and args.stop_on_error:
             _finish(report_lines, errors, args.report, run_log_path)
             sys.exit(1)
         log("")
     else:
+        _append_debug(debug_log_path, "Шаг 2: NetBox checks --apply", skip_reason="--no-netbox-apply")
         log("[SKIP] Шаг 2: NetBox checks (пропущен: --no-netbox-apply)")
         report_lines.append("")
 
@@ -265,6 +298,7 @@ def main():
         cwd=SCRIPT_DIR,
         timeout=timeout,
     )
+    _append_debug(debug_log_path, "Шаг 3: generate_commit_rates", stdout=out or "", stderr=err or "", ok=ok)
     step("Шаг 3: generate_commit_rates", ok, err or ("код != 0" if not ok else ""))
     if not ok and args.stop_on_error:
         _finish(report_lines, errors, args.report, run_log_path)
@@ -277,6 +311,7 @@ def main():
         cmd_circuits.extend(["--location", args.location])
     log("Шаг 4: NetBox circuits (netbox_create_circuits.py) ...")
     ok, out, err = run_cmd(cmd_circuits, cwd=SCRIPT_DIR, timeout=timeout)
+    _append_debug(debug_log_path, "Шаг 4: NetBox circuits", stdout=out or "", stderr=err or "", ok=ok)
     step("Шаг 4: NetBox circuits", ok, err or ("код != 0" if not ok else ""))
     if not ok and args.stop_on_error:
         _finish(report_lines, errors, args.report, run_log_path)
@@ -290,6 +325,7 @@ def main():
         cwd=SCRIPT_DIR,
         timeout=timeout,
     )
+    _append_debug(debug_log_path, "Шаг 5: Zabbix sync commit rate", stdout=out or "", stderr=err or "", ok=ok)
     step("Шаг 5: Zabbix sync commit rate", ok, err or ("код != 0" if not ok else ""))
     if not ok and args.stop_on_error:
         _finish(report_lines, errors, args.report, run_log_path)
@@ -306,6 +342,7 @@ def main():
         cwd=SCRIPT_DIR,
         timeout=timeout,
     )
+    _append_debug(debug_log_path, "Шаг 6: Zabbix map", stdout=out or "", stderr=err or "", ok=ok)
     step("Шаг 6: Zabbix map", ok, err or ("код != 0" if not ok else ""))
     if not ok and args.stop_on_error:
         _finish(report_lines, errors, args.report, run_log_path)
@@ -322,6 +359,7 @@ def main():
         cwd=SCRIPT_DIR,
         timeout=timeout,
     )
+    _append_debug(debug_log_path, "Шаг 7: Zabbix dashboard", stdout=out or "", stderr=err or "", ok=ok)
     step("Шаг 7: Zabbix dashboard", ok, err or ("код != 0" if not ok else ""))
     if not ok and args.stop_on_error:
         _finish(report_lines, errors, args.report, run_log_path)
@@ -336,12 +374,14 @@ def main():
             cwd=SCRIPT_DIR,
             timeout=timeout,
         )
+        _append_debug(debug_log_path, "Шаг 8: Grafana", stdout=out or "", stderr=err or "", ok=ok)
         step("Шаг 8: Grafana", ok, err or ("код != 0" if not ok else ""))
         if not ok and args.stop_on_error:
             _finish(report_lines, errors, args.report, run_log_path)
             sys.exit(1)
         log("")
     else:
+        _append_debug(debug_log_path, "Шаг 8: Grafana", skip_reason="не указан --grafana")
         log("[SKIP] Шаг 8: Grafana (запустите с --grafana при необходимости)")
         report_lines.append("")
 
