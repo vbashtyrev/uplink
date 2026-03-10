@@ -33,7 +33,7 @@
    `uplinks_stats.py --fetch --json` → опрос по SSH (NetBox по тегу) → **`dry-ssh.json`** (устройство → список uplink-интерфейсов с полями из show interfaces).
 
 2. **Сверка и обновление NetBox (интерфейсы)**  
-   `netbox_checks.py -f dry-ssh.json` → сравнение с NetBox → таблица расхождений или **`--apply`** для записи в NetBox (description, type, speed, duplex, MAC, MTU, IP, LAG и т.д.).
+   `netbox_checks.py -f dry-ssh.json` → сравнение с NetBox → таблица расхождений или **`--apply`** для записи в NetBox (description, type, speed, duplex, MAC, MTU, IP, LAG и т.д.). При полном прогоне (**run_uplinks_full.py**) шаг 2 вызывается с **`--all --mt-ref --apply`** (все проверки и справочник типов).
 
    При необходимости: **`netbox_interface_types.py`** → `netbox_interface_types.json` для приведения типов (`--mt-ref`).
 
@@ -190,7 +190,7 @@ python uplinks_stats.py --report
 |------|----------|
 | `-f`, `--file FILE` | Путь к JSON с устройствами и интерфейсами (по умолчанию `dry-ssh.json`) |
 | `--host NAME` | Обработать только один хост (имя устройства) |
-| `--platform {arista,juniper,all}` | Обрабатывать устройства по платформе в NetBox: **arista** (по умолчанию), **juniper** или **all** |
+| `--platform {arista,juniper,all}` | Обрабатывать устройства по платформе в NetBox: **all** (по умолчанию), **arista** или **juniper** |
 
 #### Проверки (включить нужные колонки и сверку)
 

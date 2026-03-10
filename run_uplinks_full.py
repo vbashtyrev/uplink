@@ -274,9 +274,9 @@ def main():
 
     # 2. NetBox checks (опционально)
     if not args.no_netbox_apply:
-        log("Шаг 2: NetBox — сверка и применение (netbox_checks.py -f {} --apply) ...".format(dry_ssh_path))
+        log("Шаг 2: NetBox — сверка и применение (netbox_checks.py -f {} --all --mt-ref --apply) ...".format(dry_ssh_path))
         ok, out, err = run_cmd(
-            [python, "netbox_checks.py", "-f", dry_ssh_path, "--apply"],
+            [python, "netbox_checks.py", "-f", dry_ssh_path, "--all", "--mt-ref", "--apply"],
             cwd=SCRIPT_DIR,
             timeout=timeout,
         )
