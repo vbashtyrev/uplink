@@ -372,23 +372,40 @@ def main():
         sys.exit(1)
     log("")
 
-    # 9. Grafana (опционально)
+    # 9. Zabbix — сервисы и SLA по провайдерам
+    log("Шаг 9: Zabbix — сервисы и SLA по провайдерам (zabbix_provider_services.py -f {} --parent-service 'Uplinks providers') ...".format(commit_rates_path))
+    ok, out, err = run_cmd(
+        [python, "zabbix_provider_services.py", "-f", commit_rates_path, "--parent-service", "Uplinks providers"],
+        cwd=SCRIPT_DIR,
+        timeout=timeout,
+    )
+    _append_debug(debug_log_path, "Шаг 9: Zabbix provider services/SLA", stdout=out or "", stderr=err or "", ok=ok)
+    step("Шаг 9: Zabbix provider services/SLA", ok, err or ("код != 0" if not ok else ""))
+    if not ok and args.stop_on_error:
+        _finish(report_lines, errors, args.report, run_log_path)
+        sys.exit(1)
+    if out:
+        for line in out.splitlines():
+            log("  {}".format(line))
+    log("")
+
+    # 10. Grafana (опционально)
     if args.grafana:
-        log("Шаг 9: Grafana — Node graph (grafana_uplinks_graph.py -f {} --grafana-api) ...".format(dry_ssh_path))
+        log("Шаг 10: Grafana — Node graph (grafana_uplinks_graph.py -f {} --grafana-api) ...".format(dry_ssh_path))
         ok, out, err = run_cmd(
             [python, "grafana_uplinks_graph.py", "-f", dry_ssh_path, "--grafana-api"],
             cwd=SCRIPT_DIR,
             timeout=timeout,
         )
-        _append_debug(debug_log_path, "Шаг 9: Grafana", stdout=out or "", stderr=err or "", ok=ok)
-        step("Шаг 9: Grafana", ok, err or ("код != 0" if not ok else ""))
+        _append_debug(debug_log_path, "Шаг 10: Grafana", stdout=out or "", stderr=err or "", ok=ok)
+        step("Шаг 10: Grafana", ok, err or ("код != 0" if not ok else ""))
         if not ok and args.stop_on_error:
             _finish(report_lines, errors, args.report, run_log_path)
             sys.exit(1)
         log("")
     else:
-        _append_debug(debug_log_path, "Шаг 9: Grafana", skip_reason="не указан --grafana")
-        log("[SKIP] Шаг 9: Grafana (запустите с --grafana при необходимости)")
+        _append_debug(debug_log_path, "Шаг 10: Grafana", skip_reason="не указан --grafana")
+        log("[SKIP] Шаг 10: Grafana (запустите с --grafana при необходимости)")
         report_lines.append("")
 
     # Итог

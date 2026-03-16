@@ -236,7 +236,7 @@ python zabbix_uplinks_dashboard.py -f dry-ssh.json --no-cache
 python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
 ```
 
-При полном прогоне **run_uplinks_full.py** этот шаг выполняется автоматически (шаг 8).
+При полном прогоне **run_uplinks_full.py** этот шаг выполняется автоматически (шаг 7).
 
 ---
 
