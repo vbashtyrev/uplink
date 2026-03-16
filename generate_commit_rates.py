@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Сгенерировать commit_rates.json по всем линкам (устройство + интерфейс) из dry-ssh.json.
-Существующие значения в commit_rates.json сохраняются; для новых пар подставляются
-провайдер из description_to_name и пустые circuit_id / commit_rate_gbps.
-"""
+"""Generate or merge commit_rates.json from dry-ssh.json and description_to_name mapping."""
 
 import argparse
 import json

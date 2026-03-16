@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Запуск полной цепочки uplinks одним скриптом: сбор данных → commit_rates → NetBox circuits
-→ Zabbix sync/map/dashboard → опционально Grafana. Вывод отчёта о проделанной работе и об ошибках.
-
-- Шаг 1 (сбор dry-ssh.json): кэш на 24ч — при наличии свежего файла пропускается; обход: --refresh.
-- Шаг 2 (NetBox checks): по умолчанию выполняется (netbox_checks --apply); пропуск: --no-netbox-apply.
-- Логи каждого запуска: run_logs/YYYY-MM-DD_HH-MM-SS_run.log и run_logs/YYYY-MM-DD_HH-MM-SS_debug.log (stdout/stderr шагов для расследования).
-
-Переменные окружения (как у дочерних скриптов): NETBOX_URL, NETBOX_TOKEN, NETBOX_TAG,
-SSH_USERNAME, SSH_PASSWORD — для сбора; ZABBIX_URL, ZABBIX_TOKEN — для Zabbix;
-GRAFANA_URL, GRAFANA_API_KEY — для Grafana при --grafana.
-"""
+"""Run the full uplinks pipeline: devices → NetBox → Zabbix (and optional Grafana) with reporting."""
 
 import argparse
 import os

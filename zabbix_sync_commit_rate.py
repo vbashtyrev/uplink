@@ -1,26 +1,5 @@
 #!/usr/bin/env python3
-"""
-Синхронизация макросов commit rate в Zabbix из NetBox: для каждого интерфейса с circuit
-(кабель от termination A к интерфейсу) создаются макросы с commit_rate в bps.
-
-Макросы с контекстом по интерфейсу:
-- **{$IF.UTIL.MAX:"<интерфейс>"}** — порог HIGH (по умолчанию 100%: линия на графике, красный линк);
-- **{$IF.UTIL.WARN:"<интерфейс>"}** — порог WARN (по умолчанию 90%: жёлтый линк).
-Пороги задаются в uplinks_config.py: THRESHOLD_PERCENT_WARN, THRESHOLD_PERCENT_HIGH.
-
-Скрипт создаёт два простых триггера на интерфейс (период max() задаётся в uplinks_config: TRIGGER_FUNCTION_PERIOD):
-- max(Bits received, <period>) > {$IF.UTIL.WARN:"<интерфейс>"} — при пороге WARN (Warning, жёлтый);
-- max(Bits received, <period>) > {$IF.UTIL.MAX:"<интерфейс>"} — при пороге HIGH (High, красный).
-Линия порога на дашборде рисуется Simple triggers по триггеру HIGH. Карта (zabbix_map.py) привязывает
-эти триггеры к линкам, чтобы цвет линка менялся при достижении порогов.
-
-Удаляются старые item'ы net.if.threshold[...], если остались.
-
-Для устройств, где в NetBox кабель на физическом интерфейсе (напр. et-0/0/3), а в Zabbix — логическом
-(ae5.0, ae3.0), задайте -d dry-ssh.json: макрос будет по логическому имени.
-
-Переменные: NETBOX_URL, NETBOX_TOKEN, NETBOX_TAG, ZABBIX_URL, ZABBIX_TOKEN.
-"""
+"""Sync commit-rate macros (and optionally 90%/100% triggers) in Zabbix from NetBox circuits."""
 
 import json
 import os

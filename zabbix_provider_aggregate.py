@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Создание в Zabbix хостов «Uplinks {Provider}» с calculated items (сумма Bits received / Bits sent
-по всем линкам провайдера) и триггерами по агрегатному лимиту из commit_rates.json (_provider_limits).
-
-Лимит задаётся в commit_rates.json:
-  "_provider_limits": { "Cogent": 10, "Hurricane": 5 }
-(Гбит/с — максимум по всем линкам провайдера в сумме).
-
-Переменные: ZABBIX_URL, ZABBIX_TOKEN.
-"""
+"""Create/update aggregate provider hosts in Zabbix (`Uplinks {Provider}`) with
+calculated items (sum Bits in/out over all links) and optional 90%/100% limit triggers."""
 
 import json
 import os

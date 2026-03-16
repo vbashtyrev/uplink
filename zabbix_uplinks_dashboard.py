@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Создание или обновление дашборда в Zabbix с виджетами-графиками по uplink-интерфейсам.
-Данные из dry-ssh.json; itemid In/Out — из Zabbix API (та же логика и кэш, что в zabbix_map).
-Каждый виджет — график входящего и исходящего трафика по одному интерфейсу (Bits received / Bits sent).
-"""
+"""Create or update Zabbix dashboards with uplink traffic widgets (per-link, per-location, per-provider)."""
 
 import argparse
 import json
@@ -317,20 +313,49 @@ def _get_aggregate_itemids(url, token, providers, debug=False):
     if not providers:
         return {}
     host_names = [UPLINKS_AGGREGATE_HOST_PREFIX + p for p in providers]
-    hosts, err = zabbix_request(url, token, "host.get", {
-        "output": ["hostid", "host"],
-        "filter": {"host": host_names},
-    }, debug=debug)
-    if err or not hosts:
-        return {p: (None, None) for p in providers}
-    hostname_to_id = {h["host"]: h["hostid"] for h in hosts}
-    # host "Uplinks Cogent" -> provider "Cogent"
+    out = {p: (None, None) for p in providers}
+
+    # Сначала ищем агрегатные хосты по technical host, затем по visible name (как в карте),
+    # чтобы покрыть случаи, когда host и name отличаются.
+    hostname_to_id = {}
+    hosts, err = zabbix_request(
+        url,
+        token,
+        "host.get",
+        {
+            "output": ["hostid", "host", "name"],
+            "filter": {"host": host_names},
+        },
+        debug=debug,
+    )
+    if not err:
+        for h in hosts or []:
+            hostname_to_id[h.get("host") or ""] = h.get("hostid")
+
+    missing = [p for p in providers if UPLINKS_AGGREGATE_HOST_PREFIX + p not in hostname_to_id]
+    if missing:
+        names_filter = [UPLINKS_AGGREGATE_HOST_PREFIX + p for p in missing]
+        hosts2, err2 = zabbix_request(
+            url,
+            token,
+            "host.get",
+            {
+                "output": ["hostid", "host", "name"],
+                "filter": {"name": names_filter},
+            },
+            debug=debug,
+        )
+        if not err2:
+            for h in hosts2 or []:
+                hostname_to_id[h.get("name") or ""] = h.get("hostid")
+
     id_to_provider = {}
     for p in providers:
-        hname = UPLINKS_AGGREGATE_HOST_PREFIX + p
-        if hname in hostname_to_id:
-            id_to_provider[hostname_to_id[hname]] = p
-    out = {p: (None, None) for p in providers}
+        wanted = UPLINKS_AGGREGATE_HOST_PREFIX + p
+        hid = hostname_to_id.get(wanted)
+        if hid:
+            id_to_provider[str(hid)] = p
+
     for hostid, isp in id_to_provider.items():
         items, err = zabbix_request(url, token, "item.get", {
             "output": ["itemid", "key_"],

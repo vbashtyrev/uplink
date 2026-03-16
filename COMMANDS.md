@@ -199,13 +199,13 @@ python zabbix_map.py -f dry-ssh.json --zabbix --update-map --no-cache
 
 ### 7. Дашборды Zabbix
 
-Основной дашборд, по локациям и сводный по провайдерам (Cogent, HE и др. с >1 линком):
+Основной дашборд, по локациям и сводный по провайдерам:
 
 ```bash
 python zabbix_uplinks_dashboard.py -f dry-ssh.json
 ```
 
-Сводный дашборд по провайдерам создаётся с вкладками по каждому провайдеру из списка: `PROVIDERS_FOR_SUMMARY` + провайдеры из NetBox с тегом `automatization` (если заданы `NETBOX_URL`, `NETBOX_TOKEN`). У провайдера должно быть больше одного линка.
+Сводный дашборд по провайдерам создаётся с вкладками по каждому провайдеру из списка: `PROVIDERS_FOR_SUMMARY` + провайдеры из NetBox с тегом `automatization` (если заданы `NETBOX_URL`, `NETBOX_TOKEN`).
 
 Без линий порога на графиках, с другими именами дашбордов:
 

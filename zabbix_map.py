@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""
-Построение карты в Zabbix по данным из файлов и других источников.
-Zabbix 7.0: при использовании API — переменные ZABBIX_URL, ZABBIX_TOKEN; токен проверяется при первом запросе.
-По умолчанию: hostname, interface, description, ISP. С --zabbix добавляются ключи items Bits received / Bits sent.
-При создании/обновлении линков к ним привязываются триггеры 90% и 100% (создаются zabbix_sync_commit_rate):
-при 90% загрузки линк жёлтый, при 100% — красный.
-Входной файл (dry-ssh.json) может содержать логические интерфейсы; для одного uplink на карте остаётся одно ребро
-(приоритет: интерфейс с items Zabbix, затем логический unit, затем физический).
-"""
+"""Build or update a Zabbix map for uplinks (hosts, providers, links) based on dry-ssh.json and Zabbix API."""
 
 import argparse
 import json
@@ -32,6 +24,7 @@ from uplinks_config import (
     TRIGGER_DESC_90_SUFFIX,
     TRIGGER_DESC_100_SUFFIX,
     TRIGGER_DESC_SEARCH,
+    UPLINKS_AGGREGATE_HOST_PREFIX,
 )
 
 
@@ -218,54 +211,105 @@ def _normalize_interface_name(name):
     return name.strip().lower()
 
 
-def get_uplink_trigger_ids_by_host_iface(url, token, hostids, debug=False):
+def get_provider_aggregate_triggers(url, token, providers, debug=False):
     """
-    Получить triggerid триггеров «90%» и «100%» по хостам (создаются zabbix_sync_commit_rate).
-    Возврат: dict (hostid, iface_name_normalized) -> (triggerid_warn, triggerid_high),
-    где triggerid_warn/triggerid_high могут быть None если триггер не найден.
+    Получить triggerid агрегатных триггеров 90%/100% по провайдерам.
+
+    Триггеры создаются zabbix_provider_aggregate.py на хостах «Uplinks {Provider}»:
+    - priority=1 (Information) — 90% от лимита;
+    - priority=2 (Warning) — 100% от лимита.
+
+    Возврат: dict provider_name -> (triggerid_warn, triggerid_high).
     """
-    if not hostids:
+    providers = [p for p in (providers or []) if p]
+    if not providers:
         return {}
+    # Найти хосты агрегатов: сначала по technical host (host), затем по visible name (name),
+    # так как для некоторых провайдеров (Fiord / PING-WIN) host и name могут отличаться.
+    host_names = [UPLINKS_AGGREGATE_HOST_PREFIX + p for p in providers]
+    hostid_by_provider = {}
+
+    # host.get по полю host
     result, err = zabbix_request(
-        url, token, "trigger.get",
+        url,
+        token,
+        "host.get",
         {
-            "hostids": list(hostids),
+            "output": ["hostid", "host", "name"],
+            "filter": {"host": host_names},
+        },
+        debug=debug,
+    )
+    if err:
+        return {}
+    for h in result or []:
+        host = h.get("host") or ""
+        name = h.get("name") or ""
+        for p in providers:
+            wanted = UPLINKS_AGGREGATE_HOST_PREFIX + p
+            if host == wanted or name == wanted:
+                hostid_by_provider[p] = str(h.get("hostid"))
+
+    # Для недостающих — попытка по visible name (name)
+    missing = [p for p in providers if p not in hostid_by_provider]
+    if missing:
+        names_filter = [UPLINKS_AGGREGATE_HOST_PREFIX + p for p in missing]
+        result2, err2 = zabbix_request(
+            url,
+            token,
+            "host.get",
+            {
+                "output": ["hostid", "host", "name"],
+                "filter": {"name": names_filter},
+            },
+            debug=debug,
+        )
+        if not err2:
+            for h in result2 or []:
+                host = h.get("host") or ""
+                name = h.get("name") or ""
+                for p in missing:
+                    wanted = UPLINKS_AGGREGATE_HOST_PREFIX + p
+                    if host == wanted or name == wanted:
+                        hostid_by_provider[p] = str(h.get("hostid"))
+    if not hostid_by_provider:
+        return {}
+    hostids = list({hid for hid in hostid_by_provider.values() if hid})
+    trig_res, err = zabbix_request(
+        url,
+        token,
+        "trigger.get",
+        {
+            "hostids": hostids,
             "output": ["triggerid", "description", "priority"],
-            "search": {"description": TRIGGER_DESC_SEARCH},
             "selectHosts": ["hostid"],
         },
         debug=debug,
     )
-    if err or not result:
+    if err or not trig_res:
         return {}
-    # Разбираем описание: "Interface Ethernet51/1: " + TRIGGER_DESC_90_SUFFIX / TRIGGER_DESC_100_SUFFIX
-    re_90 = re.compile(r"^Interface\s+(.+?):\s*" + re.escape(TRIGGER_DESC_90_SUFFIX) + r"\s*$", re.IGNORECASE)
-    re_100 = re.compile(r"^Interface\s+(.+?):\s*" + re.escape(TRIGGER_DESC_100_SUFFIX) + r"\s*$", re.IGNORECASE)
-    by_key = {}  # (hostid, iface_norm) -> {"warn": id, "high": id}
-    for t in result:
-        desc = (t.get("description") or "").strip()
+    triggers_by_provider = {p: {"warn": None, "high": None} for p in providers}
+    # Приоритеты заданы в zabbix_provider_aggregate: 1=Info (90%), 2=Warning (100%).
+    hostid_to_provider = {hid: p for p, hid in hostid_by_provider.items()}
+    for t in trig_res:
         hosts = t.get("hosts") or []
-        hostid = hosts[0].get("hostid") if hosts else None
-        if not hostid:
+        hostid = None
+        if hosts and isinstance(hosts[0], dict):
+            hostid = str(hosts[0].get("hostid") or "")
+        if not hostid or hostid not in hostid_to_provider:
             continue
-        hostid = str(hostid)
-        iface_name = None
+        provider = hostid_to_provider[hostid]
+        prio = int(t.get("priority", 0))
         tid = t.get("triggerid")
-        if re_90.search(desc):
-            m = re_90.match(desc)
-            iface_name = m.group(1).strip() if m else None
-            if iface_name:
-                key = (hostid, _normalize_interface_name(iface_name))
-                by_key.setdefault(key, {"warn": None, "high": None})["warn"] = tid
-        elif re_100.search(desc):
-            m = re_100.match(desc)
-            iface_name = m.group(1).strip() if m else None
-            if iface_name:
-                key = (hostid, _normalize_interface_name(iface_name))
-                by_key.setdefault(key, {"warn": None, "high": None})["high"] = tid
+        if not tid:
+            continue
+        if prio == 1:
+            triggers_by_provider.setdefault(provider, {})["warn"] = tid
+        elif prio == 2:
+            triggers_by_provider.setdefault(provider, {})["high"] = tid
     out = {}
-    for (hostid, iface_norm), ids in by_key.items():
-        out[(hostid, iface_norm)] = (ids.get("warn"), ids.get("high"))
+    for p, ids in triggers_by_provider.items():
+        out[p] = (ids.get("warn"), ids.get("high"))
     return out
 
 
@@ -781,9 +825,12 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
         elif etype == ELEMENT_TYPE_IMAGE:
             isp_to_selement[el.get("label", "")] = sid
 
-    # Триггеры 90%/100% для окраски линков (создаются zabbix_sync_commit_rate)
-    edge_hostids = set(e[1] for e in edges)
-    trigger_ids_by_host_iface = get_uplink_trigger_ids_by_host_iface(url, token, edge_hostids, debug=debug)
+    # Триггеры 90%/100% для окраски линков: теперь используем агрегатные триггеры провайдера
+    # с хостов «Uplinks {Provider}» (создаются zabbix_provider_aggregate.py).
+    providers_for_triggers = [isp for isp in unique_isps if isp]
+    trigger_ids_by_provider = get_provider_aggregate_triggers(
+        url, token, providers_for_triggers, debug=debug
+    )
 
     new_links = []
     our_host_sids = set()
@@ -809,9 +856,8 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
             "selementid2": sid2,
             "label": "\n".join(label_parts),
         }
-        # Привязать триггеры к линку: 90% — жёлтый, 100% — красный на карте
-        key_tr = (str(hostid), _normalize_interface_name(iface_name or ""))
-        trigger_warn, trigger_high = trigger_ids_by_host_iface.get(key_tr, (None, None))
+        # Привязать агрегатные триггеры провайдера к линку: 90% — жёлтый, 100% — красный на карте.
+        trigger_warn, trigger_high = trigger_ids_by_provider.get(isp or "", (None, None))
         linktriggers = []
         if trigger_warn:
             linktriggers.append({"triggerid": trigger_warn, "color": LINK_COLOR_WARN})

@@ -16,7 +16,7 @@
 | `uplinks_stats.py` | Сбор данных с устройств по SSH (Arista/Juniper) или отчёт NetBox vs устройство; выход — таблица или JSON (`dry-ssh.json`). |
 | `netbox_checks.py` | Сверка данных из JSON с NetBox (интерфейсы: имя, description, тип, speed, duplex, MAC, MTU, IP, LAG и др.) и при необходимости обновление полей в NetBox. |
 | `netbox_interface_types.py` | Скачивание справочника типов интерфейсов NetBox (value/label) из репозитория в JSON для `--mt-ref`. |
-| `zabbix_map.py` | Таблица uplink'ов по dry-ssh; карта Zabbix (хосты, провайдеры, линки с items Bits in/out). К линкам привязываются триггеры 90%/100% — цвет линка: жёлтый при 90%, красный при 100%. |
+| `zabbix_map.py` | Таблица uplink'ов по dry-ssh; карта Zabbix (хосты, провайдеры, линки с items Bits in/out). Цвет линки определяется агрегатными триггерами провайдера (хосты «Uplinks {Provider}»), 90%/100% общего лимита по провайдеру. |
 | `zabbix_uplinks_dashboard.py` | Создание/обновление дашборда Zabbix с виджетами-графиками по каждому uplink (Bits received/sent). |
 | `grafana_uplinks_graph.py` | Генерация JSON для панели Node graph в Grafana (узлы — хосты и провайдеры, рёбра — линки); опционально создание дашборда через Grafana API. |
 | `generate_commit_rates.py` | Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). |
@@ -39,7 +39,7 @@
 
 3. **Визуализация (Zabbix / Grafana)**  
    По **`dry-ssh.json`** + Zabbix API:  
-   - **`zabbix_map.py`** — карта [test] uplinks (хосты, провайдеры, линки); после шагов 4–5 повторно **`--update-map`**, чтобы привязать триггеры к линкам (цвет 90%/100%);  
+   - **`zabbix_map.py`** — карта uplinks (хосты, провайдеры, линки); после шагов 4–5 повторно **`--update-map`**, чтобы привязать агрегатные триггеры провайдеров к линкам;  
    - **`zabbix_uplinks_dashboard.py`** — дашборд с графиками по uplink;  
    - **`grafana_uplinks_graph.py`** — Node graph в Grafana (узлы и рёбра по тем же данным).
 
@@ -53,11 +53,11 @@
 5. **Синхронизация макросов commit rate в Zabbix**  
    **`zabbix_sync_commit_rate.py`** по NetBox (интерфейсы с circuit по кабелю) получает commit rate в Kbps, переводит в bps и создаёт макросы **{$IF.UTIL.MAX:"<интерфейс>"}** и **{$IF.UTIL.WARN:"<интерфейс>"}**.
 
-   Создаёт два триггера на интерфейс: при пороге WARN — Warning (жёлтый линк на карте), при пороге HIGH — High (красный линк, линия порога на дашборде). Пороги и период в выражении триггера задаются в **`uplinks_config.py`** (`THRESHOLD_PERCENT_WARN`, `THRESHOLD_PERCENT_HIGH`, `TRIGGER_FUNCTION_PERIOD`).
+   По отдельному ключу запуска можно создать/обновить простые триггеры 90%/100% на интерфейсы. Пороги и период в выражении триггера задаются в **`uplinks_config.py`** (`THRESHOLD_PERCENT_WARN`, `THRESHOLD_PERCENT_HIGH`, `TRIGGER_FUNCTION_PERIOD`).
 
-   **`zabbix_map.py --update-map`** привязывает эти триггеры к линкам карты.
+   **`zabbix_provider_aggregate.py`** создаёт агрегатные хосты `Uplinks {Provider}` и триггеры 90%/100% лимита по провайдеру; **`zabbix_map.py --update-map`** привязывает эти триггеры к линкам карты.
 
-**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы и триггеры 90%/100%) → **zabbix_map.py --update-map** (карта с цветом линков), дашборд с линией порога.
+**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы и, при необходимости, per-link триггеры) → **zabbix_provider_aggregate.py** (агрегаты по провайдерам) → **zabbix_map.py --update-map** (карта с цветом линков по агрегатам), дашборды.
 
 **Откат в Zabbix:** **zabbix_uplinks_cleanup.py** — удаляет триггеры, карту uplinks и дашборды (по именам). Макросы не трогает. Перед удалением: `--dry-run`.
 
@@ -312,7 +312,7 @@ python netbox_interface_types.py -o my_types.json
 
 ### 4. `zabbix_map.py`
 
-Построение таблицы uplink'ов по данным из `dry-ssh.json`; опционально — карта Zabbix. При обращении к Zabbix API: поиск хостов и items (Bits received/sent). Файл может содержать логические интерфейсы (Juniper: ae5, ae5.0, et-0/0/3); на карте для одной пары (хост, провайдер) рисуется один линк — выбирается интерфейс с items Zabbix, при равных условиях логический unit (например ae5.0), иначе физический. При создании/обновлении линков к каждому линку привязываются триггеры 90% и 100% (создаются `zabbix_sync_commit_rate.py`): при срабатывании 90% линк отображается жёлтым, при 100% — красным.
+Построение таблицы uplink'ов по данным из `dry-ssh.json`; опционально — карта Zabbix. При обращении к Zabbix API: поиск хостов и items (Bits received/sent). Файл может содержать логические интерфейсы (Juniper: ae5, ae5.0, et-0/0/3); на карте для одной пары (хост, провайдер) рисуется один линк — выбирается интерфейс с items Zabbix, при равных условиях логический unit (например ae5.0), иначе физический. Цвет линка определяется агрегатными триггерами провайдера (хосты `Uplinks {Provider}`): 90%/100% от `_provider_limits` в `commit_rates.json`.
 
 **Карта Zabbix**
 
@@ -347,7 +347,7 @@ python zabbix_map.py --generate-description-map -f dry-ssh.json > description_to
 
 Отредактируйте JSON: для одного провайдера задайте одно и то же значение (напр. `"Uplink: Beeline 5": "Beeline"`, `"Beeline 5": "Beeline"`, `"Beeline": "Beeline"`). Если файл уже существует, в вывод попадёт его содержимое плюс недостающие description.
 
-**Переменные:** `ZABBIX_URL` (базовый URL, например `https://zabbix.example.com`; скрипт сам дописывает `/api_jsonrpc.php` при необходимости), `ZABBIX_TOKEN` (Bearer-токен, Zabbix 7). Имя карты: `[test] uplinks`. Иконки элементов (хосты, провайдеры) задаются в Администрирование → Изображения; при смене окружения при необходимости поправьте константы в скрипте.
+**Переменные:** `ZABBIX_URL` (базовый URL, например `https://zabbix.example.com`; скрипт сам дописывает `/api_jsonrpc.php` при необходимости), `ZABBIX_TOKEN` (Bearer-токен, Zabbix 7). Имя карты задаётся в `uplinks_config.MAP_NAME`. Иконки элементов (хосты, провайдеры) настраиваются в Zabbix, соответствующие ID можно задать в конфиге.
 
 | Ключ | Описание |
 |------|----------|
@@ -453,15 +453,13 @@ python netbox_create_circuits.py --location ALA
 
 ---
 
-### 7. `zabbix_sync_commit_rate.py` — макросы и триггеры 90%/100% в Zabbix из NetBox
+### 7. `zabbix_sync_commit_rate.py` — макросы и (по флагу) триггеры 90%/100% в Zabbix из NetBox
 
 Для каждого интерфейса в NetBox, подключённого кабелем к circuit termination (сторона A), скрипт берёт **commit rate** контура (Kbps), переводит в bps и создаёт на хосте два макроса с контекстом по интерфейсу: **{$IF.UTIL.MAX:"Ethernet51/1"}** (порог HIGH, по умолчанию 100%) и **{$IF.UTIL.WARN:"Ethernet51/1"}** (порог WARN, по умолчанию 90%). Значения макросов = commit_rate × (THRESHOLD_PERCENT_* / 100).
 
-Создаёт два простых триггера на интерфейс: при пороге WARN — `max(Bits received, <period>) > {$IF.UTIL.WARN:"<интерфейс>"}` (Warning, на карте линк жёлтый), при пороге HIGH — `max(Bits received, <period>) > {$IF.UTIL.MAX:"<интерфейс>"}` (High, линия порога на дашборде и красный линк на карте). Период и пороги задаются в **`uplinks_config.py`** (`TRIGGER_FUNCTION_PERIOD` — по умолчанию 15m; `THRESHOLD_PERCENT_WARN`, `THRESHOLD_PERCENT_HIGH`). Карта (`zabbix_map.py --update-map`) привязывает эти триггеры к линкам.
+Опционально (по флагу) создаёт два простых триггера на интерфейс: при пороге WARN — `max(Bits received, <period>) > {$IF.UTIL.WARN:"<интерфейс>"}` (Warning), при пороге HIGH — `max(Bits received, <period>) > {$IF.UTIL.MAX:"<интерфейс>"}` (High). Период и пороги задаются в **`uplinks_config.py`** (`TRIGGER_FUNCTION_PERIOD` — по умолчанию 15m; `THRESHOLD_PERCENT_WARN`, `THRESHOLD_PERCENT_HIGH`).
 
 Старые item'ы **net.if.threshold["..."]**, если остались, удаляются.
-
-**В своих триггерах** используйте тот же формат макросов: **{$IF.UTIL.MAX:"Ethernet51/1"}**, **{$IF.UTIL.WARN:"Ethernet51/1"}**.
 
 **Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`, `ZABBIX_URL`, `ZABBIX_TOKEN`.
 
@@ -470,6 +468,8 @@ python netbox_create_circuits.py --location ALA
 | `-d`, `--dry-ssh` | Путь к dry-ssh.json: для кабеля на физическом интерфейсе (напр. et-0/0/3) макрос будет по логическому имени (ae5.0, ae3.0), как в Zabbix |
 | `--dry-run` | Не менять макросы в Zabbix, только вывести что бы установили |
 | `--debug` | Отладочный вывод (статистика по NetBox, подстановка логических имён) |
+| `--create-link-triggers` | Создавать/обновлять простые триггеры 90%/100% на интерфейсы (по умолчанию не создаются) |
+| `--delete-link-triggers` | Удалить существующие простые триггеры 90%/100% (scripts:automatization) для uplink-интерфейсов и выйти |
 
 Учитываются только пары, где в NetBox есть **кабель** от circuit termination (A) к интерфейсу; **обязателен фильтр по тегу** `NETBOX_TAG`. Для устройств, где в NetBox кабель на физике (MX204: et-0/0/3), а в Zabbix — логические ae5.0/ae3.0, укажите `-d dry-ssh.json`, тогда макрос будет {$IF.UTIL.MAX:"ae5.0"} и т.д.
 
@@ -483,9 +483,9 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json --debug
 
 ### 8. `zabbix_provider_aggregate.py` — агрегат по провайдеру в Zabbix
 
-Для схем, где у провайдера общий лимит по всем линкам (например 2,5 Гбит/с на локацию, но не более 10 Гбит/с в сумме), в **commit_rates.json** задаётся служебный ключ **`_provider_limits`**: `{ "Cogent": 10, "Hurricane": 5 }` (Гбит/с). Скрипт создаёт в Zabbix для каждого такого провайдера хост **«Uplinks {Provider}»** (например **Uplinks Cogent**) в группе из `uplinks_config.UPLINKS_AGGREGATE_GROUP`, с calculated items (сумма Bits received и Bits sent по всем линкам провайдера) и триггерами 90%/100% от лимита. При полном прогоне (**run_uplinks_full.py**) шаг 7 — агрегат по провайдеру, шаг 8 — дашборды (обновляются после агрегата, чтобы на дашборде по провайдерам отображались виджеты суммарного трафика). Если `_provider_limits` нет или пуст — шаг 7 ничего не делает.
+Для схем, где у провайдера общий лимит по всем линкам (например 2,5 Гбит/с на локацию, но не более 10 Гбит/с в сумме), в **commit_rates.json** задаётся служебный ключ **`_provider_limits`**: `{ "Cogent": 10, "Hurricane": 5 }` (Гбит/с). Скрипт по провайдерам из NetBox (тег `NETBOX_AUTOMATION_TAG`, по умолчанию `automatization`) и фактическим линкам в `dry-ssh.json` создаёт в Zabbix хосты **«Uplinks {Provider}»** в группе из `uplinks_config.UPLINKS_AGGREGATE_GROUP`, с calculated items (сумма Bits received и Bits sent по всем линкам провайдера). Для провайдеров, у которых задан лимит в `_provider_limits`, создаются триггеры: 90% лимита (Information) и 100% лимита (Warning). Эти же триггеры используются картой (`zabbix_map.py`) и сводным дашбордом по провайдерам (`zabbix_uplinks_dashboard.py`) для виджетов суммарного трафика и цвета линков.
 
-**Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
+**Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`, `NETBOX_URL`, `NETBOX_TOKEN`.
 
 | Ключ | Описание |
 |------|----------|
