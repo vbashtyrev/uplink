@@ -100,6 +100,7 @@ def main():
 
     existing = {}
     provider_limits = None  # _provider_limits из commit_rates.json (агрегатный лимит по провайдеру, Гбит/с)
+    provider_sla = None     # _provider_sla из commit_rates.json (целевой SLA в %, один для всех)
     if not args.no_merge and os.path.isfile(args.output):
         existing_raw = load_json(args.output)
         if isinstance(existing_raw, tuple):
@@ -109,6 +110,9 @@ def main():
             provider_limits = existing_raw.get("_provider_limits")
             if not isinstance(provider_limits, dict):
                 provider_limits = None
+            provider_sla = existing_raw.get("_provider_sla")
+            if not isinstance(provider_sla, (int, float)):
+                provider_sla = None
         existing = {k: v for k, v in (existing_raw or {}).items() if not k.startswith("_")}
 
     cid_map = build_circuit_id_map(data, desc_to_provider, existing)
@@ -154,7 +158,9 @@ def main():
             out[dev_name] = dev_out
 
     if provider_limits is not None:
-        out["_provider_limits"] = provider_limits  # сохранить: лимит по провайдеру в целом (Гбит/с), для Zabbix aggregate
+        out["_provider_limits"] = provider_limits  # лимит по провайдеру в целом (Гбит/с), для Zabbix aggregate
+    if provider_sla is not None:
+        out["_provider_sla"] = provider_sla  # целевой SLA в %, один для всех провайдеров
 
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
