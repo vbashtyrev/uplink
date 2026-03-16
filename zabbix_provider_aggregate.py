@@ -190,7 +190,7 @@ def _create_or_update_calculated_item(url, token, hostid, key, name, formula, de
     return result["itemids"][0], None
 
 
-def _ensure_triggers(url, token, hostid, host_technical, itemid_in, limit_bps, debug=False):
+def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, limit_bps, debug=False):
     """Создать или обновить триггеры 90% и 100% для агрегатного линка.
 
     host_technical — техническое имя хоста (host), без недопустимых символов.
@@ -198,10 +198,16 @@ def _ensure_triggers(url, token, hostid, host_technical, itemid_in, limit_bps, d
     warn_bps = int(limit_bps * THRESHOLD_PERCENT_WARN / 100)
     desc_warn = "Provider aggregate traffic >= {}% of limit ({} Gbps)".format(THRESHOLD_PERCENT_WARN, limit_bps / 1e9)
     desc_high = "Provider aggregate traffic >= 100% of limit ({} Gbps)".format(limit_bps / 1e9)
-    expr_warn = "max(/{}/{},{})>{}".format(host_technical, CALCULATED_ITEM_KEY_IN, TRIGGER_FUNCTION_PERIOD, warn_bps)
-    expr_high = "max(/{}/{},{})>{}".format(host_technical, CALCULATED_ITEM_KEY_IN, TRIGGER_FUNCTION_PERIOD, int(limit_bps))
+    expr_warn = "max(/{}/{},{})>{}".format(
+        host_technical, CALCULATED_ITEM_KEY_IN, TRIGGER_FUNCTION_PERIOD, warn_bps
+    )
+    expr_high = "max(/{}/{},{})>{}".format(
+        host_technical, CALCULATED_ITEM_KEY_IN, TRIGGER_FUNCTION_PERIOD, int(limit_bps)
+    )
 
     tags = [{"tag": TRIGGER_TAG_NAME, "value": TRIGGER_TAG_VALUE}]
+    if provider:
+        tags.append({"tag": "provider", "value": provider})
     # Поиск существующих по описанию
     res, err = zabbix_request(url, token, "trigger.get", {
         "output": ["triggerid", "description"],
@@ -317,7 +323,9 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
             return None, "{} item out: {}".format(provider, err)
         if limit_bps is not None:
             technical_host = _sanitize_provider_name(host_name)
-            err = _ensure_triggers(url, token, hostid, technical_host, None, limit_bps, debug=debug)
+            err = _ensure_triggers(
+                url, token, hostid, technical_host, provider, None, limit_bps, debug=debug
+            )
             if err:
                 return None, "{} triggers: {}".format(provider, err)
         done.append((provider, host_name))

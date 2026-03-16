@@ -240,7 +240,27 @@ python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
 
 ---
 
-### 9. Grafana Node graph (опционально)
+### 9. SLA по провайдерам (сервисы и SLA‑объекты Zabbix)
+
+В `commit_rates.json` дополнительно задайте целевой SLA (один на всех провайдеров), например:
+
+```json
+"_provider_sla": 99.95
+```
+
+Скрипт создаст/обновит:
+- сервисы `Uplinks {Provider}` с problem‑tag `provider={Provider}` (цепляются к агрегатным триггерам провайдера);
+- отдельный SLA‑объект `Uplinks {Provider} SLA` для каждого провайдера (по сервис‑тегу `provider={Provider}`).
+
+```bash
+python zabbix_provider_services.py -f commit_rates.json --parent-service "Uplinks providers"
+```
+
+После этого вкладка SLA в Zabbix покажет по каждому провайдеру фактический SLI против `_provider_sla`.
+
+---
+
+### 10. Grafana Node graph (опционально)
 
 Только JSON для панели:
 
@@ -262,7 +282,7 @@ python grafana_uplinks_graph.py -f dry-ssh.json --zabbix --grafana-api
 
 ---
 
-### 10. Очистка артефактов в Zabbix (откат)
+### 11. Очистка артефактов в Zabbix (откат)
 
 Сначала посмотреть, что будет удалено:
 
@@ -284,7 +304,7 @@ python zabbix_uplinks_cleanup.py --dashboard-name "Uplinks" --dashboard-by-locat
 
 ---
 
-### 11. Откат в NetBox (netbox_uplinks_cleanup.py)
+### 12. Откат в NetBox (netbox_uplinks_cleanup.py)
 
 Удаляет объекты, созданные **netbox_create_circuits.py** и помеченные тегом из `uplinks_config.NETBOX_AUTOMATION_TAG`: кабели, circuit terminations, контуры; при возможности — типы контуров и провайдеры (только если у них не осталось контуров). Интерфейсы и устройства не трогает.
 

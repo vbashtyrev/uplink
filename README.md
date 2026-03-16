@@ -19,10 +19,11 @@
 | `zabbix_map.py` | Таблица uplink'ов по dry-ssh; карта Zabbix (хосты, провайдеры, линки с items Bits in/out). Цвет линки определяется агрегатными триггерами провайдера (хосты «Uplinks {Provider}»), 90%/100% общего лимита по провайдеру. |
 | `zabbix_uplinks_dashboard.py` | Создание/обновление дашборда Zabbix с виджетами-графиками по каждому uplink (Bits received/sent). |
 | `grafana_uplinks_graph.py` | Генерация JSON для панели Node graph в Grafana (узлы — хосты и провайдеры, рёбра — линки); опционально создание дашборда через Grafana API. |
-| `generate_commit_rates.py` | Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). |
+| `generate_commit_rates.py` | Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). При мерже сохраняет `_provider_limits` и глобальный `_provider_sla` (общий таргет SLA для провайдеров). |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по `commit_rates.json`: провайдер, тип «Internet», контур, Termination A на site, кабель до интерфейса. |
-| `zabbix_sync_commit_rate.py` | Синхронизация макросов **{$IF.UTIL.MAX}** и **{$IF.UTIL.WARN}** в Zabbix из NetBox; создаёт триггеры по порогам WARN/HIGH (жёлтый/красный линк на карте, линия порога на дашборде). Пороги задаются в `uplinks_config.py` (по умолчанию 90% и 100%). |
+| `zabbix_sync_commit_rate.py` | Синхронизация макросов **{$IF.UTIL.MAX}** и **{$IF.UTIL.WARN}** в Zabbix из NetBox; по отдельному флагу может создавать/удалять простые per-link триггеры 90%/100%. По умолчанию опираемся на триггеры шаблонов, а карта/дашборды смотрят на агрегаты провайдера. Пороги задаются в `uplinks_config.py` (по умолчанию 90% и 100%). |
 | `zabbix_uplinks_cleanup.py` | Очистка артефактов автоматизации в Zabbix: триггеры 90%/100%, старые item'ы порога, карта uplinks, дашборды uplinks (тег `scripts:automatization`). |
+| `zabbix_provider_services.py` | Создание/обновление Zabbix‑сервисов `Uplinks {Provider}` и per‑provider SLA: для каждого провайдера из `_provider_limits` создаётся сервис c тегом `provider={name}` и SLA `Uplinks {Provider} SLA` с целевым значением из `_provider_sla`. |
 | `netbox_uplinks_cleanup.py` | Откат автоматизации в NetBox: кабели, circuit terminations, контуры, при возможности — типы контуров и провайдеры (по тегу из `uplinks_config.NETBOX_AUTOMATION_TAG`). |
 
 ---
