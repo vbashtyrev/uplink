@@ -20,7 +20,16 @@ MAP_ICON_CLOUD = 4    # провайдеры, напр. Cloud
 DASHBOARD_NAME = "Uplinks"
 # Название дашборда «по локациям» (вкладки = локации)
 DASHBOARD_NAME_BY_LOCATION = "Uplinks (по локациям)"
+# Сводный дашборд по провайдерам с несколькими линками (вкладка = провайдер)
+DASHBOARD_NAME_BY_PROVIDER = "Uplinks по провайдерам"
+# Провайдеры для сводного дашборда: только те, у кого >1 линк (Cogent, HE и др.)
+PROVIDERS_FOR_SUMMARY = ["Cogent", "Hurricane"]
 
+# Агрегат по провайдеру (суммарный трафик, лимит из commit_rates.json _provider_limits)
+# Имя хоста в Zabbix: «Uplinks {Provider}» (например Uplinks Cogent)
+UPLINKS_AGGREGATE_HOST_PREFIX = "Uplinks "
+# Группа хостов в Zabbix для хостов агрегата (должна существовать)
+UPLINKS_AGGREGATE_GROUP = "Uplinks"
 
 # --- Пороги по загрузке (триггеры и макросы) ---
 # Проценты от commit rate: при достижении WARN — жёлтый линк на карте, при HIGH — красный и линия порога на дашборде

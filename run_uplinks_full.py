@@ -352,37 +352,54 @@ def main():
             log("  {}".format(line))
     log("")
 
-    # 7. Zabbix dashboard
-    log("Шаг 7: Zabbix — дашборды (zabbix_uplinks_dashboard.py -f {}) ...".format(dry_ssh_path))
+    # 7. Zabbix — агрегат по провайдеру (хосты Uplinks {Provider}, calculated items, триггеры по _provider_limits)
+    log("Шаг 7: Zabbix — агрегат по провайдеру (zabbix_provider_aggregate.py -f {} -d {}) ...".format(commit_rates_path, dry_ssh_path))
+    ok, out, err = run_cmd(
+        [python, "zabbix_provider_aggregate.py", "-f", commit_rates_path, "-d", dry_ssh_path],
+        cwd=SCRIPT_DIR,
+        timeout=timeout,
+    )
+    _append_debug(debug_log_path, "Шаг 7: Zabbix provider aggregate", stdout=out or "", stderr=err or "", ok=ok)
+    step("Шаг 7: Zabbix provider aggregate", ok, err or ("код != 0" if not ok else ""))
+    if not ok and args.stop_on_error:
+        _finish(report_lines, errors, args.report, run_log_path)
+        sys.exit(1)
+    if out:
+        for line in out.splitlines():
+            log("  {}".format(line))
+    log("")
+
+    # 8. Zabbix — дашборды (обновляются после агрегата, чтобы на дашборде по провайдерам были виджеты суммарного трафика)
+    log("Шаг 8: Zabbix — дашборды (zabbix_uplinks_dashboard.py -f {}) ...".format(dry_ssh_path))
     ok, out, err = run_cmd(
         [python, "zabbix_uplinks_dashboard.py", "-f", dry_ssh_path],
         cwd=SCRIPT_DIR,
         timeout=timeout,
     )
-    _append_debug(debug_log_path, "Шаг 7: Zabbix dashboard", stdout=out or "", stderr=err or "", ok=ok)
-    step("Шаг 7: Zabbix dashboard", ok, err or ("код != 0" if not ok else ""))
+    _append_debug(debug_log_path, "Шаг 8: Zabbix dashboard", stdout=out or "", stderr=err or "", ok=ok)
+    step("Шаг 8: Zabbix dashboard", ok, err or ("код != 0" if not ok else ""))
     if not ok and args.stop_on_error:
         _finish(report_lines, errors, args.report, run_log_path)
         sys.exit(1)
     log("")
 
-    # 8. Grafana (опционально)
+    # 9. Grafana (опционально)
     if args.grafana:
-        log("Шаг 8: Grafana — Node graph (grafana_uplinks_graph.py -f {} --grafana-api) ...".format(dry_ssh_path))
+        log("Шаг 9: Grafana — Node graph (grafana_uplinks_graph.py -f {} --grafana-api) ...".format(dry_ssh_path))
         ok, out, err = run_cmd(
             [python, "grafana_uplinks_graph.py", "-f", dry_ssh_path, "--grafana-api"],
             cwd=SCRIPT_DIR,
             timeout=timeout,
         )
-        _append_debug(debug_log_path, "Шаг 8: Grafana", stdout=out or "", stderr=err or "", ok=ok)
-        step("Шаг 8: Grafana", ok, err or ("код != 0" if not ok else ""))
+        _append_debug(debug_log_path, "Шаг 9: Grafana", stdout=out or "", stderr=err or "", ok=ok)
+        step("Шаг 9: Grafana", ok, err or ("код != 0" if not ok else ""))
         if not ok and args.stop_on_error:
             _finish(report_lines, errors, args.report, run_log_path)
             sys.exit(1)
         log("")
     else:
-        _append_debug(debug_log_path, "Шаг 8: Grafana", skip_reason="не указан --grafana")
-        log("[SKIP] Шаг 8: Grafana (запустите с --grafana при необходимости)")
+        _append_debug(debug_log_path, "Шаг 9: Grafana", skip_reason="не указан --grafana")
+        log("[SKIP] Шаг 9: Grafana (запустите с --grafana при необходимости)")
         report_lines.append("")
 
     # Итог

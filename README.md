@@ -406,6 +406,9 @@ python zabbix_map.py --generate-description-map -f dry-ssh.json > description_to
 | `-f`, `--file` | Путь к dry-ssh.json (по умолчанию `dry-ssh.json`) |
 | `-m`, `--description-map` | Файл сопоставления description → имя ISP |
 | `--dashboard-name` | Название дашборда в Zabbix (по умолчанию `Uplinks`) |
+| `--dashboard-by-location` | Дашборд по локациям (вкладка = локация); пустая строка — не создавать |
+| `--dashboard-by-provider` | Сводный дашборд по провайдерам с >1 линком (вкладка = Cogent, HE и др.): стеки по линкам и при наличии хостов «Uplinks {Provider}» — виджеты суммарного трафика (aggregate); пустая строка — не создавать |
+| `--providers` | Список имён провайдеров для сводного дашборда (по умолчанию: `PROVIDERS_FOR_SUMMARY` + провайдеры из NetBox с тегом `automatization`, если заданы `NETBOX_URL` и `NETBOX_TOKEN`) |
 | `--no-cache` | Не использовать кэш Zabbix |
 | `--no-show-threshold` | Не рисовать пороги триггеров (линию порога) на графиках |
 | `--debug` | Отладочный вывод |
@@ -420,6 +423,9 @@ python zabbix_uplinks_dashboard.py -f dry-ssh.json
 
 # Другое имя дашборда
 python zabbix_uplinks_dashboard.py -f dry-ssh.json --dashboard-name "Uplinks traffic"
+
+# Сводный дашборд: по умолчанию провайдеры из конфига + из NetBox (тег automatization); явно задать список:
+python zabbix_uplinks_dashboard.py -f dry-ssh.json --providers Cogent Hurricane
 ```
 
 ---
@@ -475,9 +481,29 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json --debug
 
 ---
 
-### 8. `zabbix_uplinks_cleanup.py` — очистка артефактов Zabbix
+### 8. `zabbix_provider_aggregate.py` — агрегат по провайдеру в Zabbix
 
-Удаляет в Zabbix объекты, созданные скриптами uplinks: триггеры 90%/100% (с тегом `scripts:automatization` или по описанию), старые item'ы **net.if.threshold["..."]**, карту **[test] uplinks**, дашборды **Uplinks** и **Uplinks (по локациям)** (имена задаются ключами). Макросы {$IF.UTIL.MAX}, {$IF.UTIL.WARN} не удаляются.
+Для схем, где у провайдера общий лимит по всем линкам (например 2,5 Гбит/с на локацию, но не более 10 Гбит/с в сумме), в **commit_rates.json** задаётся служебный ключ **`_provider_limits`**: `{ "Cogent": 10, "Hurricane": 5 }` (Гбит/с). Скрипт создаёт в Zabbix для каждого такого провайдера хост **«Uplinks {Provider}»** (например **Uplinks Cogent**) в группе из `uplinks_config.UPLINKS_AGGREGATE_GROUP`, с calculated items (сумма Bits received и Bits sent по всем линкам провайдера) и триггерами 90%/100% от лимита. При полном прогоне (**run_uplinks_full.py**) шаг 7 — агрегат по провайдеру, шаг 8 — дашборды (обновляются после агрегата, чтобы на дашборде по провайдерам отображались виджеты суммарного трафика). Если `_provider_limits` нет или пуст — шаг 7 ничего не делает.
+
+**Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
+
+| Ключ | Описание |
+|------|----------|
+| `-f`, `--commit-rates` | Путь к commit_rates.json (по умолчанию `commit_rates.json`) |
+| `-d`, `--dry-ssh` | Путь к dry-ssh.json (для списка линков и кэша Zabbix) |
+| `-m`, `--description-map` | Файл description_to_name.json |
+| `--no-cache` | Не использовать кэш Zabbix |
+| `--debug` | Отладочный вывод |
+
+```bash
+python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
+```
+
+---
+
+### 9. `zabbix_uplinks_cleanup.py` — очистка артефактов Zabbix
+
+Удаляет в Zabbix объекты, созданные скриптами uplinks: триггеры 90%/100% (с тегом `scripts:automatization` или по описанию), старые item'ы **net.if.threshold["..."]**, карту **[test] uplinks**, дашборды **Uplinks**, **Uplinks (по локациям)** и **Uplinks по провайдерам** (имена задаются ключами). Макросы {$IF.UTIL.MAX}, {$IF.UTIL.WARN} не удаляются.
 
 **Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
 
@@ -485,6 +511,7 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json --debug
 |------|----------|
 | `--dashboard-name NAME` | Имя основного дашборда (по умолчанию `Uplinks`) |
 | `--dashboard-by-location NAME` | Имя дашборда по локациям (по умолчанию `Uplinks (по локациям)`); пустая строка — не удалять |
+| `--dashboard-by-provider NAME` | Имя сводного дашборда по провайдерам (по умолчанию `Uplinks по провайдерам`); пустая строка — не удалять |
 | `--dry-run` | Показать, что будет удалено, без изменений в Zabbix |
 | `--debug` | Отладочный вывод запросов к API |
 
@@ -528,6 +555,7 @@ python netbox_uplinks_cleanup.py
 | `generate_commit_rates.py` | Генерация commit_rates.json по всем линкам из dry-ssh.json (провайдер, circuit_id по локации, commit_rate_gbps) |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по commit_rates.json (провайдер, тип, circuit, Termination A + cable к интерфейсу; отчёт в конце) |
 | `zabbix_sync_commit_rate.py` | Синхронизация макросов {$IF.UTIL.MAX} и {$IF.UTIL.WARN} (90%) в Zabbix из NetBox; триггеры 90%/100% для карты и линии порога на дашборде, удаление старых item'ов порога |
+| `zabbix_provider_aggregate.py` | Хосты «Uplinks {Provider}» в Zabbix: calculated items (сумма Bits in/out по всем линкам провайдера), триггеры по лимиту из `commit_rates.json` (_provider_limits). |
 | `zabbix_uplinks_cleanup.py` | Очистка артефактов в Zabbix: триггеры 90%/100%, item'ы порога, карта uplinks, дашборды uplinks |
 | `netbox_uplinks_cleanup.py` | Откат в NetBox: кабели, terminations, контуры (и при возможности типы/провайдеры) по тегу автоматизации |
 | `uplinks_config.py` | **Настраиваемые** названия и значения для Zabbix и NetBox: имя карты, дашбордов, тег триггеров Zabbix и тег NetBox для circuits (`scripts`/`automatization`), описания триггеров, макросы, период триггера (`TRIGGER_FUNCTION_PERIOD`), иконки карты, цвета линков. Меняйте под своё окружение. |
@@ -538,7 +566,7 @@ python netbox_uplinks_cleanup.py
 ---
 
 **Формат `commit_rates.json`**  
-Ключ — имя устройства, значение — объект «имя интерфейса → { `provider`, `circuit_id`, `commit_rate_gbps` }». `circuit_id` — уникальный идентификатор контура (Unique circuit ID в NetBox). `commit_rate_gbps` — оплаченная скорость в **Гбит/с** (в NetBox Circuit Commit rate хранится в Kbps: умножить на 1 000 000). Провайдер — короткое имя. Ключи с префиксом `_` игнорируются при чтении. Файл не коммитится; пример структуры — `commit_rates.json.example` (скопировать в `commit_rates.json`).
+Ключ — имя устройства, значение — объект «имя интерфейса → { `provider`, `circuit_id`, `commit_rate_gbps` }». `circuit_id` — уникальный идентификатор контура (Unique circuit ID в NetBox). `commit_rate_gbps` — оплаченная скорость в **Гбит/с** (в NetBox Circuit Commit rate хранится в Kbps: умножить на 1 000 000). Провайдер — короткое имя. Ключи с префиксом `_` при чтении линков игнорируются; служебный ключ **`_provider_limits`** задаёт **агрегатный лимит по провайдеру** (Гбит/с) для мониторинга в Zabbix: `"_provider_limits": { "Cogent": 10, "Hurricane": 5 }` — сумма трафика по всем линкам провайдера не должна превышать указанное значение. При генерации/merge `generate_commit_rates.py` сохраняет существующий `_provider_limits`. Файл не коммитится; пример структуры — `commit_rates.json.example` (скопировать в `commit_rates.json`).
 
 **Генерация по dry-ssh**  
 Скрипт `generate_commit_rates.py` по всем линкам из `dry-ssh.json` собирает записи в `commit_rates.json`. Провайдер из `description_to_name.json`; `circuit_id` в формате провайдер-локация-N; для новых пар `commit_rate_gbps` — null (заполнить вручную, в Гбит/с). При merge старый ключ `commit_rate_kbps` конвертируется в `commit_rate_gbps` (значения &lt; 1000 считаются уже Гбит/с). Пример: `cp commit_rates.json.example commit_rates.json` затем `python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json`.

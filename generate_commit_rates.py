@@ -103,13 +103,17 @@ def main():
         sys.exit(1)
 
     existing = {}
+    provider_limits = None  # _provider_limits из commit_rates.json (агрегатный лимит по провайдеру, Гбит/с)
     if not args.no_merge and os.path.isfile(args.output):
-        existing = load_json(args.output)
-        if isinstance(existing, tuple):
-            print("Ошибка в {}: {}".format(args.output, existing[1]), file=sys.stderr)
+        existing_raw = load_json(args.output)
+        if isinstance(existing_raw, tuple):
+            print("Ошибка в {}: {}".format(args.output, existing_raw[1]), file=sys.stderr)
             sys.exit(1)
-        # Убрать служебные ключи
-        existing = {k: v for k, v in existing.items() if not k.startswith("_")}
+        if isinstance(existing_raw, dict):
+            provider_limits = existing_raw.get("_provider_limits")
+            if not isinstance(provider_limits, dict):
+                provider_limits = None
+        existing = {k: v for k, v in (existing_raw or {}).items() if not k.startswith("_")}
 
     cid_map = build_circuit_id_map(data, desc_to_provider, existing)
     out = {"_comment": "Оплаченная скорость (commit_rate_gbps, Гбит/с), провайдер и Unique circuit ID. В NetBox Circuit Commit rate хранится в Kbps (умножить на 1000000)."}
@@ -152,6 +156,9 @@ def main():
                 }
         if dev_out:
             out[dev_name] = dev_out
+
+    if provider_limits is not None:
+        out["_provider_limits"] = provider_limits  # сохранить: лимит по провайдеру в целом (Гбит/с), для Zabbix aggregate
 
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)

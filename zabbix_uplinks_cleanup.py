@@ -4,7 +4,7 @@
 - простые триггеры 90% / 100%, созданные zabbix_sync_commit_rate.py;
 - старые item'ы порога net.if.threshold["..."];
 - карта uplinks ([test] uplinks);
-- дашборды uplinks (основной и «по локациям») по умолчанию.
+- дашборды uplinks (основной, «по локациям», «по провайдерам») по умолчанию.
 
 По возможности элементы помечаются тегом Zabbix (trigger tags): scripts=automatization.
 Скрипт удаляет только объекты, созданные автоматизацией, и не трогает хосты, items трафика и макросы commit rate.
@@ -24,6 +24,7 @@ from zabbix_map import (
 from uplinks_config import (
     DASHBOARD_NAME,
     DASHBOARD_NAME_BY_LOCATION,
+    DASHBOARD_NAME_BY_PROVIDER,
     MAP_NAME,
     THRESHOLD_ITEM_KEY,
     TRIGGER_DESC_90_SUFFIX,
@@ -206,6 +207,11 @@ def main():
         help="Имя дашборда по локациям (пустая строка — не трогать)",
     )
     parser.add_argument(
+        "--dashboard-by-provider",
+        default=DASHBOARD_NAME_BY_PROVIDER,
+        help="Имя сводного дашборда по провайдерам (пустая строка — не трогать)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Только показать, что будет удалено (без изменений в Zabbix)",
@@ -228,6 +234,8 @@ def main():
     dash_names = {args.dashboard_name}
     if args.dashboard_by_location.strip():
         dash_names.add(args.dashboard_by_location.strip())
+    if args.dashboard_by_provider.strip():
+        dash_names.add(args.dashboard_by_provider.strip())
     total_dash = cleanup_dashboards(
         url, token, dash_names, dry_run=args.dry_run, debug=args.debug
     )

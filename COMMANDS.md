@@ -199,11 +199,13 @@ python zabbix_map.py -f dry-ssh.json --zabbix --update-map --no-cache
 
 ### 7. Дашборды Zabbix
 
-Основной дашборд и дашборд по локациям:
+Основной дашборд, по локациям и сводный по провайдерам (Cogent, HE и др. с >1 линком):
 
 ```bash
 python zabbix_uplinks_dashboard.py -f dry-ssh.json
 ```
+
+Сводный дашборд по провайдерам создаётся с вкладками по каждому провайдеру из списка: `PROVIDERS_FOR_SUMMARY` + провайдеры из NetBox с тегом `automatization` (если заданы `NETBOX_URL`, `NETBOX_TOKEN`). У провайдера должно быть больше одного линка.
 
 Без линий порога на графиках, с другими именами дашбордов:
 
@@ -220,7 +222,25 @@ python zabbix_uplinks_dashboard.py -f dry-ssh.json --no-cache
 
 ---
 
-### 8. Grafana Node graph (опционально)
+### 8. Агрегат по провайдеру (хосты Uplinks {Provider})
+
+В **commit_rates.json** добавьте при необходимости `_provider_limits` (Гбит/с по провайдеру в сумме), например:
+
+```json
+"_provider_limits": { "Cogent": 10, "Hurricane": 5 }
+```
+
+Затем создайте/обновите хосты и триггеры в Zabbix:
+
+```bash
+python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
+```
+
+При полном прогоне **run_uplinks_full.py** этот шаг выполняется автоматически (шаг 8).
+
+---
+
+### 9. Grafana Node graph (опционально)
 
 Только JSON для панели:
 
@@ -242,7 +262,7 @@ python grafana_uplinks_graph.py -f dry-ssh.json --zabbix --grafana-api
 
 ---
 
-### 9. Очистка артефактов в Zabbix (откат)
+### 10. Очистка артефактов в Zabbix (откат)
 
 Сначала посмотреть, что будет удалено:
 
@@ -259,12 +279,12 @@ python zabbix_uplinks_cleanup.py
 С другими именами дашбордов (как в uplinks_config):
 
 ```bash
-python zabbix_uplinks_cleanup.py --dashboard-name "Uplinks" --dashboard-by-location "Uplinks (по локациям)"
+python zabbix_uplinks_cleanup.py --dashboard-name "Uplinks" --dashboard-by-location "Uplinks (по локациям)" --dashboard-by-provider "Uplinks по провайдерам"
 ```
 
 ---
 
-### 10. Откат в NetBox (netbox_uplinks_cleanup.py)
+### 11. Откат в NetBox (netbox_uplinks_cleanup.py)
 
 Удаляет объекты, созданные **netbox_create_circuits.py** и помеченные тегом из `uplinks_config.NETBOX_AUTOMATION_TAG`: кабели, circuit terminations, контуры; при возможности — типы контуров и провайдеры (только если у них не осталось контуров). Интерфейсы и устройства не трогает.
 
