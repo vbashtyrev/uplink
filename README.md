@@ -22,8 +22,10 @@
 | `generate_commit_rates.py` | Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). При мерже сохраняет `_provider_limits` и глобальный `_provider_sla` (общий таргет SLA для провайдеров). |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по `commit_rates.json`: провайдер, тип «Internet», контур, Termination A на site, кабель до интерфейса. |
 | `zabbix_sync_commit_rate.py` | Синхронизация макросов **{$IF.UTIL.MAX}** и **{$IF.UTIL.WARN}** в Zabbix из NetBox; по отдельному флагу может создавать/удалять простые per-link триггеры 90%/100%. По умолчанию опираемся на триггеры шаблонов, а карта/дашборды смотрят на агрегаты провайдера. Пороги задаются в `uplinks_config.py` (по умолчанию 90% и 100%). |
+| `zabbix_provider_aggregate.py` | Агрегированные хосты `Uplinks {Provider}` в Zabbix: суммарные calculated items Bits in/out по всем линкам провайдера и триггеры 90%/100% лимита из `_provider_limits` (теги `scripts:automatization`, `provider={name}`). Провайдеры берутся из NetBox (тег `automatization`) с fallback на данные линков. |
 | `zabbix_uplinks_cleanup.py` | Очистка артефактов автоматизации в Zabbix: триггеры 90%/100%, старые item'ы порога, карта uplinks, дашборды uplinks (тег `scripts:automatization`). |
 | `zabbix_provider_services.py` | Создание/обновление Zabbix‑сервисов `Uplinks {Provider}` и per‑provider SLA: для каждого провайдера из `_provider_limits` создаётся сервис c тегом `provider={name}` и SLA `Uplinks {Provider} SLA` с целевым значением из `_provider_sla`. |
+| `zabbix_provider_sla.py` | Отчётный скрипт (offline‑SLA): считает SLA по агрегатным триггерам провайдеров на заданном окне времени по истории событий и лимитам из `_provider_limits`/`_provider_sla`, выводит таблицу по каждому провайдеру. |
 | `netbox_uplinks_cleanup.py` | Откат автоматизации в NetBox: кабели, circuit terminations, контуры, при возможности — типы контуров и провайдеры (по тегу из `uplinks_config.NETBOX_AUTOMATION_TAG`). |
 
 ---
