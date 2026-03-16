@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""
-Сбор и отчёт по uplink-интерфейсам (Arista, Juniper). Два режима:
-
-1) Режим отчёта (--report): устройства по тегу из NetBox, таблица NetBox vs SSH
-   (interface + description). Поддержка Juniper и Arista по platform.name.
-
-2) Режим статистики: по умолчанию чтение из файла; с --fetch — опрос по SSH устройств
-   Arista и Juniper (по тегу из NetBox). Для каждого uplink'а собираются поля в едином
-   формате (name, description, bandwidth, mtu и т.д.). Вывод — таблица или JSON.
-
-Переменные: NETBOX_URL, NETBOX_TOKEN, SSH_USERNAME (обязательно при --report и --fetch), SSH_PASSWORD,
-SSH_HOST_SUFFIX, PARALLEL_DEVICES, NETBOX_TAG. Опционально: DEBUG_SSH_JSON=1 (режим отчёта).
-"""
+"""Collect and report uplink interface data (Arista, Juniper) from NetBox and SSH."""
 
 import argparse
 import json
@@ -31,10 +19,7 @@ from uplinks_config import UPLINK_VRF_NAME
 
 
 def _format_ssh_connect_error(host, e):
-    """
-    Детальное описание ошибки при SSH-подключении к host: тип исключения, сообщение, errno.
-    Помогает различать timeout, Network unreachable, refused и т.д.
-    """
+    """Format SSH connection error with exception type and errno."""
     exc_type = type(e).__name__
     msg = (str(e).strip() if e else "") or "(нет сообщения)"
     line = "SSH: ошибка при подключении к {!r}: {} — {}".format(host, exc_type, msg)
@@ -44,7 +29,7 @@ def _format_ssh_connect_error(host, e):
 
 
 def _load_ssh_config():
-    """Загрузить ~/.ssh/config для подстановки HostName/User. Возврат SSHConfig или None."""
+    """Load ~/.ssh/config and return SSHConfig or None."""
     path = os.path.expanduser("~/.ssh/config")
     if not os.path.isfile(path):
         return None
@@ -58,7 +43,7 @@ def _load_ssh_config():
 
 
 def _resolve_ssh_host(ssh_config, device_name, ssh_host, username):
-    """По ~/.ssh/config подставить HostName и User. Возврат (host, user)."""
+    """Resolve final (host, user) using SSH config and defaults."""
     if not ssh_config:
         return ssh_host, username
     for alias in (device_name, ssh_host):
@@ -73,7 +58,7 @@ def _resolve_ssh_host(ssh_config, device_name, ssh_host, username):
 
 
 def extract_json(text):
-    """Извлечь первый валидный JSON из вывода с приглашением и мусором."""
+    """Extract first valid JSON object from noisy CLI output."""
     start = text.find("{")
     if start == -1:
         return None
@@ -92,7 +77,7 @@ def extract_json(text):
 
 
 def _juniper_iface_name_desc(iface_dict):
-    """Из элемента physical-interface или logical-interface вытащить (name, description)."""
+    """Return (name, description) from Junos interface dict."""
     name_list = iface_dict.get("name") or [{}]
     desc_list = iface_dict.get("description") or [{}]
     name = (name_list[0].get("data") or "").strip()
@@ -101,12 +86,12 @@ def _juniper_iface_name_desc(iface_dict):
 
 
 def _juniper_iface_oper_status(iface_dict):
-    """Из элемента physical-interface или logical-interface вытащить oper-status (up/down)."""
+    """Return oper-status (up/down) from Junos interface dict."""
     return _juniper_data(iface_dict.get("oper-status"))
 
 
 def _juniper_data(field):
-    """Из поля Junos (список с dict с ключом data) вытащить строку или число."""
+    """Extract scalar value from Junos field list with `data`."""
     if not field:
         return None
     if isinstance(field, list) and field and isinstance(field[0], dict):
@@ -118,7 +103,7 @@ def _juniper_data(field):
 
 
 def _juniper_speed_to_bps(speed_str):
-    """Junos speed (например 1000mbps, 10gbps) в bps. Возврат int или None."""
+    """Convert Junos speed string (1000mbps, 10gbps, ...) to bps."""
     if not speed_str:
         return None
     s = str(speed_str).strip().lower().replace(" ", "")
@@ -137,7 +122,7 @@ def _juniper_speed_to_bps(speed_str):
 
 
 def _juniper_uplink_is_unit0(name):
-    """True, если интерфейс считаем upstream: физический (без точки) или unit 0 (*.0). Unit не 0 — VLAN, не проверяем."""
+    """Return True for physical or *.0 units (others treated as VLANs)."""
     if not name:
         return False
     if "." not in name:
@@ -146,12 +131,7 @@ def _juniper_uplink_is_unit0(name):
 
 
 def parse_juniper_uplinks(json_data, require_link_up=False):
-    """
-    Из Juniper JSON вытащить интерфейсы с 'Uplink:' в description (physical + logical).
-    Если require_link_up=True — только с oper-status == 'up'.
-    Учитываются только unit 0 (*.0) или физические; unit не 0 (VLAN) пропускаются.
-    Возврат: [(name, desc), ...]
-    """
+    """Return list of (name, description) Junos uplinks with 'Uplink:' in description."""
     out = []
     infos = json_data.get("interface-information") or []
     if isinstance(infos, dict):
@@ -181,13 +161,13 @@ def parse_juniper_uplinks(json_data, require_link_up=False):
 
 
 def _extract_xml_interface_information(text):
-    """Из вывода Junos (display xml) вырезать один блок <interface-information>...</interface-information>."""
+    """Extract first <interface-information>...</interface-information> block from XML output."""
     blocks = _extract_all_xml_interface_information_blocks(text)
     return blocks[0] if blocks else None
 
 
 def _extract_all_xml_interface_information_blocks(text):
-    """Из вывода Junos (display xml) вырезать все блоки <interface-information>...</interface-information>."""
+    """Extract all <interface-information>...</interface-information> blocks from XML output."""
     blocks = []
     start_tag = "<interface-information"
     pos = 0
@@ -216,11 +196,7 @@ def _extract_all_xml_interface_information_blocks(text):
 
 
 def _parse_junos_rpc_reply_and_find_interface_information(xml_text):
-    """
-    Распарсить полный документ <rpc-reply> (чтобы были все xmlns), вернуть список
-    корневых элементов interface-information (каждый — уже распарсенное дерево).
-    Возврат: [elem, ...] или [] при ошибке.
-    """
+    """Parse full <rpc-reply> XML and return list of interface-information elements."""
     start = xml_text.find("<rpc-reply")
     if start == -1:
         return []
@@ -241,7 +217,7 @@ def _parse_junos_rpc_reply_and_find_interface_information(xml_text):
 
 
 def _juniper_xml_elem_text(elem):
-    """Из элемента XML Junos (с вложенным <data> или текстом) вытащить строку."""
+    """Return text value from Junos XML element (including nested <data>)."""
     if elem is None:
         return ""
     for child in elem:
@@ -251,7 +227,7 @@ def _juniper_xml_elem_text(elem):
 
 
 def _juniper_xml_child(elem, local_name):
-    """Найти дочерний элемент по локальному имени тега (без namespace)."""
+    """Find child XML element by local tag name (without namespace)."""
     if elem is None:
         return None
     for c in elem:
