@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Генерация JSON для панели Node graph в Grafana: узлы (хосты, провайдеры) и рёбра (линки).
-Топология и дедупликация — как в zabbix_map. In/Out на рёбрах берутся в Grafana из datasource Zabbix.
-Опционально: создание/обновление дашборда с панелью Node graph через Grafana API.
-"""
+"""Generate data (and optional dashboard) for Grafana Node graph view of uplinks."""
 
 import argparse
 import json
@@ -11,7 +7,6 @@ import os
 import re
 import sys
 
-# Топология и Zabbix — общая логика с картой Zabbix
 from zabbix_map import (
     DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
@@ -27,7 +22,7 @@ from zabbix_map import (
 
 
 def _isp_id(isp):
-    """Уникальный id узла-провайдера для Node graph (без спецсимволов)."""
+    """Return unique provider node id for Node graph."""
     if not isp:
         return "isp_"
     safe = re.sub(r"[^a-zA-Z0-9_-]", "_", isp.strip())
@@ -39,10 +34,7 @@ def _host_id(hostid):
 
 
 def build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name):
-    """
-    Построить список рёбер (дедупликация по host, ISP), как в update_uplinks_map.
-    Возврат: список кортежей (hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out, description).
-    """
+    """Build deduplicated edge list per (host, provider), similar to zabbix_map."""
     edges_raw = []
     for hostname in sorted(devices.keys()):
         hostid = host_id_by_name.get(hostname)
@@ -82,7 +74,7 @@ def build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name):
 
 
 def _csv_escape(val):
-    """Экранировать значение для CSV (кавычки при запятой/переводе/кавычке)."""
+    """Escape value for CSV (quotes, commas, newlines)."""
     s = "" if val is None else str(val)
     if "," in s or "\n" in s or '"' in s:
         return '"' + s.replace('"', '""') + '"'
@@ -90,10 +82,7 @@ def _csv_escape(val):
 
 
 def _graph_to_inline_csv(graph):
-    """
-    Преобразовать graph (nodes, edges) в два CSV-стринга для Infinity inline.
-    В документации Infinity Node graph рабочий пример — именно CSV, не JSON.
-    """
+    """Convert graph (nodes, edges) to two CSV strings for Infinity inline mode."""
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
     # Узлы: id, title (обязательные для Node graph)
@@ -121,17 +110,14 @@ def _graph_to_inline_csv(graph):
 
 
 def _get_grafana_env():
-    """Возврат (base_url, api_key) из GRAFANA_URL и GRAFANA_API_KEY или GRAFANA_TOKEN. URL без завершающего /."""
+    """Return (base_url, api_key) from GRAFANA_URL and GRAFANA_API_KEY/TOKEN."""
     url = os.environ.get("GRAFANA_URL", "").strip().rstrip("/")
     key = os.environ.get("GRAFANA_API_KEY") or os.environ.get("GRAFANA_TOKEN", "")
     return url, (key or "").strip()
 
 
 def _grafana_push_dashboard(grafana_url, api_key, graph, dashboard_uid, dashboard_title, folder_uid, infinity_uid, debug=False):
-    """
-    Создать или обновить дашборд в Grafana с одной панелью Node graph.
-    Данные встраиваются как inline CSV (формат из документации Infinity для Node graph).
-    """
+    """Create or update Grafana dashboard with a single Node graph panel from inline CSV."""
     try:
         import requests
     except ImportError:
@@ -162,7 +148,6 @@ def _grafana_push_dashboard(grafana_url, api_key, graph, dashboard_uid, dashboar
 
     nodes_csv, edges_csv = _graph_to_inline_csv(graph)
     ds_uid = infinity_uid or "infinity"
-    # Infinity Node graph: type csv, source inline, format + явные columns (без них плагин может не отдать фреймы)
     nodes_columns = [
         {"selector": "id", "text": "id", "type": "string"},
         {"selector": "title", "text": "title", "type": "string"},
@@ -239,25 +224,36 @@ def _grafana_push_dashboard(grafana_url, api_key, graph, dashboard_uid, dashboar
 
 
 def main():
-    # Подгрузить .env при наличии (pip install python-dotenv)
     try:
         from dotenv import load_dotenv
         load_dotenv()
     except ImportError:
         pass
     parser = argparse.ArgumentParser(
-        description="JSON для Grafana Node graph: узлы (хосты, провайдеры) и рёбра (линки), данные из Zabbix."
+        description="Build Grafana Node graph data for uplinks (hosts, providers, links) from Zabbix.",
     )
-    parser.add_argument("-f", "--file", default=DEFAULT_INPUT, help="Путь к dry-ssh.json")
-    parser.add_argument("-m", "--description-map", default=DESCRIPTION_MAP_FILE, help="Файл description_to_name.json")
-    parser.add_argument("--zabbix", action="store_true", help="Запросить Zabbix: хосты и items (In/Out в Grafana — из datasource Zabbix)")
-    parser.add_argument("-o", "--output", metavar="FILE", help="Файл для JSON (по умолчанию stdout)")
-    parser.add_argument("--grafana-api", action="store_true", help="Создать/обновить дашборд с Node graph через Grafana API (нужны GRAFANA_URL, GRAFANA_API_KEY)")
-    parser.add_argument("--dashboard-uid", default="uplinks", help="UID дашборда (по умолчанию uplinks)")
-    parser.add_argument("--dashboard-title", default="Uplinks", help="Название дашборда")
-    parser.add_argument("--folder-uid", default="", help="UID папки в Grafana (пусто — общая папка)")
-    parser.add_argument("--infinity-uid", default="", help="UID datasource Infinity (по умолчанию из GRAFANA_INFINITY_UID или infinity)")
-    parser.add_argument("--no-cache", action="store_true", help="Не использовать кэш Zabbix")
+    parser.add_argument("-f", "--file", default=DEFAULT_INPUT, help="Path to dry-ssh.json")
+    parser.add_argument("-m", "--description-map", default=DESCRIPTION_MAP_FILE, help="Path to description_to_name.json")
+    parser.add_argument(
+        "--zabbix",
+        action="store_true",
+        help="Query Zabbix API for hosts/items (In/Out values come from Zabbix datasource in Grafana)",
+    )
+    parser.add_argument("-o", "--output", metavar="FILE", help="Output JSON file (default: stdout)")
+    parser.add_argument(
+        "--grafana-api",
+        action="store_true",
+        help="Create/update Grafana dashboard via API (requires GRAFANA_URL and GRAFANA_API_KEY/TOKEN)",
+    )
+    parser.add_argument("--dashboard-uid", default="uplinks", help="Dashboard UID (default: uplinks)")
+    parser.add_argument("--dashboard-title", default="Uplinks", help="Dashboard title")
+    parser.add_argument("--folder-uid", default="", help="Grafana folder UID (empty = General)")
+    parser.add_argument(
+        "--infinity-uid",
+        default="",
+        help="Infinity datasource UID (default: GRAFANA_INFINITY_UID or 'infinity')",
+    )
+    parser.add_argument("--no-cache", action="store_true", help="Do not use local Zabbix cache file")
     parser.add_argument("--debug", action="store_true", help="Отладочный вывод")
     args = parser.parse_args()
 
