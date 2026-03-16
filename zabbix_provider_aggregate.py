@@ -44,7 +44,8 @@ CALCULATED_ITEM_KEY_IN = "aggregate.bits.in[]"
 CALCULATED_ITEM_KEY_OUT = "aggregate.bits.out[]"
 CALCULATED_ITEM_TYPE = 15
 VALUE_TYPE_NUMERIC = 3  # unsigned
-UNITS_BPS = "Bps"
+# Единицы для агрегатных item'ов: биты в секунду (bps), чтобы ось графиков и пороги были в Gbps.
+UNITS_BPS = "bps"
 
 
 def _build_edges_with_keys(devices, host_id_by_name, items_by_host_iface, desc_to_name):
@@ -135,6 +136,7 @@ def _create_or_update_calculated_item(url, token, hostid, key, name, formula, de
             "itemid": itemid,
             "params": formula,
             "name": name,
+            "units": UNITS_BPS,
             "preprocessing": [],  # без preprocessing (формула уже в bps)
         }, debug=debug)
         return itemid, err
