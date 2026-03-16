@@ -15,6 +15,8 @@ import json
 import os
 import sys
 
+import pynetbox
+
 from zabbix_map import (
     DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
@@ -37,6 +39,7 @@ from uplinks_config import (
     TRIGGER_TAG_VALUE,
     UPLINKS_AGGREGATE_HOST_PREFIX,
     UPLINKS_AGGREGATE_GROUP,
+    NETBOX_AUTOMATION_TAG,
 )
 
 DEFAULT_COMMIT_RATES = "commit_rates.json"
@@ -46,6 +49,36 @@ CALCULATED_ITEM_TYPE = 15
 VALUE_TYPE_NUMERIC = 3  # unsigned
 # Единицы для агрегатных item'ов: биты в секунду (bps), чтобы ось графиков и пороги были в Gbps.
 UNITS_BPS = "bps"
+
+
+def _get_providers_from_netbox(tag, debug=False):
+    """Провайдеры из NetBox с тегом automatization. Возврат списка имён или [] при ошибке/нет доступа."""
+    url = os.environ.get("NETBOX_URL", "").strip()
+    token = os.environ.get("NETBOX_TOKEN", "").strip()
+    if not url or not token:
+        if debug:
+            print(
+                "NetBox: NETBOX_URL/NETBOX_TOKEN не заданы — агрегаты только по провайдерам из данных",
+                file=sys.stderr,
+            )
+        return []
+    try:
+        nb = pynetbox.api(url, token=token)
+        providers = list(nb.circuits.providers.filter(tag=tag))
+        names = [p.name for p in providers if getattr(p, "name", None)]
+        if debug and names:
+            print(
+                "NetBox: провайдеры с тегом {}: {}".format(tag, ", ".join(names)),
+                file=sys.stderr,
+            )
+        return names
+    except Exception as e:
+        if debug:
+            print(
+                "NetBox: не удалось получить провайдеров ({}): {}".format(tag, e),
+                file=sys.stderr,
+            )
+        return []
 
 
 def _build_edges_with_keys(devices, host_id_by_name, items_by_host_iface, desc_to_name):
@@ -79,8 +112,24 @@ def _build_edges_with_keys(devices, host_id_by_name, items_by_host_iface, desc_t
     return [(e[0], e[1], e[2], e[3]) for e in sorted(seen.values(), key=lambda x: (x[0], x[1]))]
 
 
+def _sanitize_provider_name(name):
+    """Преобразовать имя провайдера в безопасное для технического имени хоста (host)."""
+    if not name:
+        return ""
+    # В Zabbix в host запрещены некоторые символы (например, слэш). Заменяем всё, кроме букв, цифр, ._- на пробел.
+    import re
+
+    cleaned = re.sub(r'[^A-Za-z0-9._-]+', ' ', name)
+    cleaned = " ".join(cleaned.split())
+    return cleaned or "provider"
+
+
 def _get_or_create_host(url, token, host_name, group_name, debug=False):
-    """Вернуть hostid хоста host_name в группе group_name; создать хост, если нет."""
+    """Вернуть hostid хоста host_name в группе group_name; создать хост, если нет.
+
+    host_name используется как видимое имя (name) хоста. Техническое имя host
+    берём из _sanitize_provider_name, чтобы избежать недопустимых символов
+    (напр. 'Fiord / PING-WIN' → 'Fiord PING-WIN')."""
     # Найти группу
     grp, err = zabbix_request(url, token, "hostgroup.get", {
         "output": ["groupid"],
@@ -90,9 +139,12 @@ def _get_or_create_host(url, token, host_name, group_name, debug=False):
         return None, "группа не найдена: {}".format(group_name)
     groupid = grp[0]["groupid"]
 
+    # Техническое имя хоста (host) — без недопустимых символов; видимое имя (name) оставляем как есть.
+    technical_host = _sanitize_provider_name(host_name)
+
     res, err = zabbix_request(url, token, "host.get", {
         "output": ["hostid", "host"],
-        "filter": {"host": [host_name]},
+        "filter": {"host": [technical_host]},
     }, debug=debug)
     if err:
         return None, err
@@ -101,7 +153,7 @@ def _get_or_create_host(url, token, host_name, group_name, debug=False):
 
     # Создать хост (interfaces обязательны — создаём dummy agent на 127.0.0.1)
     result, err = zabbix_request(url, token, "host.create", {
-        "host": host_name,
+        "host": technical_host,
         "name": host_name,
         "groups": [{"groupid": groupid}],
         "interfaces": [{"type": 1, "main": 1, "useip": 1, "ip": "127.0.0.1", "dns": "", "port": "10050"}],
@@ -146,13 +198,16 @@ def _create_or_update_calculated_item(url, token, hostid, key, name, formula, de
     return result["itemids"][0], None
 
 
-def _ensure_triggers(url, token, hostid, host_name, itemid_in, limit_bps, debug=False):
-    """Создать или обновить триггеры 90% и 100% для агрегатного линка. itemid_in — itemid calculated (Bits in)."""
+def _ensure_triggers(url, token, hostid, host_technical, itemid_in, limit_bps, debug=False):
+    """Создать или обновить триггеры 90% и 100% для агрегатного линка.
+
+    host_technical — техническое имя хоста (host), без недопустимых символов.
+    itemid_in — itemid calculated (Bits in)."""
     warn_bps = int(limit_bps * THRESHOLD_PERCENT_WARN / 100)
     desc_warn = "Provider aggregate traffic >= {}% of limit ({} Gbps)".format(THRESHOLD_PERCENT_WARN, limit_bps / 1e9)
     desc_high = "Provider aggregate traffic >= 100% of limit ({} Gbps)".format(limit_bps / 1e9)
-    expr_warn = "max(/{}/{},{})>{}".format(host_name, CALCULATED_ITEM_KEY_IN, TRIGGER_FUNCTION_PERIOD, warn_bps)
-    expr_high = "max(/{}/{},{})>{}".format(host_name, CALCULATED_ITEM_KEY_IN, TRIGGER_FUNCTION_PERIOD, int(limit_bps))
+    expr_warn = "max(/{}/{},{})>{}".format(host_technical, CALCULATED_ITEM_KEY_IN, TRIGGER_FUNCTION_PERIOD, warn_bps)
+    expr_high = "max(/{}/{},{})>{}".format(host_technical, CALCULATED_ITEM_KEY_IN, TRIGGER_FUNCTION_PERIOD, int(limit_bps))
 
     tags = [{"tag": TRIGGER_TAG_NAME, "value": TRIGGER_TAG_VALUE}]
     # Поиск существующих по описанию
@@ -189,9 +244,9 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
         return None, "Ошибка авторизации в Zabbix (token): {}".format(err)
     with open(commit_rates_path, "r", encoding="utf-8") as f:
         cr = json.load(f)
-    provider_limits = cr.get("_provider_limits")
-    if not isinstance(provider_limits, dict) or not provider_limits:
-        return [], None  # нет лимитов — не ошибка, просто нечего делать
+    provider_limits = cr.get("_provider_limits") or {}
+    if not isinstance(provider_limits, dict):
+        provider_limits = {}
 
     data, err = load_devices_json(dry_ssh_path)
     if err:
@@ -224,14 +279,23 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
             continue
         by_provider.setdefault(isp, []).append((hostname, key_in, key_out))
 
+    # Кандидаты провайдеров для агрегатов: в первую очередь из NetBox по тегу automatization,
+    # иначе — из данных по линкам (by_provider).
+    providers_from_nb = set(_get_providers_from_netbox(NETBOX_AUTOMATION_TAG, debug=debug))
+
     done = []
-    for provider, limit_gbps in provider_limits.items():
-        if not provider or limit_gbps is None:
+    providers_iter = sorted(providers_from_nb) if providers_from_nb else sorted(by_provider.keys())
+    for provider in providers_iter:
+        if not provider:
             continue
-        try:
-            limit_bps = float(limit_gbps) * 1e9
-        except (TypeError, ValueError):
-            continue
+        # Лимит для триггеров — только если задан в _provider_limits; иначе создаём только host+items.
+        limit_entry = provider_limits.get(provider)
+        limit_bps = None
+        if limit_entry is not None:
+            try:
+                limit_bps = float(limit_entry) * 1e9
+            except (TypeError, ValueError):
+                limit_bps = None
         links = by_provider.get(provider)
         if not links:
             if debug:
@@ -259,9 +323,11 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
         )
         if err:
             return None, "{} item out: {}".format(provider, err)
-        err = _ensure_triggers(url, token, hostid, host_name, None, limit_bps, debug=debug)
-        if err:
-            return None, "{} triggers: {}".format(provider, err)
+        if limit_bps is not None:
+            technical_host = _sanitize_provider_name(host_name)
+            err = _ensure_triggers(url, token, hostid, technical_host, None, limit_bps, debug=debug)
+            if err:
+                return None, "{} triggers: {}".format(provider, err)
         done.append((provider, host_name))
     return done, None
 

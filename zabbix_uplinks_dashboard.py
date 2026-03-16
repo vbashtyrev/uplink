@@ -367,10 +367,10 @@ def create_dashboard_by_provider(
         if not isp:
             continue
         by_provider.setdefault(isp, []).append(edge)
-    # Только провайдеры из списка и с более чем одним линком
+    # Только провайдеры из списка, независимо от числа линков (даже один линк = своя вкладка).
     providers_ok = [
         isp for isp in (p.strip() for p in providers_filter if p and p.strip())
-        if by_provider.get(isp) and len(by_provider[isp]) > 1
+        if by_provider.get(isp)
     ]
     for isp in providers_ok:
         by_provider[isp] = sorted(by_provider[isp], key=lambda e: (e[0], e[2]))
