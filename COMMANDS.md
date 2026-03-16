@@ -341,10 +341,16 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json
 # 6) Карта Zabbix
 python zabbix_map.py -f dry-ssh.json --zabbix --update-map
 
-# 7) Дашборды Zabbix
+# 7) Агрегаты по провайдерам (хосты Uplinks {Provider}, триггеры 90%/100% по _provider_limits)
+python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
+
+# 8) Дашборды Zabbix
 python zabbix_uplinks_dashboard.py -f dry-ssh.json
 
-# 8) Grafana (опционально)
+# 9) Сервисы и SLA по провайдерам
+python zabbix_provider_services.py -f commit_rates.json --parent-service "Uplinks providers"
+
+# 10) Grafana (опционально)
 # python grafana_uplinks_graph.py -f dry-ssh.json --grafana-api
 ```
 
