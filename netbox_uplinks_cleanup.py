@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Очистка артефактов автоматизации uplinks в NetBox:
-- кабели (cables), помеченные тегом из uplinks_config.NETBOX_AUTOMATION_TAG;
-- circuit terminations контуров с этим тегом (сторона A);
-- контуры (circuits) с этим тегом;
-- типы контуров (circuit types) и провайдеры (providers) с этим тегом — только если у них больше нет контуров.
-
-Порядок удаления: кабели → terminations → circuits → circuit types → providers.
-Интерфейсы и устройства не удаляются. Тег автоматизации не удаляется.
-
-Переменные окружения: NETBOX_URL, NETBOX_TOKEN.
-"""
+"""Cleanup NetBox objects created by uplinks automation (by NETBOX_AUTOMATION_TAG)."""
 
 import argparse
 import os
@@ -23,17 +11,17 @@ from uplinks_config import NETBOX_AUTOMATION_TAG as AUTOMATION_TAG
 
 
 def _get_nb():
-    """Подключение к NetBox. Выход с кодом 1 при отсутствии URL/token."""
+    """Connect to NetBox or exit if NETBOX_URL/NETBOX_TOKEN are missing."""
     url = os.environ.get("NETBOX_URL", "").strip().rstrip("/")
     token = os.environ.get("NETBOX_TOKEN", "").strip()
     if not url or not token:
-        print("Задайте NETBOX_URL и NETBOX_TOKEN", file=sys.stderr)
+        print("NETBOX_URL and NETBOX_TOKEN must be set", file=sys.stderr)
         sys.exit(1)
     return pynetbox.api(url, token=token)
 
 
 def _get_automation_tag(nb):
-    """Найти тег по имени AUTOMATION_TAG. Возврат объекта тега или None."""
+    """Return NetBox tag object for AUTOMATION_TAG or None."""
     if not AUTOMATION_TAG:
         return None
     try:
@@ -44,7 +32,7 @@ def _get_automation_tag(nb):
 
 
 def cleanup_cables(nb, tag_slug, dry_run=False, debug=False):
-    """Удалить кабели с тегом tag_slug. Возврат числа удалённых."""
+    """Delete cables with given tag_slug. Return number of deleted records."""
     if not tag_slug:
         return 0
     try:
@@ -68,7 +56,7 @@ def cleanup_cables(nb, tag_slug, dry_run=False, debug=False):
 
 
 def cleanup_circuit_terminations(nb, circuit_ids, dry_run=False, debug=False):
-    """Удалить circuit terminations для контуров из circuit_ids. Возврат числа удалённых."""
+    """Delete circuit terminations for circuits in circuit_ids. Return number deleted."""
     if not circuit_ids:
         return 0
     to_delete = []
@@ -99,7 +87,7 @@ def cleanup_circuit_terminations(nb, circuit_ids, dry_run=False, debug=False):
 
 
 def cleanup_circuits(nb, tag_slug, dry_run=False, debug=False):
-    """Удалить контуры с тегом tag_slug. Возврат (число удалённых, список id контуров до удаления)."""
+    """Delete circuits with given tag_slug. Return (deleted_count, circuit_ids_before)."""
     if not tag_slug:
         return 0, []
     try:
@@ -126,7 +114,7 @@ def cleanup_circuits(nb, tag_slug, dry_run=False, debug=False):
 
 
 def cleanup_circuit_types(nb, tag_slug, dry_run=False, debug=False):
-    """Удалить типы контуров с тегом tag_slug, у которых нет контуров. Возврат числа удалённых."""
+    """Delete circuit types with given tag_slug that have no circuits. Return count."""
     if not tag_slug:
         return 0
     try:
@@ -165,7 +153,7 @@ def cleanup_circuit_types(nb, tag_slug, dry_run=False, debug=False):
 
 
 def cleanup_providers(nb, tag_slug, dry_run=False, debug=False):
-    """Удалить провайдеров с тегом tag_slug, у которых нет контуров. Возврат числа удалённых."""
+    """Delete providers with given tag_slug that have no circuits. Return count."""
     if not tag_slug:
         return 0
     try:
@@ -205,54 +193,53 @@ def cleanup_providers(nb, tag_slug, dry_run=False, debug=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Удалить в NetBox объекты, созданные автоматизацией uplinks (тег из uplinks_config.NETBOX_AUTOMATION_TAG): кабели, circuit terminations, контуры, при возможности — типы контуров и провайдеры."
+        description=(
+            "Delete NetBox objects created by uplinks automation "
+            "(tag from uplinks_config.NETBOX_AUTOMATION_TAG): cables, "
+            "circuit terminations, circuits and, when safe, circuit types and providers."
+        ),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Только показать, что будет удалено (без изменений в NetBox)",
+        help="Show what would be deleted without changing NetBox",
     )
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Отладочный вывод",
+        help="Verbose debug output",
     )
     args = parser.parse_args()
 
     if not AUTOMATION_TAG:
-        print("В uplinks_config не задан NETBOX_AUTOMATION_TAG (или TRIGGER_TAG_VALUE).", file=sys.stderr)
+        print("NETBOX_AUTOMATION_TAG (or TRIGGER_TAG_VALUE) is not set in uplinks_config.", file=sys.stderr)
         sys.exit(1)
 
     nb = _get_nb()
     tag_obj = _get_automation_tag(nb)
     if tag_obj is None:
-        print("Тег '{}' не найден в NetBox. Нечего удалять.".format(AUTOMATION_TAG), file=sys.stderr)
+        print("Tag '{}' not found in NetBox. Nothing to delete.".format(AUTOMATION_TAG), file=sys.stderr)
         sys.exit(0)
     tag_slug = getattr(tag_obj, "slug", None) or AUTOMATION_TAG.lower().replace(" ", "-")[:50]
 
-    # 1. Кабели с тегом
     n_cables = cleanup_cables(nb, tag_slug, dry_run=args.dry_run, debug=args.debug)
 
-    # 2. Список id контуров с тегом (для удаления terminations)
     try:
         circuits_with_tag = list(nb.circuits.circuits.filter(tag=tag_slug))
     except Exception:
         circuits_with_tag = []
     circuit_ids_for_terms = [c.id for c in circuits_with_tag if getattr(c, "id", None) is not None]
 
-    # 3. Circuit terminations у этих контуров
     n_terms = cleanup_circuit_terminations(nb, circuit_ids_for_terms, dry_run=args.dry_run, debug=args.debug)
 
-    # 4. Контуры с тегом
     n_circuits, _ = cleanup_circuits(nb, tag_slug, dry_run=args.dry_run, debug=args.debug)
 
-    # 5. Типы контуров и провайдеры с тегом (только если у них больше нет контуров)
     n_types = cleanup_circuit_types(nb, tag_slug, dry_run=args.dry_run, debug=args.debug)
     n_providers = cleanup_providers(nb, tag_slug, dry_run=args.dry_run, debug=args.debug)
 
-    mode = "dry-run" if args.dry_run else "выполнено"
+    mode = "dry-run" if args.dry_run else "done"
     print(
-        "{}: кабелей: {}, terminations: {}, контуров: {}, типов контуров: {}, провайдеров: {}".format(
+        "{}: cables: {}, terminations: {}, circuits: {}, circuit types: {}, providers: {}".format(
             mode, n_cables, n_terms, n_circuits, n_types, n_providers
         )
     )
