@@ -30,13 +30,13 @@ from uplinks_config import (
     UPLINKS_AGGREGATE_HOST_PREFIX,
 )
 
-# Ключи calculated items на хостах «Uplinks {Provider}» (должны совпадать с zabbix_provider_aggregate)
+# Calculated item keys on aggregate hosts `Uplinks {Provider}` (must match zabbix_provider_aggregate)
 AGGREGATE_ITEM_KEY_IN = "aggregate.bits.in[]"
 AGGREGATE_ITEM_KEY_OUT = "aggregate.bits.out[]"
 
 
 def _get_providers_from_netbox(tag, debug=False):
-    """Провайдеры из NetBox с тегом tag (например automatization). Возврат список имён или [] при ошибке/нет доступа."""
+    """Return provider names from NetBox by tag or [] on error."""
     url = os.environ.get("NETBOX_URL", "").strip()
     token = os.environ.get("NETBOX_TOKEN", "").strip()
     if not url or not token:
@@ -57,7 +57,7 @@ def _get_providers_from_netbox(tag, debug=False):
 
 
 def _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name):
-    """Одно ребро на (host, ISP), приоритет как в zabbix_map. Возврат списка (hostname, hostid, iface_name, isp, itemid_in, itemid_out, ...)."""
+    """Build per-(host, provider) edge list similar to zabbix_map."""
     edges_raw = []
     for hostname in sorted(devices.keys()):
         hostid = host_id_by_name.get(hostname)
@@ -92,15 +92,14 @@ def _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name):
 
 
 def _item_pattern_escape(name):
-    """Экранировать спецсимволы для паттерна Zabbix (* — wildcard, остальное буквально)."""
+    """Escape special characters for Zabbix item pattern (keep * as wildcard)."""
     for char in ["*", "?", "\\", "[", "]"]:
         name = name.replace(char, "\\" + char)
     return name
 
 
 def _make_graph_widget(index, hostname, iface_name, isp, itemid_in, itemid_out, x, y, width=18, height=5, show_threshold=True):
-    """Виджет svggraph: Item patterns (host + шаблон по интерфейсу), data_set_label даёт короткие подписи «Bits received»/«Bits sent».
-    При show_threshold включается Simple triggers — линия порога рисуется пунктиром (простой триггер создаётся zabbix_sync_commit_rate.py)."""
+    """Build svggraph widget for one uplink (Bits received/sent, optional threshold line)."""
     ref = "W{:04d}".format(index)[:5]
     title = "{} - {} ({})".format(hostname, iface_name, isp or "—").strip()
     fields = [
@@ -154,7 +153,7 @@ def _make_graph_widget(index, hostname, iface_name, isp, itemid_in, itemid_out, 
 
 
 def _location_from_hostname(hostname):
-    """Локация из hostname: только первые буквы до первого дефиса (DFW-DR-7280QR-1 -> DFW, ALA-KZT-7280TR-1 -> ALA)."""
+    """Location from hostname: prefix before first dash (SITE-CORE-ROUTER-1 -> SITE)."""
     parts = hostname.split("-")
     if parts and parts[0]:
         return parts[0]
@@ -162,7 +161,7 @@ def _location_from_hostname(hostname):
 
 
 def create_or_update_dashboard(url, token, edges, dashboard_name, debug=False, show_threshold=True):
-    """Создать или обновить дашборд. Одна строка — одна локация; графики локации делят ширину строки. X в пределах 0–71."""
+    """Create or update dashboard; each row is a location, widgets share width."""
     widgets = []
     widget_h = 5
     row_max_width = 72

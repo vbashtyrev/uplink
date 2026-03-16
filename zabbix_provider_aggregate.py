@@ -105,7 +105,7 @@ def _build_edges_with_keys(devices, host_id_by_name, items_by_host_iface, desc_t
 
 
 def _sanitize_provider_name(name):
-    """Преобразовать имя провайдера в безопасное для технического имени хоста (host)."""
+    """Return safe technical host name for provider (Zabbix host field)."""
     if not name:
         return ""
     # В Zabbix в host запрещены некоторые символы (например, слэш). Заменяем всё, кроме букв, цифр, ._- на пробел.
@@ -117,12 +117,7 @@ def _sanitize_provider_name(name):
 
 
 def _get_or_create_host(url, token, host_name, group_name, debug=False):
-    """Вернуть hostid хоста host_name в группе group_name; создать хост, если нет.
-
-    host_name используется как видимое имя (name) хоста. Техническое имя host
-    берём из _sanitize_provider_name, чтобы избежать недопустимых символов
-    (напр. 'Fiord / PING-WIN' → 'Fiord PING-WIN')."""
-    # Найти группу
+    """Get or create aggregate host in a given group."""
     grp, err = zabbix_request(url, token, "hostgroup.get", {
         "output": ["groupid"],
         "filter": {"name": [group_name]},
@@ -131,7 +126,6 @@ def _get_or_create_host(url, token, host_name, group_name, debug=False):
         return None, "группа не найдена: {}".format(group_name)
     groupid = grp[0]["groupid"]
 
-    # Техническое имя хоста (host) — без недопустимых символов; видимое имя (name) оставляем как есть.
     technical_host = _sanitize_provider_name(host_name)
 
     res, err = zabbix_request(url, token, "host.get", {
@@ -156,7 +150,7 @@ def _get_or_create_host(url, token, host_name, group_name, debug=False):
 
 
 def _create_or_update_calculated_item(url, token, hostid, key, name, formula, debug=False):
-    """Создать или обновить calculated item. formula — строка, например last(/h1/k1)+last(/h2/k2)."""
+    """Create or update calculated item with given formula."""
     res, err = zabbix_request(url, token, "item.get", {
         "output": ["itemid", "formula"],
         "hostids": [hostid],
@@ -172,7 +166,7 @@ def _create_or_update_calculated_item(url, token, hostid, key, name, formula, de
         "units": UNITS_BPS,
         "params": formula,
         "hostid": hostid,
-        "delay": "1m",  # интервал пересчёта (обязателен для item.create в Zabbix 7)
+        "delay": "1m",
     }
     if res:
         itemid = res[0]["itemid"]
@@ -191,10 +185,7 @@ def _create_or_update_calculated_item(url, token, hostid, key, name, formula, de
 
 
 def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, limit_bps, debug=False):
-    """Создать или обновить триггеры 90% и 100% для агрегатного линка.
-
-    host_technical — техническое имя хоста (host), без недопустимых символов.
-    itemid_in — itemid calculated (Bits in)."""
+    """Create or update 90%/100% provider aggregate triggers for a host."""
     warn_bps = int(limit_bps * THRESHOLD_PERCENT_WARN / 100)
     desc_warn = "Provider aggregate traffic >= {}% of limit ({} Gbps)".format(THRESHOLD_PERCENT_WARN, limit_bps / 1e9)
     desc_high = "Provider aggregate traffic >= 100% of limit ({} Gbps)".format(limit_bps / 1e9)
@@ -235,8 +226,7 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
 
 
 def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, debug=False):
-    """Создать/обновить хосты Uplinks {Provider}, calculated items и триггеры."""
-    # Явная проверка токена/прав, чтобы вместо «группа не найдена» получать понятную ошибку авторизации.
+    """Create/update provider aggregate hosts with calculated items and limit triggers."""
     ok, err = validate_zabbix_token(url, token, debug=debug)
     if not ok:
         return None, "Ошибка авторизации в Zabbix (token): {}".format(err)

@@ -12,3 +12,4 @@ commit_rates.json
 *.log
 .env
 .env.*
+uplinks_config.py

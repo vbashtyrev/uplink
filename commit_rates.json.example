@@ -27,5 +27,10 @@
       "circuit_id": "ProviderC-LOC-1",
       "commit_rate_gbps": null
     }
-  }
+  },
+  "_provider_limits": {
+    "ProviderA": 10,
+    "ProviderB": 5
+  },
+  "_provider_sla": 99.95
 }

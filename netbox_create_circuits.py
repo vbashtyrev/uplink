@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-Создание circuits в NetBox по commit_rates.json.
-Пример: только локация ALA (--location ALA).
-Для каждой пары (устройство, интерфейс): провайдер и circuit type создаются при отсутствии,
-circuit — по circuit_id, termination (A) привязывается к site устройства, кабель — к интерфейсу.
-Переменные: NETBOX_URL, NETBOX_TOKEN, NETBOX_TAG.
-"""
+"""Create or update NetBox circuits from commit_rates.json and dry-ssh.json."""
 
 import argparse
 import json

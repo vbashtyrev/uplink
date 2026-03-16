@@ -1,21 +1,5 @@
 #!/usr/bin/env python3
-"""
-Проверки Netbox по данным из dry-ssh.json.
-Достаём устройства из Netbox по тегу; если передан файл — сверяем hostname'ы
-(различия выводим, совпадения не пишем). Ключ --intname: проверка имён интерфейсов (файл vs Netbox) с поиском по вариантам.
-Ключ --description: сверка поля description (файл vs Netbox).
-Ключ --mediatype: сверка mediaType / type (файл/SSH vs Netbox).
-Ключ --mt-ref [FILE]: сверка mediaType со справочником (файл с interface_types);
-  данные из файла/SSH и из Netbox сверяются со списком value в справочнике (по умолчанию netbox_interface_types.json).
-Ключ --show-change: показывать колонки «что подставим в Netbox» по выбранным ключам (mediatype → mtToSet, description → descToSet, …). Если проверки не заданы — включаются все (--all); при явном --show-change все колонки выводятся, без скрытия групп без расхождений.
-Ключ --apply: вносить изменения в Netbox при разнице по выбранным ключам (--mediatype, --description, --bandwidth, --duplex, --mtu, --tx-power, --mac, --ip-address; при --intname — создание интерфейсов, lag/parent).
-  Справочник типов (--mt-ref) по умолчанию включён (netbox_interface_types.json); для типа в Netbox подставляется value/slug из справочника.
-
-Переменные: NETBOX_URL, NETBOX_TOKEN, NETBOX_TAG.
-
-По умолчанию таблица; с --json — JSON. В note — код замечания, расшифровка под таблицей.
-При неверном/просроченном NETBOX_TOKEN — сообщение в stderr и выход с кодом 1.
-"""
+"""Validate and optionally sync NetBox interfaces against dry-ssh.json."""
 
 __version__ = "1.0"
 
