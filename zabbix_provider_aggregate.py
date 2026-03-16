@@ -165,9 +165,10 @@ def _ensure_triggers(url, token, hostid, host_name, itemid_in, limit_bps, debug=
         return err
     by_desc = {t["description"]: t["triggerid"] for t in res} if res else {}
 
+    # Уровни важности: 90% — Information, 100% — Warning (шум ниже, чем у per-link триггеров шаблонов).
     for desc, expr, severity in [
-        (desc_warn, expr_warn, 2),  # Warning
-        (desc_high, expr_high, 4),   # High
+        (desc_warn, expr_warn, 1),  # Information
+        (desc_high, expr_high, 2),  # Warning
     ]:
         payload = {"description": desc, "expression": expr, "priority": severity, "tags": tags}
         if desc in by_desc:

@@ -48,6 +48,7 @@ from uplinks_config import (
     TRIGGER_FUNCTION_PERIOD,
     TRIGGER_TAG_NAME,
     TRIGGER_TAG_VALUE,
+    TRIGGER_DESC_SEARCH,
 )
 
 # Алиас для совместимости (поиск старых макросов при удалении)
@@ -339,6 +340,55 @@ def set_zabbix_host_if_util_macros(url, token, hostid, new_if_util_list, debug=F
 TRIGGER_TAG_SCRIPTS = {"tag": TRIGGER_TAG_NAME, "value": TRIGGER_TAG_VALUE}
 
 
+def delete_link_triggers(url, token, debug=False):
+    """
+    Удалить простые триггеры 90% / 100% на интерфейсы, созданные скриптами uplinks
+    (по описанию и тегу scripts:automatization).
+    Возврат: количество удалённых триггеров.
+    """
+    res, err = zabbix_request(
+        url,
+        token,
+        "trigger.get",
+        {
+            "output": ["triggerid", "description"],
+            "search": {"description": TRIGGER_DESC_SEARCH},
+            "selectTags": "extend",
+        },
+        debug=debug,
+    )
+    if err or not res:
+        return 0
+    to_delete = []
+    for t in res:
+        desc = (t.get("description") or "").strip()
+        if not (
+            desc.endswith(TRIGGER_DESC_90_SUFFIX)
+            or desc.endswith(TRIGGER_DESC_100_SUFFIX)
+        ):
+            continue
+        tags = t.get("tags") or []
+        if tags:
+            has_tag = any(
+                tg.get("tag") == TRIGGER_TAG_NAME and tg.get("value") == TRIGGER_TAG_VALUE
+                for tg in tags
+            )
+            if not has_tag:
+                continue
+        tid = t.get("triggerid")
+        if tid:
+            to_delete.append(str(tid))
+    if not to_delete:
+        return 0
+    _, del_err = zabbix_request(
+        url, token, "trigger.delete", to_delete, debug=debug
+    )
+    if del_err:
+        print("trigger.delete error: {}".format(del_err), file=sys.stderr)
+        return 0
+    return len(to_delete)
+
+
 def get_bits_received_item_key(url, token, hostid, iface_name, debug=False):
     """
     Найти ключ item'а «Bits received» для данного хоста и интерфейса (для выражения простого триггера).
@@ -500,6 +550,16 @@ def main():
     parser.add_argument("-d", "--dry-ssh", default=None, metavar="FILE", help="dry-ssh.json: для кабеля на физике (напр. et-0/0/3) задать контекст макроса по логическому имени (ae5.0) для Zabbix")
     parser.add_argument("--dry-run", action="store_true", help="Не менять макросы в Zabbix, только вывести что бы установили")
     parser.add_argument("--debug", action="store_true", help="Отладочный вывод (статистика по NetBox, подстановка логических имён)")
+    parser.add_argument(
+        "--create-link-triggers",
+        action="store_true",
+        help="Создавать/обновлять простые триггеры 90%%/100%% на интерфейсы (по умолчанию: нет, используются триггеры шаблонов)",
+    )
+    parser.add_argument(
+        "--delete-link-triggers",
+        action="store_true",
+        help="Удалить существующие простые триггеры 90%%/100%% (scripts:automatization) для uplink-интерфейсов и выйти",
+    )
     args = parser.parse_args()
 
     nb_url = os.environ.get("NETBOX_URL")
@@ -517,6 +577,13 @@ def main():
     if not validate_zabbix_token(zabbix_url, zabbix_token, debug=args.debug):
         print("Неверный или просроченный ZABBIX_TOKEN", file=sys.stderr)
         sys.exit(1)
+
+    if args.delete_link_triggers:
+        deleted = delete_link_triggers(zabbix_url, zabbix_token, debug=args.debug)
+        print("Удалено триггеров uplinks 90%/100%: {}".format(deleted))
+        if not args.create_link_triggers and not args.dry_run:
+            # Режим только удаления: выходим, не трогая NetBox/макросы.
+            return
 
     nb = pynetbox.api(nb_url, token=nb_token)
     commit_rates = get_commit_rates_from_netbox(nb, tag, debug=args.debug)
@@ -603,24 +670,27 @@ def main():
         if not ok:
             print("Ошибка обновления макросов для {}: {}".format(dev_name, err or "usermacro"), file=sys.stderr)
             continue
-        # Триггеры для линии порога на графике и цветов линков на карте (90% — жёлтый, 100% — красный)
-        zabbix_host = host_technical_by_hostid.get(hostid) or dev_name
-        for iface_name, _bps in iface_bps_list:
-            ok_tr, err_tr = ensure_simple_threshold_trigger(
-                zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug
-            )
-            if not ok_tr:
-                print("  {}: триггер 100% — {}".format(iface_name, err_tr or "ошибка"), file=sys.stderr)
-            ok_w, err_w = ensure_simple_warn_trigger(
-                zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug
-            )
-            if not ok_w:
-                print("  {}: триггер 90% — {}".format(iface_name, err_w or "ошибка"), file=sys.stderr)
+        # Триггеры 90%/100% для карты — по отдельному ключу, по умолчанию не создаём
+        if args.create_link_triggers:
+            zabbix_host = host_technical_by_hostid.get(hostid) or dev_name
+            for iface_name, _bps in iface_bps_list:
+                ok_tr, err_tr = ensure_simple_threshold_trigger(
+                    zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug
+                )
+                if not ok_tr:
+                    print("  {}: триггер 100% — {}".format(iface_name, err_tr or "ошибка"), file=sys.stderr)
+                ok_w, err_w = ensure_simple_warn_trigger(
+                    zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug
+                )
+                if not ok_w:
+                    print("  {}: триггер 90% — {}".format(iface_name, err_w or "ошибка"), file=sys.stderr)
         # Удалить старые item'ы порога net.if.threshold[...] (линия теперь от простого триггера)
         removed, rem_err = remove_threshold_items(zabbix_url, zabbix_token, hostid, debug=args.debug)
         if rem_err:
             print("  {}: удаление item'ов порога — {}".format(dev_name, rem_err), file=sys.stderr)
-        msg = "OK: {} — установлено {} макросов (MAX+WARN 90%), триггеры 90%/100% для карты".format(dev_name, len(new_if_util))
+        msg = "OK: {} — установлено {} макросов (MAX+WARN 90%)".format(dev_name, len(new_if_util))
+        if args.create_link_triggers:
+            msg += ", триггеры 90%/100% для карты"
         if removed:
             msg += ", удалено {} item'ов порога".format(removed)
         print(msg)
