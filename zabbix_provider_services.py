@@ -184,7 +184,7 @@ def _ensure_provider_sla(url, token, provider, slo, debug=False):
     payload = {
         "name": sla_name,
         "slo": float(slo),
-        "period": 2,  # monthly
+        "period": 0,  # daily
         "timezone": "UTC",
         "status": 1,
         "schedule": [],  # 24x7

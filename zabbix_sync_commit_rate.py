@@ -130,6 +130,17 @@ def apply_logical_context(commit_rates, dry_ssh_devices, debug=False):
     return result
 
 
+def _is_netbox_auth_error(exc):
+    """Проверка, похожа ли ошибка NetBox на истёкший/неверный токен (403 и т.п.)."""
+    msg = str(exc).lower()
+    return (
+        "403" in msg
+        or "forbidden" in msg
+        or "token expired" in msg
+        or ("token" in msg and "invalid" in msg)
+    )
+
+
 def get_commit_rates_from_netbox(nb, tag, debug=False):
     """
     По NetBox: интерфейсы, подключённые кабелем к circuit termination (A), и commit_rate контура.
@@ -140,6 +151,14 @@ def get_commit_rates_from_netbox(nb, tag, debug=False):
     try:
         cts = list(nb.circuits.circuit_terminations.filter(term_side="A"))
     except Exception as e:
+        if _is_netbox_auth_error(e):
+            print(
+                "Ошибка NetBox: токен истёк или доступ запрещён (403). Проверьте NETBOX_TOKEN и при необходимости обновите токен.",
+                file=sys.stderr,
+            )
+            if debug:
+                print("circuit_terminations.filter: {}".format(e), file=sys.stderr)
+            sys.exit(1)
         if debug:
             print("circuit_terminations.filter: {}".format(e), file=sys.stderr)
         return result
@@ -155,6 +174,14 @@ def get_commit_rates_from_netbox(nb, tag, debug=False):
             if debug:
                 print("Устройства с тегом {!r}: {} шт.".format(tag, len(device_ids_by_tag)), file=sys.stderr)
         except Exception as e:
+            if _is_netbox_auth_error(e):
+                print(
+                    "Ошибка NetBox: токен истёк или доступ запрещён (403). Проверьте NETBOX_TOKEN и при необходимости обновите токен.",
+                    file=sys.stderr,
+                )
+                if debug:
+                    print("dcim.devices.filter: {}".format(e), file=sys.stderr)
+                sys.exit(1)
             if debug:
                 print("filter(tag=): {}".format(e), file=sys.stderr)
 

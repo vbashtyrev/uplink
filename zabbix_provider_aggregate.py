@@ -185,7 +185,10 @@ def _create_or_update_calculated_item(url, token, hostid, key, name, formula, de
 
 
 def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, limit_bps, debug=False):
-    """Create or update 90%/100% provider aggregate triggers for a host."""
+    """Create or update 90%/100% provider aggregate triggers for a host.
+    Если лимит в _provider_limits изменился (например 20G -> 10G), старые триггеры с другим лимитом
+    удаляются, чтобы не дублировать 90%/100% по разным порогам.
+    """
     warn_bps = int(limit_bps * THRESHOLD_PERCENT_WARN / 100)
     desc_warn = "Provider aggregate traffic >= {}% of limit ({} Gbps)".format(THRESHOLD_PERCENT_WARN, limit_bps / 1e9)
     desc_high = "Provider aggregate traffic >= 100% of limit ({} Gbps)".format(limit_bps / 1e9)
@@ -199,7 +202,7 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
     tags = [{"tag": TRIGGER_TAG_NAME, "value": TRIGGER_TAG_VALUE}]
     if provider:
         tags.append({"tag": "provider", "value": provider})
-    # Поиск существующих по описанию
+
     res, err = zabbix_request(url, token, "trigger.get", {
         "output": ["triggerid", "description"],
         "hostids": [hostid],
@@ -207,21 +210,51 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
     }, debug=debug)
     if err:
         return err
-    by_desc = {t["description"]: t["triggerid"] for t in res} if res else {}
+    all_triggers = res or []
+    # Разделяем по типу: 90% и 100% (по подстроке в описании)
+    warn_triggers = [t for t in all_triggers if "90%" in t["description"]]
+    high_triggers = [t for t in all_triggers if "100%" in t["description"]]
 
-    # Уровни важности: 90% — Information, 100% — Warning (шум ниже, чем у per-link триггеров шаблонов).
-    for desc, expr, severity in [
-        (desc_warn, expr_warn, 1),  # Information
-        (desc_high, expr_high, 2),  # Warning
-    ]:
-        payload = {"description": desc, "expression": expr, "priority": severity, "tags": tags}
-        if desc in by_desc:
-            payload["triggerid"] = by_desc[desc]
-            _, err = zabbix_request(url, token, "trigger.update", payload, debug=debug)
+    def _update_or_create_and_cleanup(desc, expr, severity, same_type_list):
+        """Обновить один триггер по точному описанию или создать; удалить остальные того же типа."""
+        same_type_ids = [t["triggerid"] for t in same_type_list]
+        by_desc = {t["description"]: t["triggerid"] for t in same_type_list}
+        kept_id = by_desc.get(desc)
+        if kept_id is not None:
+            _, err = zabbix_request(url, token, "trigger.update", {
+                "triggerid": kept_id,
+                "description": desc,
+                "expression": expr,
+                "priority": severity,
+                "tags": tags,
+            }, debug=debug)
+            if err:
+                return err
         else:
-            _, err = zabbix_request(url, token, "trigger.create", payload, debug=debug)
-        if err:
-            return err
+            result, err = zabbix_request(url, token, "trigger.create", {
+                "description": desc,
+                "expression": expr,
+                "priority": severity,
+                "tags": tags,
+            }, debug=debug)
+            if err:
+                return err
+            kept_id = result["triggerids"][0]
+        # Удалить лишние триггеры того же типа (старый лимит)
+        for tid in same_type_ids:
+            if tid != kept_id:
+                _, err = zabbix_request(url, token, "trigger.delete", [tid], debug=debug)
+                if err:
+                    return err
+        return None
+
+    # Уровни важности: 90% — Information, 100% — Warning
+    err = _update_or_create_and_cleanup(desc_warn, expr_warn, 1, warn_triggers)
+    if err:
+        return err
+    err = _update_or_create_and_cleanup(desc_high, expr_high, 2, high_triggers)
+    if err:
+        return err
     return None
 
 
