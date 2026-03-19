@@ -426,8 +426,9 @@ def create_dashboard_by_provider(
                 {"type": 1, "name": "reference", "value": ref},
                 {"type": 0, "name": "legend", "value": 1},
                 {"type": 0, "name": "legend_statistic", "value": 1},
+                {"type": 0, "name": "simple_triggers", "value": 1},  # линия порога 90%/100% по провайдеру
             ]
-            # Для сводного графика пороги по интерфейсам не рисуем, чтобы не путать.
+            # Сводный график: линия порога — по агрегатному триггеру провайдера (Uplinks {Provider}).
             # Один data set (ds.0) в режиме Item list: несколько конкретных itemids,
             # Zabbix стекает их (stacked=1), давая суммарную кривую по провайдеру.
             colors = [

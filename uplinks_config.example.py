@@ -7,8 +7,8 @@ MAP_ICON_CLOUD = 4
 
 # Dashboards
 DASHBOARD_NAME = "Uplinks"
-DASHBOARD_NAME_BY_LOCATION = "Uplinks (by location)"
-DASHBOARD_NAME_BY_PROVIDER = "Uplinks by providers"
+DASHBOARD_NAME_BY_LOCATION = "Uplinks (по локациям)"
+DASHBOARD_NAME_BY_PROVIDER = "Uplinks по провайдерам"
 # Optional static providers for summary dashboard (usually empty, providers come from NetBox).
 PROVIDERS_FOR_SUMMARY = []
 
