@@ -27,6 +27,12 @@ TRIGGER_FUNCTION_PERIOD = "15m"
 TRIGGER_DESC_90_SUFFIX = "High bandwidth ({}%)".format(THRESHOLD_PERCENT_WARN)
 TRIGGER_DESC_100_SUFFIX = "High bandwidth (threshold line)"
 TRIGGER_DESC_SEARCH = "High bandwidth ("
+# SLA breach rule for provider aggregates: 100% for a sustained period
+SLA_TRIGGER_FUNCTION_PERIOD = "1h"
+SLA_TRIGGER_TAG_NAME = "sla"
+SLA_TRIGGER_TAG_VALUE = "true"
+# SLA effective date (UTC timestamp), e.g. 2026-03-01 00:00:00 UTC
+SLA_EFFECTIVE_DATE_UTC = 1772323200
 
 # Link colors on map (hex without #)
 LINK_COLOR_WARN = "DDBB00"

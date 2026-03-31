@@ -29,6 +29,9 @@ from uplinks_config import (
     TRIGGER_FUNCTION_PERIOD,
     TRIGGER_TAG_NAME,
     TRIGGER_TAG_VALUE,
+    SLA_TRIGGER_FUNCTION_PERIOD,
+    SLA_TRIGGER_TAG_NAME,
+    SLA_TRIGGER_TAG_VALUE,
     UPLINKS_AGGREGATE_HOST_PREFIX,
     UPLINKS_AGGREGATE_GROUP,
     NETBOX_AUTOMATION_TAG,
@@ -192,16 +195,23 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
     warn_bps = int(limit_bps * THRESHOLD_PERCENT_WARN / 100)
     desc_warn = "Provider aggregate traffic >= {}% of limit ({} Gbps)".format(THRESHOLD_PERCENT_WARN, limit_bps / 1e9)
     desc_high = "Provider aggregate traffic >= 100% of limit ({} Gbps)".format(limit_bps / 1e9)
+    desc_sla = "Provider aggregate SLA breach: >= 100% of limit for {} ({} Gbps)".format(
+        SLA_TRIGGER_FUNCTION_PERIOD, limit_bps / 1e9
+    )
     expr_warn = "max(/{}/{},{})>{}".format(
         host_technical, CALCULATED_ITEM_KEY_IN, TRIGGER_FUNCTION_PERIOD, warn_bps
     )
     expr_high = "max(/{}/{},{})>{}".format(
         host_technical, CALCULATED_ITEM_KEY_IN, TRIGGER_FUNCTION_PERIOD, int(limit_bps)
     )
+    expr_sla = "min(/{}/{},{})>{}".format(
+        host_technical, CALCULATED_ITEM_KEY_IN, SLA_TRIGGER_FUNCTION_PERIOD, int(limit_bps)
+    )
 
     tags = [{"tag": TRIGGER_TAG_NAME, "value": TRIGGER_TAG_VALUE}]
     if provider:
         tags.append({"tag": "provider", "value": provider})
+    tags_sla = list(tags) + [{"tag": SLA_TRIGGER_TAG_NAME, "value": SLA_TRIGGER_TAG_VALUE}]
 
     res, err = zabbix_request(url, token, "trigger.get", {
         "output": ["triggerid", "description"],
@@ -211,11 +221,21 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
     if err:
         return err
     all_triggers = res or []
-    # Разделяем по типу: 90% и 100% (по подстроке в описании)
-    warn_triggers = [t for t in all_triggers if "90%" in t["description"]]
-    high_triggers = [t for t in all_triggers if "100%" in t["description"]]
+    # Разделяем по типу, чтобы корректно обновлять старые объекты при смене лимита/периода.
+    warn_triggers = [
+        t for t in all_triggers
+        if t["description"].startswith("Provider aggregate traffic >=") and "90%" in t["description"]
+    ]
+    high_triggers = [
+        t for t in all_triggers
+        if t["description"].startswith("Provider aggregate traffic >=") and "100%" in t["description"]
+    ]
+    sla_triggers = [
+        t for t in all_triggers
+        if t["description"].startswith("Provider aggregate SLA breach:")
+    ]
 
-    def _update_or_create_and_cleanup(desc, expr, severity, same_type_list):
+    def _update_or_create_and_cleanup(desc, expr, severity, same_type_list, trigger_tags):
         """Обновить один триггер по точному описанию или создать; удалить остальные того же типа."""
         same_type_ids = [t["triggerid"] for t in same_type_list]
         by_desc = {t["description"]: t["triggerid"] for t in same_type_list}
@@ -226,7 +246,7 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
                 "description": desc,
                 "expression": expr,
                 "priority": severity,
-                "tags": tags,
+                "tags": trigger_tags,
             }, debug=debug)
             if err:
                 return err
@@ -235,7 +255,7 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
                 "description": desc,
                 "expression": expr,
                 "priority": severity,
-                "tags": tags,
+                "tags": trigger_tags,
             }, debug=debug)
             if err:
                 return err
@@ -249,10 +269,14 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
         return None
 
     # Уровни важности: 90% — Information, 100% — Warning
-    err = _update_or_create_and_cleanup(desc_warn, expr_warn, 1, warn_triggers)
+    err = _update_or_create_and_cleanup(desc_warn, expr_warn, 1, warn_triggers, tags)
     if err:
         return err
-    err = _update_or_create_and_cleanup(desc_high, expr_high, 2, high_triggers)
+    err = _update_or_create_and_cleanup(desc_high, expr_high, 2, high_triggers, tags)
+    if err:
+        return err
+    # SLA учитываем только при устойчивом превышении 100% в течение SLA_TRIGGER_FUNCTION_PERIOD.
+    err = _update_or_create_and_cleanup(desc_sla, expr_sla, 2, sla_triggers, tags_sla)
     if err:
         return err
     return None

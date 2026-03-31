@@ -10,10 +10,11 @@ from zabbix_map import (
     zabbix_request,
     validate_zabbix_token,
 )
-from uplinks_config import UPLINKS_AGGREGATE_HOST_PREFIX
+from uplinks_config import UPLINKS_AGGREGATE_HOST_PREFIX, SLA_EFFECTIVE_DATE_UTC
 
 
 DEFAULT_COMMIT_RATES = "commit_rates.json"
+PROVIDER_ROLE = "provider"
 
 
 def _load_commit_rates(path):
@@ -90,7 +91,12 @@ def _get_or_create_provider_service(url, token, provider, parentid, debug=False)
             "tag": "provider",
             "value": provider,
             "operator": 0,  # Equals
-        }
+        },
+        {
+            "tag": "sla",
+            "value": "true",
+            "operator": 0,  # Equals
+        },
     ]
     tags = [
         {
@@ -99,7 +105,7 @@ def _get_or_create_provider_service(url, token, provider, parentid, debug=False)
         },
         {
             "tag": "role",
-            "value": "provider",
+            "value": PROVIDER_ROLE,
         },
         {
             "tag": "provider",
@@ -158,9 +164,31 @@ def _get_or_create_provider_service(url, token, provider, parentid, debug=False)
     return result["serviceids"][0], None
 
 
+def _delete_legacy_sla_source_service(url, token, provider, debug=False):
+    """Удалить старый вспомогательный сервис SLA source, если остался после миграции."""
+    service_name = "Uplinks {} SLA source".format(provider)
+    res, err = zabbix_request(
+        url,
+        token,
+        "service.get",
+        {"output": ["serviceid"], "filter": {"name": [service_name]}},
+        debug=debug,
+    )
+    if err:
+        return "service.get (legacy SLA source): {}".format(err)
+    if not res:
+        return None
+    ids = [s["serviceid"] for s in res if s.get("serviceid")]
+    if not ids:
+        return None
+    _, err = zabbix_request(url, token, "service.delete", ids, debug=debug)
+    if err:
+        return "service.delete (legacy SLA source): {}".format(err)
+    return None
+
+
 def _ensure_provider_sla(url, token, provider, slo, debug=False):
     """Create or update SLA for a single provider."""
-    from time import time
 
     if slo is None:
         return None, None
@@ -184,16 +212,17 @@ def _ensure_provider_sla(url, token, provider, slo, debug=False):
     payload = {
         "name": sla_name,
         "slo": float(slo),
-        "period": 0,  # daily
+        "period": 1,  # weekly
         "timezone": "UTC",
         "status": 1,
+        "effective_date": SLA_EFFECTIVE_DATE_UTC,
         "schedule": [],  # 24x7
         "service_tags": [
             {
                 "tag": "provider",
                 "operator": 0,
                 "value": provider,
-            }
+            },
         ],
     }
 
@@ -205,8 +234,7 @@ def _ensure_provider_sla(url, token, provider, slo, debug=False):
             return None, "sla.update: {}".format(err)
         return slaid, None
 
-    # Create new SLA starting "now".
-    payload["effective_date"] = int(time())
+    # Create new SLA with fixed effective date (start of month).
     result, err = zabbix_request(url, token, "sla.create", [payload], debug=debug)
     if err:
         return None, "sla.create: {}".format(err)
@@ -280,6 +308,9 @@ def main():
                 print("Provider {}: {}".format(provider, err), file=sys.stderr)
                 continue
             print("OK: service for provider {} (serviceid={})".format(provider, serviceid))
+            err = _delete_legacy_sla_source_service(url, token, provider, debug=args.debug)
+            if err:
+                print("Provider {} legacy SLA source cleanup error: {}".format(provider, err), file=sys.stderr)
 
             if slo is not None:
                 slaid, err = _ensure_provider_sla(url, token, provider, slo, debug=args.debug)
