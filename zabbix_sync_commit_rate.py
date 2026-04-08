@@ -636,14 +636,44 @@ def ensure_simple_warn_trigger(url, token, host_technical, hostid, iface_name, d
                 zabbix_request(url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug)
         return True, None
     tags_payload = link_tags if link_tags is not None else [TRIGGER_TAG_SCRIPTS]
+    # Для новых 90%-триггеров тоже ставим зависимость от 100%, чтобы не было двух PROBLEM одновременно.
+    high_id = None
+    res_h, err_h = zabbix_request(
+        url,
+        token,
+        "trigger.get",
+        {
+            "hostids": [hostid],
+            "output": ["triggerid", "description"],
+            "search": {"description": "Interface {}:".format((iface_name or "").strip())},
+        },
+        debug=debug,
+    )
+    if not err_h and res_h:
+        for th in res_h:
+            d = th.get("description") or ""
+            if (
+                d == high_description
+                or d == legacy_high_description
+                or d.endswith(TRIGGER_DESC_100_SUFFIX)
+                or d.endswith(LEGACY_TRIGGER_DESC_100_SUFFIX)
+            ):
+                high_id = th.get("triggerid")
+                if high_id:
+                    break
+
+    create_payload = {
+        "description": description,
+        "expression": expression,
+        "priority": TRIGGER_PRIORITY_WARN,
+        "tags": tags_payload,
+    }
+    if high_id:
+        create_payload["dependencies"] = [{"triggerid": str(high_id)}]
+
     create_res, create_err = zabbix_request(
         url, token, "trigger.create",
-        {
-            "description": description,
-            "expression": expression,
-            "priority": TRIGGER_PRIORITY_WARN,
-            "tags": tags_payload,
-        },
+        create_payload,
         debug=debug,
     )
     if create_err or not create_res or not create_res.get("triggerids"):

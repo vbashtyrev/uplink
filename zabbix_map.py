@@ -215,6 +215,17 @@ def _normalize_interface_name(name):
     return name.strip().lower()
 
 
+def _normalize_provider_name(name):
+    """
+    Нормализовать имя провайдера для устойчивого матчинга:
+    игнорируем регистр и разделители (пробел/дефис/подчёркивание/знаки).
+    Пример: "ER-Telecom", "Er telecom" -> "ertelecom".
+    """
+    if not name:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
+
+
 def get_provider_aggregate_triggers(url, token, providers, debug=False):
     """
     Получить triggerid агрегатных триггеров 90%/100% по провайдерам.
@@ -246,13 +257,32 @@ def get_provider_aggregate_triggers(url, token, providers, debug=False):
     )
     if err:
         return {}
+    provider_key_to_name = {_normalize_provider_name(p): p for p in providers}
+
+    def _match_provider_from_host_fields(host_value, name_value):
+        for candidate in (host_value or "", name_value or ""):
+            c = str(candidate).strip()
+            if not c:
+                continue
+            # Точное совпадение "Uplinks <Provider>"
+            for p in providers:
+                wanted = UPLINKS_AGGREGATE_HOST_PREFIX + p
+                if c == wanted:
+                    return p
+            # Нормализованное совпадение суффикса после префикса
+            if c.startswith(UPLINKS_AGGREGATE_HOST_PREFIX):
+                suffix = c[len(UPLINKS_AGGREGATE_HOST_PREFIX):]
+                p = provider_key_to_name.get(_normalize_provider_name(suffix))
+                if p:
+                    return p
+        return None
+
     for h in result or []:
         host = h.get("host") or ""
         name = h.get("name") or ""
-        for p in providers:
-            wanted = UPLINKS_AGGREGATE_HOST_PREFIX + p
-            if host == wanted or name == wanted:
-                hostid_by_provider[p] = str(h.get("hostid"))
+        matched = _match_provider_from_host_fields(host, name)
+        if matched:
+            hostid_by_provider[matched] = str(h.get("hostid"))
 
     # Для недостающих — попытка по visible name (name)
     missing = [p for p in providers if p not in hostid_by_provider]
@@ -272,10 +302,9 @@ def get_provider_aggregate_triggers(url, token, providers, debug=False):
             for h in result2 or []:
                 host = h.get("host") or ""
                 name = h.get("name") or ""
-                for p in missing:
-                    wanted = UPLINKS_AGGREGATE_HOST_PREFIX + p
-                    if host == wanted or name == wanted:
-                        hostid_by_provider[p] = str(h.get("hostid"))
+                matched = _match_provider_from_host_fields(host, name)
+                if matched and matched in missing:
+                    hostid_by_provider[matched] = str(h.get("hostid"))
     if not hostid_by_provider:
         return {}
     hostids = list({hid for hid in hostid_by_provider.values() if hid})
@@ -356,7 +385,7 @@ def get_link_commit_triggers(url, token, hostids, debug=False):
         hostid = str(hosts[0].get("hostid") or "")
         if not hostid:
             continue
-        key = (hostid, iface)
+        key = (hostid, _normalize_interface_name(iface))
         warn_id, high_id = out.get(key, (None, None))
         tid = t.get("triggerid")
         if not tid:
@@ -917,7 +946,10 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
         # Привязать триггеры к линку с приоритетом:
         # 1) per-link commit (100/90), 2) provider aggregate (100/90).
         trigger_warn, trigger_high = trigger_ids_by_provider.get(isp or "", (None, None))
-        link_warn, link_high = trigger_ids_by_link.get((str(hostid), iface_name or ""), (None, None))
+        link_warn, link_high = trigger_ids_by_link.get(
+            (str(hostid), _normalize_interface_name(iface_name)),
+            (None, None),
+        )
         linktriggers = []
 
         def _append_trigger(tid, color, bold=False):
