@@ -532,6 +532,7 @@ python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
 
 - Для каждого провайдера из **`_provider_limits`**: сервис **`Uplinks {Provider}`**, **`problem_tags`**: `provider={имя}` и `sla=true` (совпадают только с агрегатным триггером **SLA breach**, не с мгновенными 90%/100%).
 - Для каждого уникального **`circuit_id`**, встречающегося у линка с **`billing_model: Burst`**: сервис **`Uplinks Burst {circuit_id}`**, **`problem_tags`**: `circuit`, `sla=true`, `billing=burst` (совпадают с per-link триггером **SLA breach** после **`zabbix_sync_commit_rate.py --create-link-triggers`**).
+  Для SLA этого сервиса фильтр задаётся по **`service_tags: circuit=<id>`** (без `role`) — это предотвращает широкий match в UI некоторых версий Zabbix.
 
 Целевой процент **`SLO`** для создаваемых SLA берётся из **`_provider_sla`** (одно число на весь файл). Эффективная дата старта SLA — **`SLA_EFFECTIVE_DATE_UTC`** в `uplinks_config.py`.
 
