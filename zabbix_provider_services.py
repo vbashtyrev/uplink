@@ -227,7 +227,6 @@ def _get_or_create_burst_circuit_service(url, token, provider, circuit_id, paren
     tags = [
         {"tag": "domain", "value": "uplinks"},
         {"tag": "role", "value": BURST_CIRCUIT_ROLE},
-        {"tag": "provider", "value": provider},
         {"tag": "circuit", "value": circuit_id},
     ]
     res, err = zabbix_request(
