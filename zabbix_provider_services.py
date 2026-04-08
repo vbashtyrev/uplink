@@ -299,6 +299,9 @@ def _ensure_burst_circuit_sla(url, token, circuit_id, slo, debug=False):
         "status": 1,
         "effective_date": SLA_EFFECTIVE_DATE_UTC,
         "schedule": [],
+        # Important: force AND/OR evaluation mode for service tags.
+        # With two different tag names (circuit + role), this acts as logical AND.
+        "service_tags_evaltype": 0,
         "service_tags": [
             {"tag": "circuit", "operator": 0, "value": circuit_id},
             {"tag": "role", "operator": 0, "value": BURST_CIRCUIT_ROLE},
@@ -349,6 +352,8 @@ def _ensure_provider_sla(url, token, provider, slo, debug=False):
         "status": 1,
         "effective_date": SLA_EFFECTIVE_DATE_UTC,
         "schedule": [],  # 24x7
+        # Explicitly pin eval type for deterministic matching.
+        "service_tags_evaltype": 0,
         "service_tags": [
             {
                 "tag": "provider",
