@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Очистка артефактов автоматизации в Zabbix:
-- простые триггеры 90% / 100%, созданные zabbix_sync_commit_rate.py;
+- простые триггеры 90% / 100% / SLA breach на линках, созданные zabbix_sync_commit_rate.py;
 - старые item'ы порога net.if.threshold["..."];
 - карта uplinks ([test] uplinks);
 - дашборды uplinks (основной, «по локациям», «по провайдерам») по умолчанию.
@@ -27,12 +27,17 @@ from uplinks_config import (
     DASHBOARD_NAME_BY_PROVIDER,
     MAP_NAME,
     THRESHOLD_ITEM_KEY,
+    THRESHOLD_PERCENT_WARN,
     TRIGGER_DESC_90_SUFFIX,
     TRIGGER_DESC_100_SUFFIX,
-    TRIGGER_DESC_SEARCH,
+    TRIGGER_DESC_SLA_BREACH_SUFFIX,
     TRIGGER_TAG_NAME,
     TRIGGER_TAG_VALUE,
 )
+
+# Как в zabbix_sync_commit_rate.delete_link_triggers — legacy окончания описания
+LEGACY_TRIGGER_DESC_90_SUFFIX = "High bandwidth ({}%)".format(THRESHOLD_PERCENT_WARN)
+LEGACY_TRIGGER_DESC_100_SUFFIX = "High bandwidth (threshold line)"
 
 
 def _validate_zabbix(debug=False):
@@ -88,8 +93,8 @@ def _has_our_tag(tags):
 
 def cleanup_triggers(url, token, dry_run=False, debug=False):
     """
-    Удалить простые триггеры 90% / 100%, создаваемые zabbix_sync_commit_rate.py.
-    Фильтр по описанию + тегу scripts:automatization (если задан).
+    Удалить простые триггеры 90% / 100% / SLA breach на интерфейсах, создаваемые zabbix_sync_commit_rate.py.
+    Фильтр по префиксу описания Interface … + тегу scripts:automatization (если задан).
     """
     res, err = zabbix_request(
         url,
@@ -97,7 +102,7 @@ def cleanup_triggers(url, token, dry_run=False, debug=False):
         "trigger.get",
         {
             "output": ["triggerid", "description"],
-            "search": {"description": TRIGGER_DESC_SEARCH},
+            "search": {"description": "Interface "},
             "selectTags": "extend",
         },
         debug=debug,
@@ -110,6 +115,9 @@ def cleanup_triggers(url, token, dry_run=False, debug=False):
         if not (
             desc.endswith(TRIGGER_DESC_90_SUFFIX)
             or desc.endswith(TRIGGER_DESC_100_SUFFIX)
+            or desc.endswith(TRIGGER_DESC_SLA_BREACH_SUFFIX)
+            or desc.endswith(LEGACY_TRIGGER_DESC_90_SUFFIX)
+            or desc.endswith(LEGACY_TRIGGER_DESC_100_SUFFIX)
         ):
             continue
         tags = t.get("tags") or []
@@ -122,7 +130,7 @@ def cleanup_triggers(url, token, dry_run=False, debug=False):
     if not to_delete:
         return 0
     if dry_run:
-        print("dry-run: trigger.delete {} (uplinks 90%/100%)".format(len(to_delete)))
+        print("dry-run: trigger.delete {} (uplinks 90%/100%/SLA breach)".format(len(to_delete)))
         return len(to_delete)
     _, del_err = zabbix_request(url, token, "trigger.delete", to_delete, debug=debug)
     if del_err:

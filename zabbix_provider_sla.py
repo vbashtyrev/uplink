@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Calculate SLA for provider aggregate limits based on Zabbix trigger history."""
+"""Calculate SLA for provider aggregate limits and Burst link SLA breach (Zabbix trigger history)."""
 
 import argparse
 import json
@@ -12,7 +12,12 @@ from zabbix_map import (
     _get_zabbix_url_token,
     zabbix_request,
 )
-from uplinks_config import UPLINKS_AGGREGATE_HOST_PREFIX
+from uplinks_config import (
+    UPLINKS_AGGREGATE_HOST_PREFIX,
+    TRIGGER_DESC_90_SUFFIX,
+    TRIGGER_DESC_100_SUFFIX,
+    TRIGGER_DESC_SLA_BREACH_SUFFIX,
+)
 
 DEFAULT_COMMIT_RATES = "commit_rates.json"
 
@@ -42,6 +47,102 @@ def _get_providers_from_limits(commit_rates):
     return sorted(set(p for p in providers if p))
 
 
+def _iter_burst_links(commit_rates):
+    """Yield (device, iface, provider, circuit_id) for billing_model Burst."""
+    for dev_name, ifaces in (commit_rates or {}).items():
+        if not isinstance(dev_name, str) or dev_name.startswith("_"):
+            continue
+        if not isinstance(ifaces, dict):
+            continue
+        for iface_name, entry in ifaces.items():
+            if not isinstance(entry, dict):
+                continue
+            if (entry.get("billing_model") or "").strip().lower() != "burst":
+                continue
+            cid = (entry.get("circuit_id") or "").strip()
+            prov = (entry.get("provider") or "").strip()
+            if not cid or not prov:
+                continue
+            yield dev_name, iface_name, prov, cid
+
+
+def _burst_report_rows(commit_rates):
+    """Один ряд на circuit_id: первый встреченный интерфейс."""
+    seen = set()
+    rows = []
+    for dev_name, iface_name, prov, cid in _iter_burst_links(commit_rates):
+        if cid in seen:
+            continue
+        seen.add(cid)
+        entry = commit_rates.get(dev_name, {}).get(iface_name)
+        cr = None
+        if isinstance(entry, dict):
+            cr = entry.get("commit_rate_gbps")
+        rows.append((cid, prov, dev_name, iface_name, cr))
+    return sorted(rows, key=lambda x: x[0])
+
+
+def _get_hostid_for_device(url, token, dev_name, debug=False):
+    res, err = zabbix_request(
+        url,
+        token,
+        "host.get",
+        {"output": ["hostid"], "filter": {"host": [dev_name]}},
+        debug=debug,
+    )
+    if err:
+        return None, err
+    if res:
+        return str(res[0]["hostid"]), None
+    res2, err2 = zabbix_request(
+        url,
+        token,
+        "host.get",
+        {"output": ["hostid"], "filter": {"name": [dev_name]}},
+        debug=debug,
+    )
+    if err2:
+        return None, err2
+    if res2:
+        return str(res2[0]["hostid"]), None
+    return None, None
+
+
+def _get_burst_link_triggers(url, token, hostid, iface_name, debug=False):
+    """
+    Триггеры 90% / 100% / SLA breach на интерфейсе (как aggregate: приоритет sla, иначе high).
+    """
+    prefix = "Interface {}:".format((iface_name or "").strip())
+    res, err = zabbix_request(
+        url,
+        token,
+        "trigger.get",
+        {
+            "hostids": [hostid],
+            "output": ["triggerid", "description"],
+            "search": {"description": prefix},
+        },
+        debug=debug,
+    )
+    if err or not res:
+        return None, None, None
+    warn_id = high_id = sla_id = None
+    for t in res:
+        desc = (t.get("description") or "").strip()
+        if not desc.startswith(prefix):
+            continue
+        tid = t.get("triggerid")
+        if not tid:
+            continue
+        if desc.endswith(TRIGGER_DESC_SLA_BREACH_SUFFIX):
+            sla_id = tid
+        elif desc.endswith(TRIGGER_DESC_100_SUFFIX):
+            high_id = tid
+        elif desc.endswith(TRIGGER_DESC_90_SUFFIX):
+            warn_id = tid
+    return warn_id, high_id, sla_id
+
+
 def _unix_ts(dt):
     if isinstance(dt, (int, float)):
         return int(dt)
@@ -68,7 +169,12 @@ def _default_window(days):
 
 
 def _get_aggregate_triggers(url, token, providers, debug=False):
-    """Return provider -> (triggerid_warn, triggerid_high) for aggregate hosts."""
+    """
+    Return provider -> (triggerid_warn, triggerid_high, triggerid_sla) for aggregate hosts.
+
+    Выбор по описанию (как в zabbix_provider_aggregate), не по priority: у 100% и SLA breach
+    оба priority=2, иначе zabbix_provider_sla мог бы взять «не тот» триггер.
+    """
     if not providers:
         return {}
     host_names = [UPLINKS_AGGREGATE_HOST_PREFIX + p for p in providers]
@@ -128,6 +234,7 @@ def _get_aggregate_triggers(url, token, providers, debug=False):
             "hostids": hostids,
             "output": ["triggerid", "description", "priority"],
             "selectHosts": ["hostid"],
+            "search": {"description": "Provider aggregate"},
         },
         debug=debug,
     )
@@ -135,7 +242,7 @@ def _get_aggregate_triggers(url, token, providers, debug=False):
         return {}
 
     hostid_to_provider = {hid: p for p, hid in hostid_by_provider.items()}
-    out = {p: {"warn": None, "high": None} for p in providers}
+    out = {p: {"warn": None, "high": None, "sla": None} for p in providers}
     for t in trig_res:
         hosts = t.get("hosts") or []
         if not hosts or not isinstance(hosts[0], dict):
@@ -144,16 +251,18 @@ def _get_aggregate_triggers(url, token, providers, debug=False):
         provider = hostid_to_provider.get(hostid)
         if not provider:
             continue
-        prio = int(t.get("priority", 0))
+        desc_full = t.get("description") or ""
         tid = t.get("triggerid")
         if not tid:
             continue
-        if prio == 1:
+        if desc_full.startswith("Provider aggregate SLA breach:"):
+            out[provider]["sla"] = tid
+        elif desc_full.startswith("Provider aggregate traffic >=") and "90%" in desc_full:
             out[provider]["warn"] = tid
-        elif prio == 2:
+        elif desc_full.startswith("Provider aggregate traffic >=") and "100%" in desc_full:
             out[provider]["high"] = tid
 
-    return {p: (ids["warn"], ids["high"]) for p, ids in out.items()}
+    return {p: (ids["warn"], ids["high"], ids["sla"]) for p, ids in out.items()}
 
 
 def _load_events_for_trigger(url, token, triggerid, time_from, time_till, debug=False):
@@ -225,13 +334,16 @@ def _compute_sla_from_events(events, time_from, time_till):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Calculate SLA for provider aggregate triggers over a time window.",
+        description=(
+            "Calculate SLA from trigger history: provider aggregates and Burst links "
+            "(SLA breach if present, else 100%)."
+        ),
     )
     parser.add_argument(
         "-f",
         "--commit-rates",
         default=DEFAULT_COMMIT_RATES,
-        help="Path to commit_rates.json (for _provider_limits / provider list).",
+        help="Path to commit_rates.json (_provider_limits, Burst billing_model, _provider_sla).",
     )
     parser.add_argument(
         "--days",
@@ -264,8 +376,12 @@ def main():
         sys.exit(1)
 
     providers = _get_providers_from_limits(commit_rates)
-    if not providers:
-        print("No providers in _provider_limits; nothing to calculate.", file=sys.stderr)
+    burst_rows = _burst_report_rows(commit_rates)
+    if not providers and not burst_rows:
+        print(
+            "No _provider_limits and no Burst circuits; nothing to calculate.",
+            file=sys.stderr,
+        )
         sys.exit(0)
 
     if args.from_ts is not None:
@@ -279,10 +395,14 @@ def main():
         print("ZABBIX_URL and ZABBIX_TOKEN are required.", file=sys.stderr)
         sys.exit(1)
 
-    trig_by_provider = _get_aggregate_triggers(url, token, providers, debug=args.debug)
-    if not trig_by_provider:
-        print("No aggregate triggers found for providers from _provider_limits.", file=sys.stderr)
-        sys.exit(1)
+    trig_by_provider = {}
+    if providers:
+        trig_by_provider = _get_aggregate_triggers(url, token, providers, debug=args.debug)
+        if not trig_by_provider:
+            print(
+                "Warning: no aggregate triggers for _provider_limits providers.",
+                file=sys.stderr,
+            )
 
     target_sla = commit_rates.get("_provider_sla")
     if isinstance(target_sla, (int, float)):
@@ -295,42 +415,85 @@ def main():
 
     print("SLA window: {} .. {}".format(time_from, time_till))
     if target_sla is not None:
-        print("Target SLA (all providers): {:.5f}%".format(target_sla))
-    print("")
-    header = "{:<20} {:>10} {:>12} {:>12} {:>10}".format(
-        "Provider", "LimitGbps", "SLA%", "OverLimit(h)", "BelowSLA"
+        print("Target SLA (_provider_sla): {:.5f}%".format(target_sla))
+    print(
+        "SLA%% по окну: триггер SLA breach (устойчивое превышение), если есть; "
+        "иначе мгновенный 100%%. Период breach: uplinks_config.SLA_TRIGGER_FUNCTION_PERIOD."
     )
-    print(header)
+    print("")
 
-    for provider in providers:
-        limit = commit_rates.get("_provider_limits", {}).get(provider)
-        trig_warn, trig_high = trig_by_provider.get(provider, (None, None))
-        if not trig_high:
-            sla_text = "n/a"
-            over_hours = "n/a"
-            below = ""
-        else:
-            events = _load_events_for_trigger(url, token, trig_high, time_from, time_till, debug=args.debug)
-            total, problem = _compute_sla_from_events(events, time_from, time_till)
-            if total <= 0:
-                sla_text = "n/a"
-                over_hours = "n/a"
-                below = ""
-            else:
-                sla = (total - problem) / float(total) * 100.0
-                sla_text = "{:.5f}".format(sla)
-                over_hours = "{:.3f}".format(problem / 3600.0)
-                if target_sla is not None and sla < target_sla:
-                    below = "YES"
-                else:
-                    below = ""
-
-        limit_str = "-" if limit is None else str(limit)
-        print(
-            "{:<20} {:>10} {:>12} {:>12} {:>10}".format(
-                provider, limit_str, sla_text, over_hours, below
-            )
+    def _row_sla(trig_for_sla):
+        if not trig_for_sla:
+            return "n/a", "n/a", ""
+        events = _load_events_for_trigger(
+            url, token, trig_for_sla, time_from, time_till, debug=args.debug
         )
+        total, problem = _compute_sla_from_events(events, time_from, time_till)
+        if total <= 0:
+            return "n/a", "n/a", ""
+        sla = (total - problem) / float(total) * 100.0
+        sla_text = "{:.5f}".format(sla)
+        over_hours = "{:.3f}".format(problem / 3600.0)
+        if target_sla is not None and sla < target_sla:
+            below = "YES"
+        else:
+            below = ""
+        return sla_text, over_hours, below
+
+    if providers:
+        header = "{:<20} {:>10} {:>12} {:>12} {:>10}".format(
+            "Provider", "LimitGbps", "SLA%", "Breach(h)", "BelowSLA"
+        )
+        print("--- Aggregate providers ---")
+        print(header)
+        for provider in providers:
+            limit = commit_rates.get("_provider_limits", {}).get(provider)
+            triple = trig_by_provider.get(provider, (None, None, None))
+            trig_warn, trig_high, trig_sla = (
+                triple[0],
+                triple[1],
+                triple[2] if len(triple) > 2 else None,
+            )
+            trig_for_sla = trig_sla or trig_high
+            sla_text, over_hours, below = _row_sla(trig_for_sla)
+            limit_str = "-" if limit is None else str(limit)
+            print(
+                "{:<20} {:>10} {:>12} {:>12} {:>10}".format(
+                    provider, limit_str, sla_text, over_hours, below
+                )
+            )
+        print("")
+
+    if burst_rows:
+        print("--- Burst circuits ---")
+        bh = "{:<28} {:>12} {:>10} {:>12} {:>12} {:>10}".format(
+            "Circuit", "Provider", "CommitGbps", "SLA%", "Breach(h)", "BelowSLA"
+        )
+        print(bh)
+        for cid, prov, dev_name, iface_name, cr in burst_rows:
+            hostid, herr = _get_hostid_for_device(url, token, dev_name, debug=args.debug)
+            if herr or not hostid:
+                cr_s = "-" if cr is None else str(cr)
+                print(
+                    "{:<28} {:>12} {:>10} {:>12} {:>12} {:>10}".format(
+                        cid, prov, cr_s, "n/a", "n/a", ""
+                    )
+                )
+                print(
+                    "  (host not found: {})".format(dev_name),
+                    file=sys.stderr,
+                )
+                continue
+            triple = _get_burst_link_triggers(url, token, hostid, iface_name, debug=args.debug)
+            trig_warn, trig_high, trig_sla = triple
+            trig_for_sla = trig_sla or trig_high
+            sla_text, over_hours, below = _row_sla(trig_for_sla)
+            cr_s = "-" if cr is None else str(cr)
+            print(
+                "{:<28} {:>12} {:>10} {:>12} {:>12} {:>10}".format(
+                    cid, prov, cr_s, sla_text, over_hours, below
+                )
+            )
 
 
 if __name__ == "__main__":

@@ -27,6 +27,10 @@ from uplinks_config import (
     UPLINKS_AGGREGATE_HOST_PREFIX,
 )
 
+LEGACY_TRIGGER_DESC_90_SUFFIX = "High bandwidth ({}%)".format(90)
+LEGACY_TRIGGER_DESC_100_SUFFIX = "High bandwidth (threshold line)"
+LINK_DRAWTYPE_BOLD = 1
+
 
 def load_devices_json(path):
     """Загрузить JSON с ключом devices. Возврат (data, None) или (None, error_msg).
@@ -310,6 +314,58 @@ def get_provider_aggregate_triggers(url, token, providers, debug=False):
     out = {}
     for p, ids in triggers_by_provider.items():
         out[p] = (ids.get("warn"), ids.get("high"))
+    return out
+
+
+def _iface_from_trigger_desc(desc):
+    """Extract iface from 'Interface <iface>: ...'."""
+    s = (desc or "").strip()
+    if not s.startswith("Interface "):
+        return None
+    rest = s[len("Interface "):]
+    if ":" not in rest:
+        return None
+    return rest.split(":", 1)[0].strip() or None
+
+
+def get_link_commit_triggers(url, token, hostids, debug=False):
+    """Return dict (hostid, iface) -> (warn_triggerid, high_triggerid)."""
+    if not hostids:
+        return {}
+    res, err = zabbix_request(
+        url,
+        token,
+        "trigger.get",
+        {
+            "output": ["triggerid", "description"],
+            "hostids": [str(h) for h in hostids],
+            "selectHosts": ["hostid"],
+            "search": {"description": "Interface "},
+        },
+        debug=debug,
+    )
+    if err:
+        return {}
+    out = {}
+    for t in (res or []):
+        desc = (t.get("description") or "").strip()
+        iface = _iface_from_trigger_desc(desc)
+        hosts = t.get("hosts") or []
+        if not iface or not hosts:
+            continue
+        hostid = str(hosts[0].get("hostid") or "")
+        if not hostid:
+            continue
+        key = (hostid, iface)
+        warn_id, high_id = out.get(key, (None, None))
+        tid = t.get("triggerid")
+        if not tid:
+            continue
+        if desc.endswith(TRIGGER_DESC_90_SUFFIX) or desc.endswith(LEGACY_TRIGGER_DESC_90_SUFFIX):
+            warn_id = tid
+        if desc.endswith(TRIGGER_DESC_100_SUFFIX) or desc.endswith(LEGACY_TRIGGER_DESC_100_SUFFIX):
+            high_id = tid
+        out[key] = (warn_id, high_id)
     return out
 
 
@@ -831,6 +887,8 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
     trigger_ids_by_provider = get_provider_aggregate_triggers(
         url, token, providers_for_triggers, debug=debug
     )
+    hostids_for_links = sorted(set(str(e[1]) for e in edges if e[1] is not None))
+    trigger_ids_by_link = get_link_commit_triggers(url, token, hostids_for_links, debug=debug)
 
     new_links = []
     our_host_sids = set()
@@ -856,13 +914,26 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
             "selementid2": sid2,
             "label": "\n".join(label_parts),
         }
-        # Привязать агрегатные триггеры провайдера к линку: 90% — жёлтый, 100% — красный на карте.
+        # Привязать триггеры к линку с приоритетом:
+        # 1) per-link commit (100/90), 2) provider aggregate (100/90).
         trigger_warn, trigger_high = trigger_ids_by_provider.get(isp or "", (None, None))
+        link_warn, link_high = trigger_ids_by_link.get((str(hostid), iface_name or ""), (None, None))
         linktriggers = []
-        if trigger_warn:
-            linktriggers.append({"triggerid": trigger_warn, "color": LINK_COLOR_WARN})
-        if trigger_high:
-            linktriggers.append({"triggerid": trigger_high, "color": LINK_COLOR_HIGH})
+
+        def _append_trigger(tid, color, bold=False):
+            if not tid:
+                return
+            if any(str(x.get("triggerid")) == str(tid) for x in linktriggers):
+                return
+            entry = {"triggerid": tid, "color": color}
+            if bold:
+                entry["drawtype"] = LINK_DRAWTYPE_BOLD
+            linktriggers.append(entry)
+
+        _append_trigger(link_high, LINK_COLOR_HIGH, bold=True)
+        _append_trigger(trigger_high, LINK_COLOR_HIGH, bold=False)
+        _append_trigger(link_warn, LINK_COLOR_WARN, bold=False)
+        _append_trigger(trigger_warn, LINK_COLOR_WARN, bold=False)
         if linktriggers:
             link["linktriggers"] = linktriggers
         new_links.append(link)

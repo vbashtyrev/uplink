@@ -15,6 +15,7 @@ from uplinks_config import UPLINKS_AGGREGATE_HOST_PREFIX, SLA_EFFECTIVE_DATE_UTC
 
 DEFAULT_COMMIT_RATES = "commit_rates.json"
 PROVIDER_ROLE = "provider"
+BURST_CIRCUIT_ROLE = "burst-circuit"
 
 
 def _load_commit_rates(path):
@@ -40,6 +41,34 @@ def _get_providers_from_limits(commit_rates):
             continue
         providers.append(str(name).strip())
     return sorted(set(p for p in providers if p))
+
+
+def _iter_burst_links(commit_rates):
+    """Yield (device, iface, provider, circuit_id) for billing_model Burst."""
+    for dev_name, ifaces in (commit_rates or {}).items():
+        if not isinstance(dev_name, str) or dev_name.startswith("_"):
+            continue
+        if not isinstance(ifaces, dict):
+            continue
+        for iface_name, entry in ifaces.items():
+            if not isinstance(entry, dict):
+                continue
+            if (entry.get("billing_model") or "").strip().lower() != "burst":
+                continue
+            cid = (entry.get("circuit_id") or "").strip()
+            prov = (entry.get("provider") or "").strip()
+            if not cid or not prov:
+                continue
+            yield dev_name, iface_name, prov, cid
+
+
+def _burst_circuits_unique(commit_rates):
+    """Unique circuit_id -> provider (первый встреченный)."""
+    out = {}
+    for _dev, _iface, prov, cid in _iter_burst_links(commit_rates):
+        if cid not in out:
+            out[cid] = prov
+    return sorted(out.items(), key=lambda x: x[0])
 
 
 def _get_global_provider_sla(commit_rates):
@@ -187,6 +216,110 @@ def _delete_legacy_sla_source_service(url, token, provider, debug=False):
     return None
 
 
+def _get_or_create_burst_circuit_service(url, token, provider, circuit_id, parentid, debug=False):
+    """Сервис на один Burst-контур: проблемы с circuit + sla + billing=burst."""
+    service_name = "Uplinks Burst {}".format(circuit_id)
+    problem_tags = [
+        {"tag": "circuit", "value": circuit_id, "operator": 0},
+        {"tag": "sla", "value": "true", "operator": 0},
+        {"tag": "billing", "value": "burst", "operator": 0},
+    ]
+    tags = [
+        {"tag": "domain", "value": "uplinks"},
+        {"tag": "role", "value": BURST_CIRCUIT_ROLE},
+        {"tag": "provider", "value": provider},
+        {"tag": "circuit", "value": circuit_id},
+    ]
+    res, err = zabbix_request(
+        url,
+        token,
+        "service.get",
+        {
+            "output": ["serviceid", "name"],
+            "filter": {"name": [service_name]},
+            "selectParents": ["serviceid"],
+        },
+        debug=debug,
+    )
+    if err:
+        return None, "service.get: {}".format(err)
+    if res:
+        serviceid = res[0]["serviceid"]
+        payload = {
+            "serviceid": serviceid,
+            "name": service_name,
+            "problem_tags": problem_tags,
+            "tags": tags,
+        }
+        if parentid:
+            existing_parents = res[0].get("parents") or []
+            has_parent = any(p.get("serviceid") == str(parentid) for p in existing_parents)
+            if not has_parent:
+                payload["parents"] = [{"serviceid": str(parentid)}]
+        _, err = zabbix_request(url, token, "service.update", payload, debug=debug)
+        if err:
+            return None, "service.update: {}".format(err)
+        return serviceid, None
+    payload = {
+        "name": service_name,
+        "algorithm": 0,
+        "sortorder": 1,
+        "problem_tags": problem_tags,
+        "tags": tags,
+    }
+    if parentid:
+        payload["parents"] = [{"serviceid": str(parentid)}]
+    result, err = zabbix_request(url, token, "service.create", payload, debug=debug)
+    if err:
+        return None, "service.create: {}".format(err)
+    return result["serviceids"][0], None
+
+
+def _ensure_burst_circuit_sla(url, token, circuit_id, slo, debug=False):
+    """SLA для сервиса Uplinks Burst {circuit_id} (совпадение по тегам circuit + role)."""
+    if slo is None:
+        return None, None
+    sla_name = "Uplinks Burst {} SLA".format(circuit_id)
+    res, err = zabbix_request(
+        url,
+        token,
+        "sla.get",
+        {
+            "output": ["slaid", "name", "slo", "period", "timezone", "status"],
+            "filter": {"name": [sla_name]},
+        },
+        debug=debug,
+    )
+    if err:
+        return None, "sla.get: {}".format(err)
+    payload = {
+        "name": sla_name,
+        "slo": float(slo),
+        "period": 1,
+        "timezone": "UTC",
+        "status": 1,
+        "effective_date": SLA_EFFECTIVE_DATE_UTC,
+        "schedule": [],
+        "service_tags": [
+            {"tag": "circuit", "operator": 0, "value": circuit_id},
+            {"tag": "role", "operator": 0, "value": BURST_CIRCUIT_ROLE},
+        ],
+    }
+    if res:
+        slaid = res[0]["slaid"]
+        payload["slaid"] = slaid
+        _, err = zabbix_request(url, token, "sla.update", payload, debug=debug)
+        if err:
+            return None, "sla.update: {}".format(err)
+        return slaid, None
+    result, err = zabbix_request(url, token, "sla.create", [payload], debug=debug)
+    if err:
+        return None, "sla.create: {}".format(err)
+    sla_ids = result.get("slaids") or []
+    slaid = sla_ids[0] if sla_ids else None
+    return slaid, None
+
+
 def _ensure_provider_sla(url, token, provider, slo, debug=False):
     """Create or update SLA for a single provider."""
 
@@ -246,8 +379,8 @@ def _ensure_provider_sla(url, token, provider, slo, debug=False):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Create/update Zabbix services per provider, "
-            "mapping them to aggregate provider triggers via problem tag provider={name}."
+            "Create/update Zabbix services: per-provider (aggregate) and per Burst circuit, "
+            "with optional SLAs from _provider_sla."
         ),
     )
     parser.add_argument(
@@ -284,8 +417,17 @@ def main():
         sys.exit(1)
 
     providers = _get_providers_from_limits(commit_rates)
+    burst_pairs = _burst_circuits_unique(commit_rates)
+    if not providers and not burst_pairs and not args.parent_service:
+        print(
+            "No _provider_limits entries and no Burst circuits (billing_model=burst); nothing to do.",
+            file=sys.stderr,
+        )
+        sys.exit(0)
     if not providers:
-        print("No providers in _provider_limits; nothing to create.", file=sys.stderr)
+        print("No providers in _provider_limits; skipping aggregate services.", file=sys.stderr)
+    if not burst_pairs:
+        print("No Burst circuits; skipping Burst services.", file=sys.stderr)
     parentid = None
     if args.parent_service:
         parentid, err = _get_or_create_parent_service(
@@ -322,6 +464,34 @@ def main():
                         provider, slaid, slo
                     )
                 )
+
+    for circuit_id, b_provider in burst_pairs:
+        serviceid, err = _get_or_create_burst_circuit_service(
+            url, token, b_provider, circuit_id, parentid, debug=args.debug
+        )
+        if err:
+            print("Burst {}: {}".format(circuit_id, err), file=sys.stderr)
+            continue
+        print(
+            "OK: Burst service for circuit {} (serviceid={})".format(
+                circuit_id, serviceid
+            )
+        )
+        if slo is not None:
+            slaid, err = _ensure_burst_circuit_sla(
+                url, token, circuit_id, slo, debug=args.debug
+            )
+            if err:
+                print(
+                    "Burst {} SLA error: {}".format(circuit_id, err),
+                    file=sys.stderr,
+                )
+                continue
+            print(
+                "OK: SLA for Burst {} (slaid={}, slo={:.4f}%)".format(
+                    circuit_id, slaid, slo
+                )
+            )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Uplinks (NetBox + SSH)
 
-**Версия 1.0**
+**Версия 1.1** — мониторинг Burst (`billing_model`), per-link триггеры 90%/100%/SLA breach, сервисы Zabbix и offline‑отчёт SLA (агрегаты + контуры).
 
 Скрипты для сверки и обновления данных интерфейсов в NetBox по данным с устройств (SSH / JSON-файл). Поддерживаются Arista и Juniper.
 
@@ -16,16 +16,16 @@
 | `uplinks_stats.py` | Сбор данных с устройств по SSH (Arista/Juniper) или отчёт NetBox vs устройство; выход — таблица или JSON (`dry-ssh.json`). |
 | `netbox_checks.py` | Сверка данных из JSON с NetBox (интерфейсы: имя, description, тип, speed, duplex, MAC, MTU, IP, LAG и др.) и при необходимости обновление полей в NetBox. |
 | `netbox_interface_types.py` | Скачивание справочника типов интерфейсов NetBox (value/label) из репозитория в JSON для `--mt-ref`. |
-| `zabbix_map.py` | Таблица uplink'ов по dry-ssh; карта Zabbix (хосты, провайдеры, линки с items Bits in/out). Цвет линки определяется агрегатными триггерами провайдера (хосты «Uplinks {Provider}»), 90%/100% общего лимита по провайдеру. |
+| `zabbix_map.py` | Таблица uplink'ов по dry-ssh; карта Zabbix (хосты, провайдеры, линки с items Bits in/out). Цвет линка: **приоритет** per-link **100%** (жирная красная) → агрегат провайдера **100%** → per-link **90%** → агрегат **90%** (при наличии соответствующих триггеров в Zabbix). |
 | `zabbix_uplinks_dashboard.py` | Создание/обновление дашборда Zabbix с виджетами-графиками по каждому uplink (Bits received/sent). |
 | `grafana_uplinks_graph.py` | Генерация JSON для панели Node graph в Grafana (узлы — хосты и провайдеры, рёбра — линки); опционально создание дашборда через Grafana API. |
-| `generate_commit_rates.py` | Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). При мерже сохраняет `_provider_limits` и глобальный `_provider_sla` (общий таргет SLA для провайдеров). |
-| `netbox_create_circuits.py` | Создание circuits в NetBox по `commit_rates.json`: провайдер, тип «Internet», контур, Termination A на site, кабель до интерфейса. |
-| `zabbix_sync_commit_rate.py` | Синхронизация макросов **{$IF.UTIL.MAX}** и **{$IF.UTIL.WARN}** в Zabbix из NetBox; по отдельному флагу может создавать/удалять простые per-link триггеры 90%/100%. По умолчанию опираемся на триггеры шаблонов, а карта/дашборды смотрят на агрегаты провайдера. Пороги задаются в `uplinks_config.py` (по умолчанию 90% и 100%). |
-| `zabbix_provider_aggregate.py` | Агрегированные хосты `Uplinks {Provider}` в Zabbix: суммарные calculated items Bits in/out по всем линкам провайдера и триггеры 90%/100% лимита из `_provider_limits` (теги `scripts:automatization`, `provider={name}`). Провайдеры берутся из NetBox (тег `automatization`) с fallback на данные линков. |
+| `generate_commit_rates.py` | Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). При мерже сохраняет дополнительные поля линков (например `billing_model`), служебные ключи **`_provider_limits`**, **`_provider_sla`** и другие `_…`. |
+| `netbox_create_circuits.py` | Создание circuits в NetBox по `commit_rates.json`: провайдер, тип «Internet», контур, Termination A на site, кабель до интерфейса. Флаг **`--clear-null-commit`** сбрасывает у контура в NetBox пустой commit rate, если в JSON `commit_rate_gbps: null`. |
+| `zabbix_sync_commit_rate.py` | Макросы **{$IF.UTIL.MAX}** / **{$IF.UTIL.WARN}** из NetBox. По **`--create-link-triggers`** и **`commit_rates.json`**: для линков с **`billing_model: Burst`** создаются три простых триггера на интерфейс: **90%**, **100%** и **SLA breach** (`min` за период из `SLA_TRIGGER_FUNCTION_PERIOD`), с разделением тегов: у **SLA breach** — `sla=true` (для сервисов Zabbix), у 90/100 — без `sla`. **`--delete-link-triggers`** удаляет все три типа. |
+| `zabbix_provider_aggregate.py` | Хосты `Uplinks {Provider}`: calculated items суммарного трафика и триггеры **90%**, **100%** и **SLA breach** по `_provider_limits`. Тег **`sla=true`** только на триггере **SLA breach**; на 90%/100% — `scripts:automatization` и `provider`. Зависимость 90% от 100% (как в Zabbix: дочерний не в PROBLEM без родителя). |
 | `zabbix_uplinks_cleanup.py` | Очистка артефактов автоматизации в Zabbix: триггеры 90%/100%, старые item'ы порога, карта uplinks, дашборды uplinks (тег `scripts:automatization`). |
-| `zabbix_provider_services.py` | Создание/обновление Zabbix‑сервисов `Uplinks {Provider}` и per‑provider SLA: для каждого провайдера из `_provider_limits` создаётся сервис c тегом `provider={name}` и SLA `Uplinks {Provider} SLA` с целевым значением из `_provider_sla`. |
-| `zabbix_provider_sla.py` | Отчётный скрипт (offline‑SLA): считает SLA по агрегатным триггерам провайдеров на заданном окне времени по истории событий и лимитам из `_provider_limits`/`_provider_sla`, выводит таблицу по каждому провайдеру. |
+| `zabbix_provider_services.py` | Сервисы и встроенные SLA в Zabbix: **`Uplinks {Provider}`** для каждого имени из **`_provider_limits`** (`problem_tags`: `provider`, `sla=true`) и **`Uplinks Burst {circuit_id}`** для линков с **`billing_model: Burst`** (`circuit`, `sla=true`, `billing=burst`). Целевое значение SLA для обоих типов — **`_provider_sla`** в `commit_rates.json`. Опционально общий родитель **`--parent-service`**. |
+| `zabbix_provider_sla.py` | Offline‑отчёт по истории событий триггеров: **агрегаты** — для каждого провайдера из `_provider_limits` (метрика: **SLA breach**, если есть, иначе **мгновенный 100%**); **Burst** — по одному ряду на `circuit_id` (тот же приоритет триггеров). Окно времени — `--days` или `--from-ts`/`--to-ts`. Сравнение с **`_provider_sla`** — колонка BelowSLA. |
 | `netbox_uplinks_cleanup.py` | Откат автоматизации в NetBox: кабели, circuit terminations, контуры, при возможности — типы контуров и провайдеры (по тегу из `uplinks_config.NETBOX_AUTOMATION_TAG`). |
 
 ---
@@ -56,11 +56,13 @@
 5. **Синхронизация макросов commit rate в Zabbix**  
    **`zabbix_sync_commit_rate.py`** по NetBox (интерфейсы с circuit по кабелю) получает commit rate в Kbps, переводит в bps и создаёт макросы **{$IF.UTIL.MAX:"<интерфейс>"}** и **{$IF.UTIL.WARN:"<интерфейс>"}**.
 
-   По отдельному ключу запуска можно создать/обновить простые триггеры 90%/100% на интерфейсы. Пороги и период в выражении триггера задаются в **`uplinks_config.py`** (`THRESHOLD_PERCENT_WARN`, `THRESHOLD_PERCENT_HIGH`, `TRIGGER_FUNCTION_PERIOD`).
+   Для контуров с **`billing_model: Burst`** в **`commit_rates.json`** по флагу **`--create-link-triggers`** создаются/обновляются **три** простых триггера на интерфейс (90%, 100%, SLA breach по **`TRIGGER_DESC_SLA_BREACH_SUFFIX`** и **`SLA_TRIGGER_FUNCTION_PERIOD`** в `uplinks_config.py`). Для остальных схем billing per-link триггеры по умолчанию не создаются — окраска линков на карте идёт с **агрегатных** хостов провайдера.
 
-   **`zabbix_provider_aggregate.py`** создаёт агрегатные хосты `Uplinks {Provider}` и триггеры 90%/100% лимита по провайдеру; **`zabbix_map.py --update-map`** привязывает эти триггеры к линкам карты.
+   **`zabbix_provider_aggregate.py`** — агрегатные хосты `Uplinks {Provider}` и триггеры 90%/100%/SLA breach по **`_provider_limits`**.  
+   **`zabbix_provider_services.py -f commit_rates.json`** — сервисы и SLA в UI Zabbix (провайдеры + Burst-контуры), цель — **`_provider_sla`**.  
+   **`zabbix_map.py --update-map`** — привязка триггеров к линкам (per-link и агрегат) с приоритетом цвета, описанным в таблице скриптов.
 
-**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы и, при необходимости, per-link триггеры) → **zabbix_provider_aggregate.py** (агрегаты по провайдерам) → **zabbix_map.py --update-map** (карта с цветом линков по агрегатам), дашборды.
+**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы; опционально Burst-link триггеры) → **zabbix_provider_aggregate.py** → **zabbix_provider_services.py** (опционально) → **zabbix_map.py --update-map**, дашборды. Offline‑отчёт SLA: **zabbix_provider_sla.py -f commit_rates.json**.
 
 **Откат в Zabbix:** **zabbix_uplinks_cleanup.py** — удаляет триггеры, карту uplinks и дашборды (по именам). Макросы не трогает. Перед удалением: `--dry-run`.
 
@@ -315,7 +317,9 @@ python netbox_interface_types.py -o my_types.json
 
 ### 4. `zabbix_map.py`
 
-Построение таблицы uplink'ов по данным из `dry-ssh.json`; опционально — карта Zabbix. При обращении к Zabbix API: поиск хостов и items (Bits received/sent). Файл может содержать логические интерфейсы (Juniper: ae5, ae5.0, et-0/0/3); на карте для одной пары (хост, провайдер) рисуется один линк — выбирается интерфейс с items Zabbix, при равных условиях логический unit (например ae5.0), иначе физический. Цвет линка определяется агрегатными триггерами провайдера (хосты `Uplinks {Provider}`): 90%/100% от `_provider_limits` в `commit_rates.json`.
+Построение таблицы uplink'ов по данным из `dry-ssh.json`; опционально — карта Zabbix. При обращении к Zabbix API: поиск хостов и items (Bits received/sent). Файл может содержать логические интерфейсы (Juniper: ae5, ae5.0, et-0/0/3); на карте для одной пары (хост, провайдер) рисуется один линк — выбирается интерфейс с items Zabbix, при равных условиях логический unit (например ae5.0), иначе физический.
+
+**Окраска линка** задаётся списком **link triggers** с приоритетом (что указано раньше — сильнее при конфликте цветов): (1) per-link **100%** — красный **жирный** (`drawtype` bold); (2) агрегат провайдера **100%**; (3) per-link **90%** — жёлтый; (4) агрегат **90%**. Нужны соответствующие триггеры в Zabbix (**zabbix_sync_commit_rate.py** с **`--create-link-triggers`** для Burst; **zabbix_provider_aggregate.py** для лимитов из `_provider_limits`).
 
 **Карта Zabbix**
 
@@ -418,7 +422,7 @@ python zabbix_map.py --generate-description-map -f dry-ssh.json > description_to
 
 Если дашборд с таким именем уже есть — он обновляется (страница с виджетами перезаписывается). Если нет — создаётся новый.
 
-**Линия порога на графике.** Включена опция Simple triggers: пороги простых триггеров рисуются пунктиром. Скрипт **zabbix_sync_commit_rate.py** при каждом запуске создаёт на хостах простой триггер `max(Bits received, <period>) > {$IF.UTIL.MAX:"<интерфейс>"}` — период задаётся в **`uplinks_config.py`** (`TRIGGER_FUNCTION_PERIOD`, по умолчанию 15m). По нему Zabbix рисует горизонтальную линию порога на графиках дашборда.
+**Линия порога на графике.** Включена опция Simple triggers: пороги простых триггеров рисуются пунктиром. Явный простой триггер **100%** (`max(Bits received, …) > {$IF.UTIL.MAX:…}`) создаётся только там, где в **`zabbix_sync_commit_rate.py`** включён **`--create-link-triggers`** и в **`commit_rates.json`** у линка **`billing_model: Burst`**; иначе линия порога на графике опирается на триггеры шаблонов / другие правила Zabbix. Период **max** задаётся в **`uplinks_config.py`** (`TRIGGER_FUNCTION_PERIOD`, по умолчанию 15m).
 
 ```bash
 # Создать или обновить дашборд «Uplinks» с графиками по всем uplink из dry-ssh.json
@@ -447,20 +451,28 @@ python zabbix_uplinks_dashboard.py -f dry-ssh.json --providers Cogent Hurricane
 | `-d`, `--dry-ssh` | dry-ssh.json для маппинга логический → физический интерфейс (если файл есть в текущей директории, подхватывается по умолчанию) |
 | `--location LOC` | Обработать только указанную локацию (первый сегмент hostname); по умолчанию — все площадки |
 | `--dry-run` | Не вносить изменения в NetBox, только вывод |
+| `--clear-null-commit` | Если в JSON у контура `commit_rate_gbps: null`, снять commit rate в NetBox у circuit (убрать устаревшее значение) |
 
 ```bash
 python netbox_create_circuits.py
 python netbox_create_circuits.py -d dry-ssh.json --dry-run
 python netbox_create_circuits.py --location ALA
+python netbox_create_circuits.py -f commit_rates.json --clear-null-commit
 ```
 
 ---
 
-### 7. `zabbix_sync_commit_rate.py` — макросы и (по флагу) триггеры 90%/100% в Zabbix из NetBox
+### 7. `zabbix_sync_commit_rate.py` — макросы и (по флагу) per-link триггеры для Burst
 
-Для каждого интерфейса в NetBox, подключённого кабелем к circuit termination (сторона A), скрипт берёт **commit rate** контура (Kbps), переводит в bps и создаёт на хосте два макроса с контекстом по интерфейсу: **{$IF.UTIL.MAX:"Ethernet51/1"}** (порог HIGH, по умолчанию 100%) и **{$IF.UTIL.WARN:"Ethernet51/1"}** (порог WARN, по умолчанию 90%). Значения макросов = commit_rate × (THRESHOLD_PERCENT_* / 100).
+Для каждого интерфейса в NetBox, подключённого кабелем к circuit termination (сторона A), скрипт берёт **commit rate** контура (Kbps), переводит в bps и создаёт на хосте два макроса с контекстом по интерфейсу: **{$IF.UTIL.MAX:"…"}** (HIGH, по умолчанию 100% от commit) и **{$IF.UTIL.WARN:"…"}** (WARN, по умолчанию 90%). Значения макросов = commit_rate × (THRESHOLD_PERCENT_* / 100).
 
-Опционально (по флагу) создаёт два простых триггера на интерфейс: при пороге WARN — `max(Bits received, <period>) > {$IF.UTIL.WARN:"<интерфейс>"}` (Warning), при пороге HIGH — `max(Bits received, <period>) > {$IF.UTIL.MAX:"<интерфейс>"}` (High). Период и пороги задаются в **`uplinks_config.py`** (`TRIGGER_FUNCTION_PERIOD` — по умолчанию 15m; `THRESHOLD_PERCENT_WARN`, `THRESHOLD_PERCENT_HIGH`).
+**Простые триггеры на линк** создаются **только** при **`--create-link-triggers`** и только для интерфейсов, у которых в **`commit_rates.json`** у записи линка **`billing_model: Burst`** (без учёта регистра). На каждый такой интерфейс создаются три объекта:
+
+1. **90%** — `max(Bits received, TRIGGER_FUNCTION_PERIOD) > {$IF.UTIL.WARN:"iface"}`; теги: `scripts:automatization`, `provider`, `circuit`, `billing=burst` (**без** `sla=true`). Зависимость от триггера **100%** (как задано в Zabbix API).
+2. **100%** — `max(…) > {$IF.UTIL.MAX:"iface"}`; те же теги, без `sla=true`.
+3. **SLA breach** — `min(…) > {$IF.UTIL.MAX:"iface"}` с периодом **`SLA_TRIGGER_FUNCTION_PERIOD`** (например 1h); дополнительно **`sla=true`** (как у агрегатов) — к этому триггеру привязывается сервис **`Uplinks Burst {circuit_id}`** в **zabbix_provider_services.py**.
+
+Описания концов строк задаются в **`uplinks_config.py`**: `TRIGGER_DESC_90_SUFFIX`, `TRIGGER_DESC_100_SUFFIX`, `TRIGGER_DESC_SLA_BREACH_SUFFIX`.
 
 Старые item'ы **net.if.threshold["..."]**, если остались, удаляются.
 
@@ -468,25 +480,34 @@ python netbox_create_circuits.py --location ALA
 
 | Ключ | Описание |
 |------|----------|
-| `-d`, `--dry-ssh` | Путь к dry-ssh.json: для кабеля на физическом интерфейсе (напр. et-0/0/3) макрос будет по логическому имени (ae5.0, ae3.0), как в Zabbix |
+| `-f`, `--commit-rates` | Путь к `commit_rates.json` (нужен для фильтра **`billing_model=Burst`** и для тегов `circuit` / `provider`) |
+| `-d`, `--dry-ssh` | Путь к dry-ssh.json: для кабеля на физике макрос по логическому имени, как в Zabbix |
 | `--dry-run` | Не менять макросы в Zabbix, только вывести что бы установили |
-| `--debug` | Отладочный вывод (статистика по NetBox, подстановка логических имён) |
-| `--create-link-triggers` | Создавать/обновлять простые триггеры 90%/100% на интерфейсы (по умолчанию не создаются) |
-| `--delete-link-triggers` | Удалить существующие простые триггеры 90%/100% (scripts:automatization) для uplink-интерфейсов и выйти |
+| `--debug` | Отладочный вывод |
+| `--create-link-triggers` | Создавать/обновлять триггеры 90%/100%/SLA breach только для Burst-линков |
+| `--delete-link-triggers` | Удалить простые триггеры (90%, 100%, SLA breach) с тегом `scripts:automatization` и префиксом описания `Interface ` |
 
-Учитываются только пары, где в NetBox есть **кабель** от circuit termination (A) к интерфейсу; **обязателен фильтр по тегу** `NETBOX_TAG`. Для устройств, где в NetBox кабель на физике (MX204: et-0/0/3), а в Zabbix — логические ae5.0/ae3.0, укажите `-d dry-ssh.json`, тогда макрос будет {$IF.UTIL.MAX:"ae5.0"} и т.д.
+Учитываются только пары с **кабелем** от circuit termination (A) к интерфейсу; **обязателен** фильтр по тегу `NETBOX_TAG`. Для логических имён интерфейсов укажите `-d dry-ssh.json`.
 
 ```bash
 python zabbix_sync_commit_rate.py
 python zabbix_sync_commit_rate.py -d dry-ssh.json --dry-run
-python zabbix_sync_commit_rate.py -d dry-ssh.json --debug
+python zabbix_sync_commit_rate.py -d dry-ssh.json -f commit_rates.json --create-link-triggers
+python zabbix_sync_commit_rate.py -d dry-ssh.json --delete-link-triggers
 ```
 
 ---
 
 ### 8. `zabbix_provider_aggregate.py` — агрегат по провайдеру в Zabbix
 
-Для схем, где у провайдера общий лимит по всем линкам (например 2,5 Гбит/с на локацию, но не более 10 Гбит/с в сумме), в **commit_rates.json** задаётся служебный ключ **`_provider_limits`**: `{ "Cogent": 10, "Hurricane": 5 }` (Гбит/с). Скрипт по провайдерам из NetBox (тег `NETBOX_AUTOMATION_TAG`, по умолчанию `automatization`) и фактическим линкам в `dry-ssh.json` создаёт в Zabbix хосты **«Uplinks {Provider}»** в группе из `uplinks_config.UPLINKS_AGGREGATE_GROUP`, с calculated items (сумма Bits received и Bits sent по всем линкам провайдера). Для провайдеров, у которых задан лимит в `_provider_limits`, создаются триггеры: 90% лимита (Information) и 100% лимита (Warning). Эти же триггеры используются картой (`zabbix_map.py`) и сводным дашбордом по провайдерам (`zabbix_uplinks_dashboard.py`) для виджетов суммарного трафика и цвета линков.
+Для схем, где у провайдера общий лимит по всем линкам, в **commit_rates.json** задаётся **`_provider_limits`**: `{ "Cogent": 10, … }` (Гбит/с). Скрипт по провайдерам из NetBox (тег **`NETBOX_AUTOMATION_TAG`**) и линкам в `dry-ssh.json` создаёт хосты **«Uplinks {Provider}»** в группе **`UPLINKS_AGGREGATE_GROUP`**, с calculated items (сумма Bits in/out по линкам). Для провайдера с лимитом создаются **три** триггера:
+
+- **90%** и **100%** от лимита — теги **`scripts:automatization`** и **`provider={name}`** (без **`sla=true`**).
+- **SLA breach** — устойчивое превышение 100% за период **`SLA_TRIGGER_FUNCTION_PERIOD`**, дополнительный тег **`sla=true`** — под них подходит сервис **`Uplinks {Provider}`** и SLA в Zabbix.
+
+Зависимость **90% → 100%** (шум на карте при одновременной сработке разных уровней снижается за счёт семантики зависимостей Zabbix). Если лимит у провайдера убран из **`_provider_limits`**, агрегатные триггеры для него могут быть удалены (см. ключи скрипта **`--keep-triggers-without-limits`** и логику очистки в актуальной версии).
+
+Карта (**`zabbix_map.py`**) и сводный дашборд используют эти триггеры для цвета и виджетов.
 
 **Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`, `NETBOX_URL`, `NETBOX_TOKEN`.
 
@@ -497,6 +518,7 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json --debug
 | `-m`, `--description-map` | Файл description_to_name.json |
 | `--no-cache` | Не использовать кэш Zabbix |
 | `--debug` | Отладочный вывод |
+| `--keep-triggers-without-limits` | Не удалять агрегатные триггеры у провайдера, для которого убрали лимит из `_provider_limits` (см. help скрипта) |
 
 ```bash
 python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
@@ -504,9 +526,62 @@ python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
 
 ---
 
-### 9. `zabbix_uplinks_cleanup.py` — очистка артефактов Zabbix
+### 9. `zabbix_provider_services.py` — сервисы и SLA в Zabbix
 
-Удаляет в Zabbix объекты, созданные скриптами uplinks: триггеры 90%/100% (с тегом `scripts:automatization` или по описанию), старые item'ы **net.if.threshold["..."]**, карту **[test] uplinks**, дашборды **Uplinks**, **Uplinks (по локациям)** и **Uplinks по провайдерам** (имена задаются ключами). Макросы {$IF.UTIL.MAX}, {$IF.UTIL.WARN} не удаляются.
+Создаёт или обновляет **листовые сервисы** и объекты **SLA** в Zabbix по данным **`commit_rates.json`**:
+
+- Для каждого провайдера из **`_provider_limits`**: сервис **`Uplinks {Provider}`**, **`problem_tags`**: `provider={имя}` и `sla=true` (совпадают только с агрегатным триггером **SLA breach**, не с мгновенными 90%/100%).
+- Для каждого уникального **`circuit_id`**, встречающегося у линка с **`billing_model: Burst`**: сервис **`Uplinks Burst {circuit_id}`**, **`problem_tags`**: `circuit`, `sla=true`, `billing=burst` (совпадают с per-link триггером **SLA breach** после **`zabbix_sync_commit_rate.py --create-link-triggers`**).
+
+Целевой процент **`SLO`** для создаваемых SLA берётся из **`_provider_sla`** (одно число на весь файл). Эффективная дата старта SLA — **`SLA_EFFECTIVE_DATE_UTC`** в `uplinks_config.py`.
+
+Опционально **`--parent-service NAME`** — общий родитель для всех создаваемых сервисов.
+
+**Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
+
+| Ключ | Описание |
+|------|----------|
+| `-f`, `--commit-rates` | Путь к commit_rates.json |
+| `--parent-service` | Имя родительского сервиса (создаётся при отсутствии) |
+| `--debug` | Отладочный вывод API |
+
+**Порядок с Burst:** сначала **`zabbix_sync_commit_rate.py … --create-link-triggers`** (чтобы триггеры имели актуальные теги и описание SLA breach), затем **`python zabbix_provider_services.py -f commit_rates.json`**.
+
+```bash
+python zabbix_provider_services.py -f commit_rates.json
+python zabbix_provider_services.py -f commit_rates.json --parent-service "Uplinks"
+```
+
+---
+
+### 10. `zabbix_provider_sla.py` — offline отчёт SLA по триггерам
+
+Не использует встроенный модуль SLA Zabbix; считает долю времени в **PROBLEM** по **`event.get`** для выбранных триггеров на окне **`--days`** или **`--from-ts` / --to-ts**.
+
+- **Блок Aggregate:** провайдеры из **`_provider_limits`**. Для каждого: триггер **SLA breach**, если есть в Zabbix, иначе триггер **мгновенного 100%** (90% в расчёт не входит).
+- **Блок Burst:** по одному ряду на **`circuit_id`** (первый интерфейс из `commit_rates.json` с **`billing_model: Burst`**); те же правила выбора триггера (SLA breach или 100%). Если хост в Zabbix не найден — в таблице `n/a`.
+
+Колонка **BelowSLA** — сравнение с **`_provider_sla`** из JSON (если ключ задан числом).
+
+**Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
+
+| Ключ | Описание |
+|------|----------|
+| `-f`, `--commit-rates` | Путь к commit_rates.json |
+| `--days` | Глубина окна в днях (по умолчанию 30) |
+| `--from-ts`, `--to-ts` | Границы окна (Unix time) |
+| `--debug` | Отладочный вывод |
+
+```bash
+python zabbix_provider_sla.py -f commit_rates.json
+python zabbix_provider_sla.py -f commit_rates.json --days 7
+```
+
+---
+
+### 11. `zabbix_uplinks_cleanup.py` — очистка артефактов Zabbix
+
+Удаляет в Zabbix объекты, созданные скриптами uplinks: простые триггеры **90%/100%/SLA breach** на интерфейсах (тег `scripts:automatization` / по описанию `Interface …`), старые item'ы **net.if.threshold["..."]**, карту с именем из конфига, дашборды **Uplinks** и связанные (имена задаются ключами). Макросы {$IF.UTIL.MAX}, {$IF.UTIL.WARN} не удаляются.
 
 **Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`.
 
@@ -525,7 +600,7 @@ python zabbix_uplinks_cleanup.py
 
 ---
 
-### 9. `netbox_uplinks_cleanup.py` — откат автоматизации в NetBox
+### 12. `netbox_uplinks_cleanup.py` — откат автоматизации в NetBox
 
 Удаляет в NetBox объекты, созданные **netbox_create_circuits.py** и помеченные тегом из **`uplinks_config.NETBOX_AUTOMATION_TAG`** (по умолчанию `automatization`): кабели (cables), circuit terminations (сторона A), контуры (circuits). Типы контуров и провайдеры с этим тегом удаляются только если у них не осталось контуров (после удаления наших контуров). Интерфейсы и устройства не трогает; сам тег не удаляется.
 
@@ -557,11 +632,13 @@ python netbox_uplinks_cleanup.py
 | `commit_rates.json` | Локальный файл (не в git): оплаченная скорость (commit_rate_gbps, Гбит/с), провайдер и circuit ID по паре устройство — интерфейс; для NetBox Circuit (Commit rate в Kbps = × 1 000 000) |
 | `generate_commit_rates.py` | Генерация commit_rates.json по всем линкам из dry-ssh.json (провайдер, circuit_id по локации, commit_rate_gbps) |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по commit_rates.json (провайдер, тип, circuit, Termination A + cable к интерфейсу; отчёт в конце) |
-| `zabbix_sync_commit_rate.py` | Синхронизация макросов {$IF.UTIL.MAX} и {$IF.UTIL.WARN} (90%) в Zabbix из NetBox; триггеры 90%/100% для карты и линии порога на дашборде, удаление старых item'ов порога |
-| `zabbix_provider_aggregate.py` | Хосты «Uplinks {Provider}» в Zabbix: calculated items (сумма Bits in/out по всем линкам провайдера), триггеры по лимиту из `commit_rates.json` (_provider_limits). |
-| `zabbix_uplinks_cleanup.py` | Очистка артефактов в Zabbix: триггеры 90%/100%, item'ы порога, карта uplinks, дашборды uplinks |
+| `zabbix_sync_commit_rate.py` | Макросы {$IF.UTIL.MAX}/{$IF.UTIL.WARN}; опционально per-link триггеры **90%/100%/SLA breach** для `billing_model: Burst`; удаление старых item'ов порога |
+| `zabbix_provider_aggregate.py` | Хосты «Uplinks {Provider}»: calculated items, триггеры 90%/100%/SLA breach по `_provider_limits` |
+| `zabbix_provider_services.py` | Сервисы и SLA в Zabbix: провайдеры + Burst-контуры, цель `_provider_sla` |
+| `zabbix_provider_sla.py` | Offline-отчёт SLA по событиям триггеров (агрегаты и Burst) |
+| `zabbix_uplinks_cleanup.py` | Очистка: простые триггеры uplinks (включая SLA breach на линках), item'ы порога, карта, дашборды |
 | `netbox_uplinks_cleanup.py` | Откат в NetBox: кабели, terminations, контуры (и при возможности типы/провайдеры) по тегу автоматизации |
-| `uplinks_config.py` | **Настраиваемые** названия и значения для Zabbix и NetBox: имя карты, дашбордов, тег триггеров Zabbix и тег NetBox для circuits (`scripts`/`automatization`), описания триггеров, макросы, период триггера (`TRIGGER_FUNCTION_PERIOD`), иконки карты, цвета линков. Меняйте под своё окружение. |
+| `uplinks_config.py` | Имя карты/дашбордов, теги триггеров (`scripts`/`automatization`, `sla`/`true`), описания **90%/100%** и **SLA breach** на линке (`TRIGGER_DESC_*`, `TRIGGER_DESC_SLA_BREACH_SUFFIX`), периоды **`TRIGGER_FUNCTION_PERIOD`** (окно max) и **`SLA_TRIGGER_FUNCTION_PERIOD`** (окно min для breach), **`SLA_EFFECTIVE_DATE_UTC`**, макросы, цвета линков, префиксы агрегатных хостов. Копия примера: `uplinks_config.example.py`. |
 | `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` / дашборде в той же директории, что и файл `-f`, не коммитить |
 | `ROADMAP.md` | Планы доработок (например Tenancy для circuits) |
 | `requirements.txt` | Зависимости: pynetbox, paramiko, requests |
@@ -569,10 +646,16 @@ python netbox_uplinks_cleanup.py
 ---
 
 **Формат `commit_rates.json`**  
-Ключ — имя устройства, значение — объект «имя интерфейса → { `provider`, `circuit_id`, `commit_rate_gbps` }». `circuit_id` — уникальный идентификатор контура (Unique circuit ID в NetBox). `commit_rate_gbps` — оплаченная скорость в **Гбит/с** (в NetBox Circuit Commit rate хранится в Kbps: умножить на 1 000 000). Провайдер — короткое имя. Ключи с префиксом `_` при чтении линков игнорируются; служебный ключ **`_provider_limits`** задаёт **агрегатный лимит по провайдеру** (Гбит/с) для мониторинга в Zabbix: `"_provider_limits": { "Cogent": 10, "Hurricane": 5 }` — сумма трафика по всем линкам провайдера не должна превышать указанное значение. При генерации/merge `generate_commit_rates.py` сохраняет существующий `_provider_limits`. Файл не коммитится; пример структуры — `commit_rates.json.example` (скопировать в `commit_rates.json`).
+Ключ — имя устройства, значение — объект «имя интерфейса → { `provider`, `circuit_id`, `commit_rate_gbps`, ... }». `circuit_id` — уникальный идентификатор контура (Unique circuit ID в NetBox). `commit_rate_gbps` — оплаченная скорость в **Гбит/с** (в NetBox Circuit Commit rate хранится в Kbps: умножить на 1 000 000). Провайдер — короткое имя.  
+Дополнительные поля линка (например **`billing_model`**: `Flat` / **`Burst`** / `95thAggBurst`) допускаются и сохраняются при merge. Для **`Burst`** в Zabbix по флагу создаются per-link триггеры и сервис **`Uplinks Burst {circuit_id}`**; у линка должны быть заполнены **`provider`**, **`circuit_id`** и по возможности **`commit_rate_gbps`**. Ключи с префиксом `_` на корне не считаются устройствами; служебные ключи:
+
+- **`_provider_limits`** — агрегатный лимит по провайдеру (Гбит/с) для хостов **`Uplinks {Provider}`** и триггеров 90%/100%/SLA breach.
+- **`_provider_sla`** — одно число (например `99.95`): целевой процент доступности для **встроенных SLA** в Zabbix (**`zabbix_provider_services.py`**) и для колонки **BelowSLA** в **`zabbix_provider_sla.py`**.
+
+Другие **`_…`** ключи (`_billing_models` и т.п.) при merge сохраняются. Файл обычно не коммитится; пример — **`commit_rates.json.example`**.
 
 **Генерация по dry-ssh**  
-Скрипт `generate_commit_rates.py` по всем линкам из `dry-ssh.json` собирает записи в `commit_rates.json`. Провайдер из `description_to_name.json`; `circuit_id` в формате провайдер-локация-N; для новых пар `commit_rate_gbps` — null (заполнить вручную, в Гбит/с). При merge старый ключ `commit_rate_kbps` конвертируется в `commit_rate_gbps` (значения &lt; 1000 считаются уже Гбит/с). Пример: `cp commit_rates.json.example commit_rates.json` затем `python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json`.
+Скрипт `generate_commit_rates.py` по всем линкам из `dry-ssh.json` собирает записи в `commit_rates.json`. Провайдер из `description_to_name.json`; `circuit_id` в формате провайдер-локация-N; для новых пар `commit_rate_gbps` — null (заполнить вручную, в Гбит/с). При merge старый ключ `commit_rate_kbps` конвертируется в `commit_rate_gbps` (значения &lt; 1000 считаются уже Гбит/с), дополнительные поля линков (например `billing_model`) и служебные `_...` ключи сохраняются. Пример: `cp commit_rates.json.example commit_rates.json` затем `python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json`.
 
 **Создание circuits в NetBox**  
 Скрипт `netbox_create_circuits.py` по `commit_rates.json` создаёт в NetBox провайдеров (при отсутствии), тип контура «Internet», контуры (cid, commit rate в Kbps), **Termination A** на site устройства и кабель до интерфейса. Тег из `uplinks_config.NETBOX_AUTOMATION_TAG` (по умолчанию `automatization`) создаётся при отсутствии и проставляется новым и существующим объектам. **Termination Z** не создаётся.

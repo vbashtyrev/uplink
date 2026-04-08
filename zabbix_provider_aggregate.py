@@ -236,7 +236,9 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
     ]
 
     def _update_or_create_and_cleanup(desc, expr, severity, same_type_list, trigger_tags):
-        """Обновить один триггер по точному описанию или создать; удалить остальные того же типа."""
+        """Обновить один триггер по точному описанию или создать; удалить остальные того же типа.
+        Возврат: (kept_triggerid, error_or_none)
+        """
         same_type_ids = [t["triggerid"] for t in same_type_list]
         by_desc = {t["description"]: t["triggerid"] for t in same_type_list}
         kept_id = by_desc.get(desc)
@@ -249,7 +251,7 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
                 "tags": trigger_tags,
             }, debug=debug)
             if err:
-                return err
+                return None, err
         else:
             result, err = zabbix_request(url, token, "trigger.create", {
                 "description": desc,
@@ -258,31 +260,61 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
                 "tags": trigger_tags,
             }, debug=debug)
             if err:
-                return err
+                return None, err
             kept_id = result["triggerids"][0]
         # Удалить лишние триггеры того же типа (старый лимит)
         for tid in same_type_ids:
             if tid != kept_id:
                 _, err = zabbix_request(url, token, "trigger.delete", [tid], debug=debug)
                 if err:
-                    return err
-        return None
+                    return None, err
+        return kept_id, None
+
+    def _set_dependency(child_triggerid, parent_triggerid):
+        """Set single dependency: child depends on parent."""
+        if not child_triggerid or not parent_triggerid:
+            return None
+        _, err = zabbix_request(url, token, "trigger.update", {
+            "triggerid": child_triggerid,
+            "dependencies": [{"triggerid": parent_triggerid}],
+        }, debug=debug)
+        return err
 
     # Уровни важности: 90% — Information, 100% — Warning
-    err = _update_or_create_and_cleanup(desc_warn, expr_warn, 1, warn_triggers, tags)
+    warn_id, err = _update_or_create_and_cleanup(desc_warn, expr_warn, 1, warn_triggers, tags)
     if err:
         return err
-    err = _update_or_create_and_cleanup(desc_high, expr_high, 2, high_triggers, tags)
+    high_id, err = _update_or_create_and_cleanup(desc_high, expr_high, 2, high_triggers, tags)
     if err:
         return err
     # SLA учитываем только при устойчивом превышении 100% в течение SLA_TRIGGER_FUNCTION_PERIOD.
-    err = _update_or_create_and_cleanup(desc_sla, expr_sla, 2, sla_triggers, tags_sla)
+    _, err = _update_or_create_and_cleanup(desc_sla, expr_sla, 2, sla_triggers, tags_sla)
+    if err:
+        return err
+    # Чтобы не дублировать шум, 90% делаем зависимым от 100%.
+    err = _set_dependency(warn_id, high_id)
     if err:
         return err
     return None
 
 
-def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, debug=False):
+def _delete_provider_aggregate_triggers(url, token, hostid, debug=False):
+    """Delete provider aggregate triggers on a host (used when provider has no limit)."""
+    res, err = zabbix_request(url, token, "trigger.get", {
+        "output": ["triggerid", "description"],
+        "hostids": [hostid],
+        "search": {"description": "Provider aggregate"},
+    }, debug=debug)
+    if err:
+        return err
+    tids = [t["triggerid"] for t in (res or [])]
+    if not tids:
+        return None
+    _, err = zabbix_request(url, token, "trigger.delete", tids, debug=debug)
+    return err
+
+
+def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, debug=False, prune_triggers_without_limits=True):
     """Create/update provider aggregate hosts with calculated items and limit triggers."""
     ok, err = validate_zabbix_token(url, token, debug=debug)
     if not ok:
@@ -368,6 +400,7 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
         )
         if err:
             return None, "{} item out: {}".format(provider, err)
+        has_triggers = False
         if limit_bps is not None:
             technical_host = _sanitize_provider_name(host_name)
             err = _ensure_triggers(
@@ -375,7 +408,12 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
             )
             if err:
                 return None, "{} triggers: {}".format(provider, err)
-        done.append((provider, host_name))
+            has_triggers = True
+        elif prune_triggers_without_limits:
+            err = _delete_provider_aggregate_triggers(url, token, hostid, debug=debug)
+            if err:
+                return None, "{} trigger cleanup: {}".format(provider, err)
+        done.append((provider, host_name, has_triggers))
     return done, None
 
 
@@ -388,6 +426,11 @@ def main():
     parser.add_argument("-d", "--dry-ssh", default=DEFAULT_INPUT, help="Путь к dry-ssh.json")
     parser.add_argument("-m", "--description-map", default=DESCRIPTION_MAP_FILE, help="Файл description_to_name.json")
     parser.add_argument("--no-cache", action="store_true", help="Не использовать кэш Zabbix")
+    parser.add_argument(
+        "--keep-triggers-without-limits",
+        action="store_true",
+        help="Не удалять существующие aggregate-триггеры у провайдеров, которых нет в _provider_limits",
+    )
     parser.add_argument("--debug", action="store_true", help="Отладочный вывод")
     args = parser.parse_args()
 
@@ -400,16 +443,20 @@ def main():
         ZABBIX_CACHE_FILE,
     )
     done, err = run(
-        url, token, args.commit_rates, args.dry_ssh, args.description_map, cache_path, debug=args.debug
+        url, token, args.commit_rates, args.dry_ssh, args.description_map, cache_path,
+        debug=args.debug, prune_triggers_without_limits=(not args.keep_triggers_without_limits)
     )
     if err:
         print(err, file=sys.stderr)
         sys.exit(1)
     if not done:
-        print("Нет провайдеров в _provider_limits с линками — ничего не создано.")
+        print("Нет провайдеров с линками — ничего не создано.")
         sys.exit(0)
-    for provider, host_name in done:
-        print("OK: {} — хост «{}», calculated items и триггеры 90%/100%".format(provider, host_name))
+    for provider, host_name, has_triggers in done:
+        if has_triggers:
+            print("OK: {} — хост «{}», calculated items и триггеры 90%/100%".format(provider, host_name))
+        else:
+            print("OK: {} — хост «{}», только calculated items (без триггеров: нет _provider_limits)".format(provider, host_name))
 
 
 if __name__ == "__main__":

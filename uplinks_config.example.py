@@ -24,11 +24,15 @@ THRESHOLD_PERCENT_HIGH = 100
 TRIGGER_TAG_NAME = "scripts"
 TRIGGER_TAG_VALUE = "automatization"
 TRIGGER_FUNCTION_PERIOD = "15m"
-TRIGGER_DESC_90_SUFFIX = "High bandwidth ({}%)".format(THRESHOLD_PERCENT_WARN)
-TRIGGER_DESC_100_SUFFIX = "High bandwidth (threshold line)"
-TRIGGER_DESC_SEARCH = "High bandwidth ("
+TRIGGER_DESC_90_SUFFIX = "Commit rate exceeded ({}%)".format(THRESHOLD_PERCENT_WARN)
+TRIGGER_DESC_100_SUFFIX = "Commit rate exceeded (100%)"
+TRIGGER_DESC_SEARCH = "Commit rate exceeded ("
 # SLA breach rule for provider aggregates: 100% for a sustained period
 SLA_TRIGGER_FUNCTION_PERIOD = "1h"
+# Per-link Burst: описание после «Interface {name}: » — только этот триггер с тегом sla=true
+TRIGGER_DESC_SLA_BREACH_SUFFIX = "SLA breach: >= 100% of commit for {}".format(
+    SLA_TRIGGER_FUNCTION_PERIOD
+)
 SLA_TRIGGER_TAG_NAME = "sla"
 SLA_TRIGGER_TAG_VALUE = "true"
 # SLA effective date (UTC timestamp), e.g. 2026-03-01 00:00:00 UTC

@@ -24,10 +24,14 @@ from uplinks_config import (
     THRESHOLD_PERCENT_WARN,
     TRIGGER_DESC_90_SUFFIX,
     TRIGGER_DESC_100_SUFFIX,
+    TRIGGER_DESC_SLA_BREACH_SUFFIX,
     TRIGGER_FUNCTION_PERIOD,
     TRIGGER_TAG_NAME,
     TRIGGER_TAG_VALUE,
     TRIGGER_DESC_SEARCH,
+    SLA_TRIGGER_FUNCTION_PERIOD,
+    SLA_TRIGGER_TAG_NAME,
+    SLA_TRIGGER_TAG_VALUE,
 )
 
 # Алиас для совместимости (поиск старых макросов при удалении)
@@ -35,6 +39,7 @@ MACRO_PREFIX = MACRO_PREFIX_MAX
 # NetBox commit_rate в Kbps → в bps для Zabbix
 KBPS_TO_BPS = 1000
 DEFAULT_DRY_SSH = "dry-ssh.json"
+DEFAULT_COMMIT_RATES = "commit_rates.json"
 
 
 def _macro_name_for_interface(iface_name):
@@ -61,6 +66,75 @@ def load_dry_ssh(path):
     except (OSError, json.JSONDecodeError):
         return None
     return data.get("devices") or None
+
+
+def load_burst_pairs(path):
+    """Загрузить пары (device, interface) с billing_model == 'Burst' из commit_rates.json."""
+    if not path or not os.path.isfile(path):
+        return set()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return set()
+    out = set()
+    for dev_name, ifaces in (data or {}).items():
+        if not isinstance(dev_name, str) or dev_name.startswith("_"):
+            continue
+        if not isinstance(ifaces, dict):
+            continue
+        for iface_name, entry in ifaces.items():
+            if not isinstance(entry, dict):
+                continue
+            model = (entry.get("billing_model") or "").strip().lower()
+            if model == "burst":
+                out.add((dev_name, (iface_name or "").strip()))
+    return out
+
+
+def load_burst_metadata(path):
+    """(device, interface) -> {provider, circuit_id} для billing_model=Burst."""
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out = {}
+    for dev_name, ifaces in (data or {}).items():
+        if not isinstance(dev_name, str) or dev_name.startswith("_"):
+            continue
+        if not isinstance(ifaces, dict):
+            continue
+        for iface_name, entry in ifaces.items():
+            if not isinstance(entry, dict):
+                continue
+            if (entry.get("billing_model") or "").strip().lower() != "burst":
+                continue
+            prov = (entry.get("provider") or "").strip()
+            cid = (entry.get("circuit_id") or "").strip()
+            if not prov or not cid:
+                continue
+            out[(dev_name, (iface_name or "").strip())] = {"provider": prov, "circuit_id": cid}
+    return out
+
+
+def burst_link_trigger_tags_no_sla(provider, circuit_id):
+    """90%/100% на карте — без sla=true (как у aggregate warn/high)."""
+    return [
+        TRIGGER_TAG_SCRIPTS,
+        {"tag": "provider", "value": provider},
+        {"tag": "circuit", "value": circuit_id},
+        {"tag": "billing", "value": "burst"},
+    ]
+
+
+def burst_sla_breach_trigger_tags(provider, circuit_id):
+    """Только триггер SLA breach — совпадает с problem_tags сервиса Uplinks Burst."""
+    return burst_link_trigger_tags_no_sla(provider, circuit_id) + [
+        {"tag": SLA_TRIGGER_TAG_NAME, "value": SLA_TRIGGER_TAG_VALUE},
+    ]
 
 
 def build_physical_to_logical(dry_ssh_devices):
@@ -344,6 +418,8 @@ def set_zabbix_host_if_util_macros(url, token, hostid, new_if_util_list, debug=F
 
 
 TRIGGER_TAG_SCRIPTS = {"tag": TRIGGER_TAG_NAME, "value": TRIGGER_TAG_VALUE}
+LEGACY_TRIGGER_DESC_90_SUFFIX = "High bandwidth ({}%)".format(THRESHOLD_PERCENT_WARN)
+LEGACY_TRIGGER_DESC_100_SUFFIX = "High bandwidth (threshold line)"
 
 
 def delete_link_triggers(url, token, debug=False):
@@ -358,7 +434,9 @@ def delete_link_triggers(url, token, debug=False):
         "trigger.get",
         {
             "output": ["triggerid", "description"],
-            "search": {"description": TRIGGER_DESC_SEARCH},
+            # Ищем по общему префиксу интерфейсных триггеров, чтобы находить и legacy,
+            # и новые формулировки.
+            "search": {"description": "Interface "},
             "selectTags": "extend",
         },
         debug=debug,
@@ -371,6 +449,9 @@ def delete_link_triggers(url, token, debug=False):
         if not (
             desc.endswith(TRIGGER_DESC_90_SUFFIX)
             or desc.endswith(TRIGGER_DESC_100_SUFFIX)
+            or desc.endswith(TRIGGER_DESC_SLA_BREACH_SUFFIX)
+            or desc.endswith(LEGACY_TRIGGER_DESC_90_SUFFIX)
+            or desc.endswith(LEGACY_TRIGGER_DESC_100_SUFFIX)
         ):
             continue
         tags = t.get("tags") or []
@@ -425,9 +506,10 @@ def get_bits_received_item_key(url, token, hostid, iface_name, debug=False):
 # Приоритеты для отображения на карте: 2 = Warning (жёлтый), 4 = High (красный)
 TRIGGER_PRIORITY_WARN = 2   # 90% — линк жёлтый
 TRIGGER_PRIORITY_HIGH = 4   # 100% — линк красный
+TRIGGER_PRIORITY_SLA_BREACH = 2  # как aggregate SLA breach (не красная карта — её даёт 100%)
 
 
-def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_name, debug=False):
+def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_name, debug=False, link_tags=None):
     """
     Создать/обновить простой триггер max(Bits received, TRIGGER_FUNCTION_PERIOD) > {$IF.UTIL.MAX:"iface"}.
     Линия порога на графике (Simple triggers) и красный линк на карте при 100%.
@@ -441,32 +523,47 @@ def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_na
     description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_100_SUFFIX)
     existing, err = zabbix_request(
         url, token, "trigger.get",
-        {"hostids": [hostid], "output": ["triggerid", "description", "priority", "status", "expression"], "search": {"description": TRIGGER_DESC_100_SUFFIX}},
+        {
+            "hostids": [hostid],
+            "output": ["triggerid", "description", "priority", "status", "expression"],
+            "search": {"description": "Interface {}:".format((iface_name or "").strip())},
+        },
         debug=debug,
     )
     if err:
         return False, err
     for t in (existing or []):
-        if t.get("description") == description:
-            tid = t.get("triggerid")
-            if tid:
-                upd = {}
-                if (t.get("expression") or "").strip() != expression:
-                    upd["expression"] = expression
-                if str(t.get("priority", "0")) != str(TRIGGER_PRIORITY_HIGH):
-                    upd["priority"] = TRIGGER_PRIORITY_HIGH
-                if str(t.get("status", "0")) != "0":  # включить, если был отключён
-                    upd["status"] = "0"
-                if upd:
-                    zabbix_request(url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug)
-            return True, None
+        desc = t.get("description") or ""
+        if not (
+            desc == description
+            or desc.endswith(TRIGGER_DESC_100_SUFFIX)
+            or desc.endswith(LEGACY_TRIGGER_DESC_100_SUFFIX)
+        ):
+            continue
+        tid = t.get("triggerid")
+        if tid:
+            upd = {}
+            if desc != description:
+                upd["description"] = description
+            if (t.get("expression") or "").strip() != expression:
+                upd["expression"] = expression
+            if str(t.get("priority", "0")) != str(TRIGGER_PRIORITY_HIGH):
+                upd["priority"] = TRIGGER_PRIORITY_HIGH
+            if str(t.get("status", "0")) != "0":  # включить, если был отключён
+                upd["status"] = "0"
+            if link_tags is not None:
+                upd["tags"] = link_tags
+            if upd:
+                zabbix_request(url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug)
+        return True, None
+    tags_payload = link_tags if link_tags is not None else [TRIGGER_TAG_SCRIPTS]
     create_res, create_err = zabbix_request(
         url, token, "trigger.create",
         {
             "description": description,
             "expression": expression,
             "priority": TRIGGER_PRIORITY_HIGH,
-            "tags": [TRIGGER_TAG_SCRIPTS],
+            "tags": tags_payload,
         },
         debug=debug,
     )
@@ -475,7 +572,7 @@ def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_na
     return True, None
 
 
-def ensure_simple_warn_trigger(url, token, host_technical, hostid, iface_name, debug=False):
+def ensure_simple_warn_trigger(url, token, host_technical, hostid, iface_name, debug=False, link_tags=None):
     """
     Создать простой триггер WARN: max(Bits received, TRIGGER_FUNCTION_PERIOD) > {$IF.UTIL.WARN:"iface"}.
     На карте линк становится жёлтым при достижении порога WARN.
@@ -487,32 +584,131 @@ def ensure_simple_warn_trigger(url, token, host_technical, hostid, iface_name, d
     macro_ref = _macro_name_warn_for_interface(iface_name)
     expression = "max(/{}/{}, {})>{}".format(host_technical, key, TRIGGER_FUNCTION_PERIOD, macro_ref)
     description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_90_SUFFIX)
+    high_description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_100_SUFFIX)
+    legacy_high_description = "Interface {}: {}".format((iface_name or "").strip(), LEGACY_TRIGGER_DESC_100_SUFFIX)
     existing, err = zabbix_request(
         url, token, "trigger.get",
-        {"hostids": [hostid], "output": ["triggerid", "description", "status", "expression"], "search": {"description": TRIGGER_DESC_90_SUFFIX}},
+        {
+            "hostids": [hostid],
+            "output": ["triggerid", "description", "status", "expression"],
+            "search": {"description": "Interface {}:".format((iface_name or "").strip())},
+        },
         debug=debug,
     )
     if err:
         return False, err
     for t in (existing or []):
-        if t.get("description") == description:
-            tid = t.get("triggerid")
-            if tid:
-                upd = {}
-                if (t.get("expression") or "").strip() != expression:
-                    upd["expression"] = expression
-                if str(t.get("status", "0")) != "0":
-                    upd["status"] = "0"
-                if upd:
-                    zabbix_request(url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug)
-            return True, None
+        desc = t.get("description") or ""
+        if not (
+            desc == description
+            or desc.endswith(TRIGGER_DESC_90_SUFFIX)
+            or desc.endswith(LEGACY_TRIGGER_DESC_90_SUFFIX)
+        ):
+            continue
+        tid = t.get("triggerid")
+        if tid:
+            upd = {}
+            if desc != description:
+                upd["description"] = description
+            if (t.get("expression") or "").strip() != expression:
+                upd["expression"] = expression
+            if str(t.get("status", "0")) != "0":
+                upd["status"] = "0"
+            # Найдём триггер 100% на этом же интерфейсе и добавим зависимость 90% -> 100%.
+            high_id = None
+            res_h, err_h = zabbix_request(
+                url, token, "trigger.get",
+                {"hostids": [hostid], "output": ["triggerid", "description"], "search": {"description": "Interface {}:".format((iface_name or "").strip())}},
+                debug=debug,
+            )
+            if not err_h and res_h:
+                for th in res_h:
+                    d = th.get("description") or ""
+                    if d == high_description or d == legacy_high_description or d.endswith(TRIGGER_DESC_100_SUFFIX) or d.endswith(LEGACY_TRIGGER_DESC_100_SUFFIX):
+                        high_id = th.get("triggerid")
+                        if high_id:
+                            break
+            if high_id:
+                upd["dependencies"] = [{"triggerid": str(high_id)}]
+            if link_tags is not None:
+                upd["tags"] = link_tags
+            if upd:
+                zabbix_request(url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug)
+        return True, None
+    tags_payload = link_tags if link_tags is not None else [TRIGGER_TAG_SCRIPTS]
     create_res, create_err = zabbix_request(
         url, token, "trigger.create",
         {
             "description": description,
             "expression": expression,
             "priority": TRIGGER_PRIORITY_WARN,
-            "tags": [TRIGGER_TAG_SCRIPTS],
+            "tags": tags_payload,
+        },
+        debug=debug,
+    )
+    if create_err or not create_res or not create_res.get("triggerids"):
+        return False, create_err or "trigger.create не вернул triggerid"
+    return True, None
+
+
+def ensure_burst_sla_breach_trigger(url, token, host_technical, hostid, iface_name, debug=False, link_tags=None):
+    """
+    Burst SLA breach: min(Bits received, SLA_TRIGGER_FUNCTION_PERIOD) > commit — только этот триггер с sla=true.
+    Аналог Provider aggregate SLA breach.
+    """
+    key = get_bits_received_item_key(url, token, hostid, iface_name, debug=debug)
+    if not key:
+        return False, "не найден item Bits received для интерфейса {}".format(iface_name)
+    macro_ref = _macro_name_for_interface(iface_name)
+    expression = "min(/{}/{},{})>{}".format(
+        host_technical, key, SLA_TRIGGER_FUNCTION_PERIOD, macro_ref
+    )
+    description = "Interface {}: {}".format(
+        (iface_name or "").strip(), TRIGGER_DESC_SLA_BREACH_SUFFIX
+    )
+    existing, err = zabbix_request(
+        url,
+        token,
+        "trigger.get",
+        {
+            "hostids": [hostid],
+            "output": ["triggerid", "description", "priority", "status", "expression"],
+            "search": {"description": "Interface {}:".format((iface_name or "").strip())},
+        },
+        debug=debug,
+    )
+    if err:
+        return False, err
+    for t in (existing or []):
+        desc = t.get("description") or ""
+        if not (desc == description or desc.endswith(TRIGGER_DESC_SLA_BREACH_SUFFIX)):
+            continue
+        tid = t.get("triggerid")
+        if tid:
+            upd = {}
+            if desc != description:
+                upd["description"] = description
+            if (t.get("expression") or "").strip() != expression:
+                upd["expression"] = expression
+            if str(t.get("priority", "0")) != str(TRIGGER_PRIORITY_SLA_BREACH):
+                upd["priority"] = TRIGGER_PRIORITY_SLA_BREACH
+            if str(t.get("status", "0")) != "0":
+                upd["status"] = "0"
+            if link_tags is not None:
+                upd["tags"] = link_tags
+            if upd:
+                zabbix_request(url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug)
+        return True, None
+    tags_payload = link_tags if link_tags is not None else [TRIGGER_TAG_SCRIPTS]
+    create_res, create_err = zabbix_request(
+        url,
+        token,
+        "trigger.create",
+        {
+            "description": description,
+            "expression": expression,
+            "priority": TRIGGER_PRIORITY_SLA_BREACH,
+            "tags": tags_payload,
         },
         debug=debug,
     )
@@ -559,12 +755,19 @@ def main():
     parser.add_argument(
         "--create-link-triggers",
         action="store_true",
-        help="Создавать/обновлять простые триггеры 90%%/100%% на интерфейсы (по умолчанию: нет, используются триггеры шаблонов)",
+        help=(
+            "Создавать/обновлять простые триггеры 90%%/100%%/SLA breach только для billing_model=Burst "
+            "(по умолчанию: нет, используются триггеры шаблонов)"
+        ),
+    )
+    parser.add_argument(
+        "-f", "--commit-rates", default=DEFAULT_COMMIT_RATES,
+        help="Путь к commit_rates.json (для фильтра триггеров по billing_model=Burst)",
     )
     parser.add_argument(
         "--delete-link-triggers",
         action="store_true",
-        help="Удалить существующие простые триггеры 90%%/100%% (scripts:automatization) для uplink-интерфейсов и выйти",
+        help="Удалить простые триггеры 90%%/100%%/SLA breach (scripts:automatization) для uplink-интерфейсов и выйти",
     )
     args = parser.parse_args()
 
@@ -586,7 +789,7 @@ def main():
 
     if args.delete_link_triggers:
         deleted = delete_link_triggers(zabbix_url, zabbix_token, debug=args.debug)
-        print("Удалено триггеров uplinks 90%/100%: {}".format(deleted))
+        print("Удалено триггеров uplinks 90%/100%/SLA breach: {}".format(deleted))
         if not args.create_link_triggers and not args.dry_run:
             # Режим только удаления: выходим, не трогая NetBox/макросы.
             return
@@ -642,6 +845,10 @@ def main():
         print("Хосты не найдены в Zabbix: {}".format(", ".join(sorted(missing))), file=sys.stderr)
 
     updated = 0
+    burst_pairs = load_burst_pairs(args.commit_rates) if args.create_link_triggers else set()
+    burst_meta = load_burst_metadata(args.commit_rates) if args.create_link_triggers else {}
+    if args.create_link_triggers and args.debug:
+        print("Burst-пар из {}: {}".format(args.commit_rates, len(burst_pairs)), file=sys.stderr)
     for dev_name in hostnames:
         if dev_name not in hostid_by_host:
             continue
@@ -677,26 +884,47 @@ def main():
             print("Ошибка обновления макросов для {}: {}".format(dev_name, err or "usermacro"), file=sys.stderr)
             continue
         # Триггеры 90%/100% для карты — по отдельному ключу, по умолчанию не создаём
+        created_triggers_for = 0
         if args.create_link_triggers:
             zabbix_host = host_technical_by_hostid.get(hostid) or dev_name
             for iface_name, _bps in iface_bps_list:
+                if (dev_name, iface_name) not in burst_pairs:
+                    continue
+                binfo = burst_meta.get((dev_name, iface_name))
+                link_tags = (
+                    burst_link_trigger_tags_no_sla(binfo["provider"], binfo["circuit_id"])
+                    if binfo
+                    else None
+                )
+                sla_tags = (
+                    burst_sla_breach_trigger_tags(binfo["provider"], binfo["circuit_id"])
+                    if binfo
+                    else None
+                )
                 ok_tr, err_tr = ensure_simple_threshold_trigger(
-                    zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug
+                    zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug, link_tags=link_tags
                 )
                 if not ok_tr:
                     print("  {}: триггер 100% — {}".format(iface_name, err_tr or "ошибка"), file=sys.stderr)
                 ok_w, err_w = ensure_simple_warn_trigger(
-                    zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug
+                    zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug, link_tags=link_tags
                 )
                 if not ok_w:
                     print("  {}: триггер 90% — {}".format(iface_name, err_w or "ошибка"), file=sys.stderr)
+                ok_sla, err_sla = ensure_burst_sla_breach_trigger(
+                    zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug, link_tags=sla_tags
+                )
+                if not ok_sla:
+                    print("  {}: триггер SLA breach — {}".format(iface_name, err_sla or "ошибка"), file=sys.stderr)
+                if ok_tr and ok_w and ok_sla:
+                    created_triggers_for += 1
         # Удалить старые item'ы порога net.if.threshold[...] (линия теперь от простого триггера)
         removed, rem_err = remove_threshold_items(zabbix_url, zabbix_token, hostid, debug=args.debug)
         if rem_err:
             print("  {}: удаление item'ов порога — {}".format(dev_name, rem_err), file=sys.stderr)
         msg = "OK: {} — установлено {} макросов (MAX+WARN 90%)".format(dev_name, len(new_if_util))
         if args.create_link_triggers:
-            msg += ", триггеры 90%/100% для карты"
+            msg += ", триггеры 90%/100%/SLA breach для Burst-интерфейсов: {}".format(created_triggers_for)
         if removed:
             msg += ", удалено {} item'ов порога".format(removed)
         print(msg)

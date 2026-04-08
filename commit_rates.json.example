@@ -1,36 +1,46 @@
 {
-  "_comment": "Оплаченная скорость (commit_rate_gbps, Гбит/с), провайдер и Unique circuit ID. В NetBox Circuit Commit rate в Kbps (× 1000000). Скопировать в commit_rates.json и заполнить своими данными.",
+  "_comment": "Оплаченная скорость (commit_rate_gbps, Гбит/с), провайдер и Unique circuit ID. Дополнительно можно хранить billing_model для разделения Flat/Burst/95thAggBurst. В NetBox Circuit Commit rate в Kbps (× 1000000). Скопировать в commit_rates.json и заполнить своими данными.",
   "host-router-1": {
     "Ethernet51/1": {
       "provider": "ProviderA",
       "circuit_id": "ProviderA-LOC-1",
-      "commit_rate_gbps": 8
+      "commit_rate_gbps": 8,
+      "billing_model": "Burst"
     }
   },
   "host-router-2": {
     "Ethernet51/1": {
       "provider": "ProviderA",
       "circuit_id": "ProviderA-LOC-2",
-      "commit_rate_gbps": 8
+      "commit_rate_gbps": 8,
+      "billing_model": "Burst"
     }
   },
   "host-router-3": {
     "Ethernet72/1": {
       "provider": "ProviderB",
       "circuit_id": "ProviderB-LOC-1",
-      "commit_rate_gbps": null
+      "commit_rate_gbps": null,
+      "billing_model": "Flat"
     }
   },
   "host-mx-1": {
     "ae5.0": {
       "provider": "ProviderC",
       "circuit_id": "ProviderC-LOC-1",
-      "commit_rate_gbps": null
+      "commit_rate_gbps": null,
+      "billing_model": "95thAggBurst"
     }
   },
   "_provider_limits": {
-    "ProviderA": 10,
-    "ProviderB": 5
+    "ProviderA": 16,
+    "ProviderB": 12,
+    "ProviderC": 10
   },
-  "_provider_sla": 99.95
+  "_provider_sla": 99.95,
+  "_billing_models": {
+    "ProviderA": "Burst",
+    "ProviderB": "FlatAggCap",
+    "ProviderC": "95thAggBurst"
+  }
 }

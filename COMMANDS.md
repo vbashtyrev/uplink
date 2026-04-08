@@ -163,6 +163,18 @@ python zabbix_sync_commit_rate.py
 python zabbix_sync_commit_rate.py -d dry-ssh.json
 ```
 
+Per-link простые триггеры **90% / 100% / SLA breach** (только линки с **`billing_model: Burst`** в `commit_rates.json`):
+
+```bash
+python zabbix_sync_commit_rate.py -d dry-ssh.json -f commit_rates.json --create-link-triggers
+```
+
+Удалить такие триггеры без полного прогона NetBox:
+
+```bash
+python zabbix_sync_commit_rate.py --delete-link-triggers
+```
+
 Проверка без записи в Zabbix:
 
 ```bash
@@ -230,7 +242,7 @@ python zabbix_uplinks_dashboard.py -f dry-ssh.json --no-cache
 "_provider_limits": { "Cogent": 10, "Hurricane": 5 }
 ```
 
-Затем создайте/обновите хосты и триггеры в Zabbix:
+Затем создайте/обновите хосты и триггеры в Zabbix (90%, 100%, **SLA breach** по лимиту):
 
 ```bash
 python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
@@ -240,23 +252,33 @@ python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
 
 ---
 
-### 9. SLA по провайдерам (сервисы и SLA‑объекты Zabbix)
+### 9. SLA (сервисы и SLA‑объекты Zabbix + offline‑отчёт)
 
-В `commit_rates.json` дополнительно задайте целевой SLA (один на всех провайдеров), например:
+В `commit_rates.json` задайте целевой процент (один на файл), например:
 
 ```json
 "_provider_sla": 99.95
 ```
 
-Скрипт создаст/обновит:
-- сервисы `Uplinks {Provider}` с problem‑tag `provider={Provider}` (цепляются к агрегатным триггерам провайдера);
-- отдельный SLA‑объект `Uplinks {Provider} SLA` для каждого провайдера (по сервис‑тегу `provider={Provider}`).
+**zabbix_provider_services.py** создаёт/обновляет:
+
+- сервисы **`Uplinks {Provider}`** для имён из **`_provider_limits`** (`problem_tags`: `provider`, `sla=true` — только агрегатный триггер **SLA breach**);
+- сервисы **`Uplinks Burst {circuit_id}`** для линков с **`billing_model: Burst`** (`circuit`, `sla=true`, `billing=burst` — per-link **SLA breach**);
+- SLA‑объекты с тем же **`SLO`**, что **`_provider_sla`**.
+
+Рекомендуемый порядок с Burst: сначала **`zabbix_sync_commit_rate.py … --create-link-triggers`**, затем сервисы.
 
 ```bash
 python zabbix_provider_services.py -f commit_rates.json --parent-service "Uplinks providers"
 ```
 
-После этого вкладка SLA в Zabbix покажет по каждому провайдеру фактический SLI против `_provider_sla`.
+Offline‑таблица по истории событий триггеров (агрегаты и Burst, метрика: **SLA breach** или **мгновенный 100%**):
+
+```bash
+python zabbix_provider_sla.py -f commit_rates.json --days 30
+```
+
+Подробности — **README.md** (разделы **zabbix_provider_services** и **zabbix_provider_sla**).
 
 ---
 
@@ -335,20 +357,22 @@ python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json
 # 4) Circuits в NetBox
 python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json
 
-# 5) Макросы и триггеры в Zabbix
+# 5) Макросы в Zabbix; опционально per-link 90/100/SLA breach для billing_model=Burst
 python zabbix_sync_commit_rate.py -d dry-ssh.json
+# python zabbix_sync_commit_rate.py -d dry-ssh.json -f commit_rates.json --create-link-triggers
 
 # 6) Карта Zabbix
 python zabbix_map.py -f dry-ssh.json --zabbix --update-map
 
-# 7) Агрегаты по провайдерам (хосты Uplinks {Provider}, триггеры 90%/100% по _provider_limits)
+# 7) Агрегаты по провайдерам (хосты Uplinks {Provider}, триггеры 90%/100%/SLA breach по _provider_limits)
 python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
 
 # 8) Дашборды Zabbix
 python zabbix_uplinks_dashboard.py -f dry-ssh.json
 
-# 9) Сервисы и SLA по провайдерам
+# 9) Сервисы и SLA (провайдеры + Burst-контуры при _provider_sla)
 python zabbix_provider_services.py -f commit_rates.json --parent-service "Uplinks providers"
+# python zabbix_provider_sla.py -f commit_rates.json
 
 # 10) Grafana (опционально)
 # python grafana_uplinks_graph.py -f dry-ssh.json --grafana-api

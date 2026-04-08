@@ -155,7 +155,9 @@ def get_or_create_circuit_type(nb, name=CIRCUIT_TYPE_DEFAULT):
         return None, str(e)
 
 
-def get_or_create_circuit(nb, cid, provider, circuit_type, commit_rate_kbps, status=CIRCUIT_STATUS_ACTIVE):
+def get_or_create_circuit(
+    nb, cid, provider, circuit_type, commit_rate_kbps, status=CIRCUIT_STATUS_ACTIVE, clear_null_commit=False
+):
     """Вернуть circuit по cid и provider; при отсутствии создать; при наличии — обновить commit_rate по файлу."""
     existing = list(nb.circuits.circuits.filter(cid=cid, provider_id=provider.id))
     tag_obj = _get_or_create_automation_tag(nb)
@@ -163,15 +165,16 @@ def get_or_create_circuit(nb, cid, provider, circuit_type, commit_rate_kbps, sta
         c = existing[0]
         if tag_obj:
             _ensure_record_tag(nb, c, tag_obj, nb.circuits.circuits)
-        # Обновить commit_rate в NetBox по файлу, если отличается
+        # Обновить commit_rate в NetBox по файлу, если отличается.
+        # При clear_null_commit и commit_rate_kbps=None очищаем commit_rate в NetBox.
+        current = getattr(c, "commit_rate", None)
+        if current is not None:
+            try:
+                current = int(current)
+            except (TypeError, ValueError):
+                current = None
         if commit_rate_kbps is not None:
             want = int(commit_rate_kbps)
-            current = getattr(c, "commit_rate", None)
-            if current is not None:
-                try:
-                    current = int(current)
-                except (TypeError, ValueError):
-                    current = None
             if current != want:
                 try:
                     _patch_circuit_commit_rate(nb, c.id, want)
@@ -179,6 +182,13 @@ def get_or_create_circuit(nb, cid, provider, circuit_type, commit_rate_kbps, sta
                 except Exception as e:
                     print("Ошибка обновления commit_rate для {}: {}".format(cid, e), file=sys.stderr)
                     return c, None
+        elif clear_null_commit and current is not None:
+            try:
+                _patch_circuit_commit_rate(nb, c.id, None)
+                return c, "commit_rate очищен"
+            except Exception as e:
+                print("Ошибка очистки commit_rate для {}: {}".format(cid, e), file=sys.stderr)
+                return c, None
         return c, None
     try:
         kwargs = {"cid": cid, "provider": provider.id, "type": circuit_type.id, "status": status}
@@ -199,7 +209,7 @@ def get_or_create_circuit(nb, cid, provider, circuit_type, commit_rate_kbps, sta
 
 
 def _patch_circuit_commit_rate(nb, circuit_id, commit_rate_kbps):
-    """Установить commit_rate у контура через REST PATCH (надёжнее, чем pynetbox update)."""
+    """Установить/очистить commit_rate у контура через REST PATCH."""
     base_url = (getattr(nb, "base_url", None) or getattr(nb, "url", None) or os.environ.get("NETBOX_URL", "")).rstrip("/")
     token = getattr(nb, "token", None) or os.environ.get("NETBOX_TOKEN")
     if not base_url or not token:
@@ -208,10 +218,11 @@ def _patch_circuit_commit_rate(nb, circuit_id, commit_rate_kbps):
         url = "{}/circuits/circuits/{}/".format(base_url, circuit_id)
     else:
         url = "{}/api/circuits/circuits/{}/".format(base_url, circuit_id)
+    payload = {"commit_rate": int(commit_rate_kbps)} if commit_rate_kbps is not None else {"commit_rate": None}
     r = requests.patch(
         url,
         headers={"Authorization": "Token {}".format(token), "Content-Type": "application/json"},
-        json={"commit_rate": int(commit_rate_kbps)},
+        json=payload,
         timeout=30,
     )
     r.raise_for_status()
@@ -334,6 +345,11 @@ def main():
     parser.add_argument("-d", "--dry-ssh", default=None, metavar="FILE", help="dry-ssh.json для маппинга логический интерфейс -> физический (кабель к физическому)")
     parser.add_argument("--location", default=None, metavar="LOC", help="Обработать только указанную локацию (первый сегмент hostname); по умолчанию — все")
     parser.add_argument("--dry-run", action="store_true", help="Не вносить изменения в NetBox")
+    parser.add_argument(
+        "--clear-null-commit",
+        action="store_true",
+        help="Если commit_rate_gbps=null в файле, очистить commit_rate в NetBox для существующего circuit",
+    )
     args = parser.parse_args()
 
     rates, err = load_commit_rates(args.commit_rates)
@@ -372,6 +388,7 @@ def main():
         "created_providers": [],
         "created_circuits": [],
         "updated_commit_rate": [],
+        "cleared_commit_rate": [],
         "created_cables": [],
         "deleted_cables": [],
         "disabled_mark_connected": [],
@@ -424,7 +441,7 @@ def main():
                 print("Провайдер {}: {}".format(provider_name, prov_msg))
 
             circuit_obj, circ_msg = get_or_create_circuit(
-                nb, circuit_id, provider_obj, circuit_type_obj, commit_rate_kbps
+                nb, circuit_id, provider_obj, circuit_type_obj, commit_rate_kbps, clear_null_commit=args.clear_null_commit
             )
             if not circuit_obj:
                 errors.append("{} {}: circuit {}: {}".format(dev_name, iface_name, circuit_id, circ_msg))
@@ -432,6 +449,8 @@ def main():
             if circ_msg:
                 if circ_msg == "commit_rate обновлён":
                     report["updated_commit_rate"].append(circuit_id)
+                elif circ_msg == "commit_rate очищен":
+                    report["cleared_commit_rate"].append(circuit_id)
                 else:
                     report["created_circuits"].append(circuit_id)
                 print("Circuit {}: {}".format(circuit_id, circ_msg))
@@ -459,6 +478,7 @@ def main():
     _report_section("Создано провайдеров", report["created_providers"], lambda x: "  {}".format(x))
     _report_section("Создано контуров (circuits)", report["created_circuits"], lambda x: "  {}".format(x))
     _report_section("Обновлён commit_rate в NetBox (по файлу)", report["updated_commit_rate"], lambda x: "  {}".format(x))
+    _report_section("Очищен commit_rate в NetBox (commit_rate_gbps=null)", report["cleared_commit_rate"], lambda x: "  {}".format(x))
     _report_section("Создано кабелей", report["created_cables"], lambda x: "  {} {}".format(x[0], x[1]))
     _report_section("Удалено кабелей", report["deleted_cables"], lambda x: "  {} {} (cable id {})".format(x[0], x[1], x[2]))
     _report_section("Отключено mark_connected", report["disabled_mark_connected"], lambda x: "  {} {}".format(x[0], x[1]))

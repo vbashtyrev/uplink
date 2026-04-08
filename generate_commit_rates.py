@@ -99,6 +99,7 @@ def main():
         sys.exit(1)
 
     existing = {}
+    existing_meta = {}
     provider_limits = None  # _provider_limits из commit_rates.json (агрегатный лимит по провайдеру, Гбит/с)
     provider_sla = None     # _provider_sla из commit_rates.json (целевой SLA в %, один для всех)
     if not args.no_merge and os.path.isfile(args.output):
@@ -113,6 +114,11 @@ def main():
             provider_sla = existing_raw.get("_provider_sla")
             if not isinstance(provider_sla, (int, float)):
                 provider_sla = None
+            # Сохраняем служебные ключи верхнего уровня, чтобы не терять
+            # дополнительные настройки (например, модели биллинга по провайдеру).
+            for k, v in existing_raw.items():
+                if isinstance(k, str) and k.startswith("_") and k not in ("_comment", "_provider_limits", "_provider_sla"):
+                    existing_meta[k] = v
         existing = {k: v for k, v in (existing_raw or {}).items() if not k.startswith("_")}
 
     cid_map = build_circuit_id_map(data, desc_to_provider, existing)
@@ -143,11 +149,13 @@ def main():
                 if rate_gbps is None and entry.get("commit_rate_kbps") is not None:
                     v = entry["commit_rate_kbps"]
                     rate_gbps = (v / 1_000_000.0) if v >= 1000 else v
-                dev_out[name] = {
-                    "provider": entry.get("provider", provider),
-                    "circuit_id": cid,
-                    "commit_rate_gbps": rate_gbps,
-                }
+                # Сохраняем дополнительные поля линка (например billing_model),
+                # обновляя только канонические поля, которые рассчитывает скрипт.
+                merged_entry = dict(entry)
+                merged_entry["provider"] = entry.get("provider", provider)
+                merged_entry["circuit_id"] = cid
+                merged_entry["commit_rate_gbps"] = rate_gbps
+                dev_out[name] = merged_entry
             else:
                 dev_out[name] = {
                     "provider": provider,
@@ -161,6 +169,8 @@ def main():
         out["_provider_limits"] = provider_limits  # лимит по провайдеру в целом (Гбит/с), для Zabbix aggregate
     if provider_sla is not None:
         out["_provider_sla"] = provider_sla  # целевой SLA в %, один для всех провайдеров
+    for k, v in existing_meta.items():
+        out[k] = v
 
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
