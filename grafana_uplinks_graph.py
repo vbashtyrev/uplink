@@ -37,9 +37,8 @@ def build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name):
     """Build deduplicated edge list per (host, provider), similar to zabbix_map."""
     edges_raw = []
     for hostname in sorted(devices.keys()):
-        hostid = host_id_by_name.get(hostname)
-        if not hostid:
-            continue
+        # Fallback: without --zabbix hostids are unknown, but graph can still be built by hostname.
+        hostid = host_id_by_name.get(hostname) or hostname
         for iface in devices[hostname]:
             iface_name = iface.get("name", "")
             description = iface.get("description", "")
