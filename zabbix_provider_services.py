@@ -301,7 +301,6 @@ def _ensure_burst_circuit_sla(url, token, circuit_id, slo, debug=False):
         "schedule": [],
         "service_tags": [
             {"tag": "circuit", "operator": 0, "value": circuit_id},
-            {"tag": "role", "operator": 0, "value": BURST_CIRCUIT_ROLE},
         ],
     }
     if res:
