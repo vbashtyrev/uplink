@@ -268,7 +268,7 @@ python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
 
 Примечание по Burst SLA: service_tags задаются по **`circuit=<id>`** (без `role`), чтобы исключить перекрёстный матч нескольких Burst‑сервисов в некоторых версиях Zabbix UI.
 
-Рекомендуемый порядок с Burst: сначала **`zabbix_sync_commit_rate.py … --create-link-triggers`**, затем сервисы.
+Рекомендуемый порядок с Burst: сначала **`python zabbix_sync_commit_rate.py -d dry-ssh.json -f commit_rates.json --create-link-triggers`**, затем сервисы.
 
 ```bash
 python zabbix_provider_services.py -f commit_rates.json --parent-service "Uplinks providers"

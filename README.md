@@ -546,7 +546,7 @@ python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
 | `--parent-service` | Имя родительского сервиса (создаётся при отсутствии) |
 | `--debug` | Отладочный вывод API |
 
-**Порядок с Burst:** сначала **`zabbix_sync_commit_rate.py … --create-link-triggers`** (чтобы триггеры имели актуальные теги и описание SLA breach), затем **`python zabbix_provider_services.py -f commit_rates.json`**.
+**Порядок с Burst:** сначала **`python zabbix_sync_commit_rate.py -d dry-ssh.json -f commit_rates.json --create-link-triggers`** (чтобы триггеры имели актуальные теги и описание SLA breach), затем **`python zabbix_provider_services.py -f commit_rates.json`**.
 
 ```bash
 python zabbix_provider_services.py -f commit_rates.json
