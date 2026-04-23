@@ -2,6 +2,14 @@
 
 Переменные окружения задаются один раз в сессии (или в `.env` / профиле). Для Zabbix/NetBox обязательны `*_URL` и `*_TOKEN`.
 
+Быстрый вариант: используйте файл `urls.env`.
+
+```bash
+cp urls.env.example urls.env
+# отредактируйте urls.env
+python run_uplinks_full.py --refresh
+```
+
 ---
 
 ## Один скрипт — вся цепочка (run_uplinks_full.py)

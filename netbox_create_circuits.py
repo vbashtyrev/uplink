@@ -9,8 +9,11 @@ import sys
 import pynetbox
 import requests
 
+from env_urls import load_env_file_if_present
 from netbox_checks import resolve_interface
 from uplinks_config import NETBOX_AUTOMATION_TAG as AUTOMATION_TAG
+
+load_env_file_if_present()
 
 DEFAULT_COMMIT_RATES = "commit_rates.json"
 DEFAULT_DRY_SSH = "dry-ssh.json"

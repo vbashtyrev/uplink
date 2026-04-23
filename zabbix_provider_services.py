@@ -5,12 +5,15 @@ import argparse
 import json
 import sys
 
+from env_urls import load_env_file_if_present
 from zabbix_map import (
     _get_zabbix_url_token,
     zabbix_request,
     validate_zabbix_token,
 )
 from uplinks_config import UPLINKS_AGGREGATE_HOST_PREFIX, SLA_EFFECTIVE_DATE_UTC
+
+load_env_file_if_present()
 
 
 DEFAULT_COMMIT_RATES = "commit_rates.json"

@@ -18,6 +18,39 @@ RUN_LOGS_DIR = "run_logs"       # папка логов: дата_время_run
 CACHE_AGE_SECONDS = 24 * 3600    # кэш dry-ssh.json на 24 часа для шага 1
 
 
+def _strip_quotes(value):
+    if len(value) >= 2 and ((value[0] == '"' and value[-1] == '"') or (value[0] == "'" and value[-1] == "'")):
+        return value[1:-1]
+    return value
+
+
+def load_env_file(path):
+    """
+    Простой загрузчик KEY=VALUE из env-файла.
+    Поддерживает строки вида `export KEY=VALUE`, комментарии и пустые строки.
+    """
+    loaded = 0
+    if not path or not os.path.isfile(path):
+        return loaded
+    with open(path, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+            if "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            if not key:
+                continue
+            val = _strip_quotes(val.strip())
+            os.environ[key] = val
+            loaded += 1
+    return loaded
+
+
 def run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
     """
     Запуск команды. argv — список [python, 'script.py', ...].
@@ -165,9 +198,24 @@ def main():
         metavar="SEC",
         help="Таймаут одного шага в секундах (по умолчанию 600)",
     )
+    parser.add_argument(
+        "--env-file",
+        default="urls.env",
+        metavar="FILE",
+        help="Файл переменных окружения KEY=VALUE (по умолчанию urls.env)",
+    )
+    parser.add_argument(
+        "--no-env-file",
+        action="store_true",
+        help="Не загружать env-файл перед запуском цепочки",
+    )
     args = parser.parse_args()
 
     os.chdir(SCRIPT_DIR)
+    env_file_path = os.path.join(SCRIPT_DIR, args.env_file)
+    loaded_env_count = 0
+    if not args.no_env_file:
+        loaded_env_count = load_env_file(env_file_path)
     python = sys.executable
     timeout = args.timeout
     dry_ssh_path = args.dry_ssh
@@ -196,6 +244,12 @@ def main():
 
     log("=== Uplinks full run {} ===".format(datetime.now().isoformat(timespec="seconds")))
     log("Рабочая директория: {}".format(SCRIPT_DIR))
+    if args.no_env_file:
+        log("Env-файл: [SKIP] (--no-env-file)")
+    elif os.path.isfile(env_file_path):
+        log("Env-файл: {} (загружено {} переменных)".format(env_file_path, loaded_env_count))
+    else:
+        log("Env-файл: {} (не найден, используется текущее окружение)".format(env_file_path))
     log("Лог запуска: {}".format(run_log_path))
     log("Отладочный лог: {}".format(debug_log_path))
     log("")

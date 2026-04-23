@@ -8,6 +8,7 @@ import sys
 
 import pynetbox
 
+from env_urls import load_env_file_if_present
 from zabbix_map import (
     DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
@@ -29,6 +30,8 @@ from uplinks_config import (
     PROVIDERS_FOR_SUMMARY,
     UPLINKS_AGGREGATE_HOST_PREFIX,
 )
+
+load_env_file_if_present()
 
 # Calculated item keys on aggregate hosts `Uplinks {Provider}` (must match zabbix_provider_aggregate)
 AGGREGATE_ITEM_KEY_IN = "aggregate.bits.in[]"

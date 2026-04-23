@@ -11,12 +11,15 @@ import sys
 
 import pynetbox
 
+from env_urls import load_env_file_if_present
 from uplinks_stats import (
     get_device_platform_name,
     is_arista_platform,
     is_juniper_platform,
     netbox_error_message,
 )
+
+load_env_file_if_present()
 
 
 def load_file(path):

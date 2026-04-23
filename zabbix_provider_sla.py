@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+from env_urls import load_env_file_if_present
 from zabbix_map import (
     _get_zabbix_url_token,
     zabbix_request,
@@ -18,6 +19,8 @@ from uplinks_config import (
     TRIGGER_DESC_100_SUFFIX,
     TRIGGER_DESC_SLA_BREACH_SUFFIX,
 )
+
+load_env_file_if_present()
 
 DEFAULT_COMMIT_RATES = "commit_rates.json"
 

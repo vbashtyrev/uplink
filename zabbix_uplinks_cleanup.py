@@ -16,6 +16,7 @@ import argparse
 import os
 import sys
 
+from env_urls import load_env_file_if_present
 from zabbix_map import (
     _get_zabbix_url_token,
     validate_zabbix_token,
@@ -34,6 +35,8 @@ from uplinks_config import (
     TRIGGER_TAG_NAME,
     TRIGGER_TAG_VALUE,
 )
+
+load_env_file_if_present()
 
 # Как в zabbix_sync_commit_rate.delete_link_triggers — legacy окончания описания
 LEGACY_TRIGGER_DESC_90_SUFFIX = "High bandwidth ({}%)".format(THRESHOLD_PERCENT_WARN)

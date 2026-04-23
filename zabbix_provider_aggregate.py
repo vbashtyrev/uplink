@@ -9,6 +9,7 @@ import sys
 
 import pynetbox
 
+from env_urls import load_env_file_if_present
 from zabbix_map import (
     DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
@@ -36,6 +37,8 @@ from uplinks_config import (
     UPLINKS_AGGREGATE_GROUP,
     NETBOX_AUTOMATION_TAG,
 )
+
+load_env_file_if_present()
 
 DEFAULT_COMMIT_RATES = "commit_rates.json"
 CALCULATED_ITEM_KEY_IN = "aggregate.bits.in[]"
@@ -336,15 +339,55 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
     items_by_host_iface = {}
     if cache_path and os.path.isfile(cache_path):
         cached_h, cached_i = load_zabbix_cache(cache_path)
-        if cached_h and cached_i and set(cached_h.keys()) >= hostnames:
+        if cached_h and cached_i:
+            # Берём всё, что уже есть в кэше, даже если в Zabbix появился/исчез хост.
             host_id_by_name = {k: cached_h[k] for k in hostnames if k in cached_h}
             items_by_host_iface = {(h, i): rec for (h, i), rec in cached_i.items() if h in host_id_by_name}
-    if not host_id_by_name or not items_by_host_iface:
-        host_id_by_name, items_by_host_iface, err = fetch_zabbix_hosts_and_items(
-            url, token, hostnames, debug=debug
+
+    missing_in_cache = sorted(hostnames - set(host_id_by_name.keys()))
+    if missing_in_cache:
+        # Критично: если часть хостов не создана в Zabbix, не падаем целиком —
+        # считаем агрегаты по тем, что есть.
+        res, host_err = zabbix_request(
+            url,
+            token,
+            "host.get",
+            {
+                "output": ["hostid", "host", "name"],
+                "filter": {"host": missing_in_cache},
+            },
+            debug=debug,
+        )
+        if host_err:
+            return None, host_err
+        found = set()
+        for h in (res or []):
+            hn = h.get("host")
+            hid = h.get("hostid")
+            if hn and hid:
+                host_id_by_name[hn] = hid
+                found.add(hn)
+        still_missing = sorted(set(missing_in_cache) - found)
+        if still_missing:
+            print(
+                "Предупреждение: хосты не найдены в Zabbix, пропускаю: {}".format(", ".join(still_missing)),
+                file=sys.stderr,
+            )
+
+    if not host_id_by_name:
+        return None, "Нет ни одного хоста из dry-ssh.json в Zabbix"
+
+    # Догружаем items только для хостов, которые реально существуют в Zabbix.
+    # fetch_zabbix_hosts_and_items требует, чтобы все hostnames были найдены.
+    missing_items_hosts = set(host_id_by_name.keys()) - {h for (h, _iface) in items_by_host_iface.keys()}
+    if missing_items_hosts:
+        fetched_h, fetched_items, err = fetch_zabbix_hosts_and_items(
+            url, token, set(missing_items_hosts), debug=debug
         )
         if err:
             return None, err
+        host_id_by_name.update(fetched_h)
+        items_by_host_iface.update(fetched_items)
         if cache_path:
             save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
 

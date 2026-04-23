@@ -8,6 +8,10 @@ import os
 import re
 import sys
 
+from env_urls import load_env_file_if_present
+
+load_env_file_if_present()
+
 
 DEFAULT_INPUT = "dry-ssh.json"
 DESCRIPTION_MAP_FILE = "description_to_name.json"

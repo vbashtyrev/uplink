@@ -7,6 +7,7 @@ import os
 import re
 import sys
 
+from env_urls import load_env_file_if_present
 from zabbix_map import (
     DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
@@ -19,6 +20,8 @@ from zabbix_map import (
     _normalize_interface_name,
     _get_zabbix_url_token,
 )
+
+load_env_file_if_present()
 
 
 def _isp_id(isp):

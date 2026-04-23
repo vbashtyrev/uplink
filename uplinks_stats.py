@@ -15,7 +15,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import paramiko
 import pynetbox
 
+from env_urls import load_env_file_if_present
 from uplinks_config import UPLINK_VRF_NAME
+
+load_env_file_if_present()
 
 
 def _format_ssh_connect_error(host, e):

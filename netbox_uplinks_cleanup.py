@@ -7,7 +7,10 @@ import sys
 
 import pynetbox
 
+from env_urls import load_env_file_if_present
 from uplinks_config import NETBOX_AUTOMATION_TAG as AUTOMATION_TAG
+
+load_env_file_if_present()
 
 
 def _get_nb():

@@ -7,6 +7,7 @@ import sys
 
 import pynetbox
 
+from env_urls import load_env_file_if_present
 # Общая логика Zabbix API из zabbix_map
 from zabbix_map import (
     _get_zabbix_url_token,
@@ -33,6 +34,8 @@ from uplinks_config import (
     SLA_TRIGGER_TAG_NAME,
     SLA_TRIGGER_TAG_VALUE,
 )
+
+load_env_file_if_present()
 
 # Алиас для совместимости (поиск старых макросов при удалении)
 MACRO_PREFIX = MACRO_PREFIX_MAX
