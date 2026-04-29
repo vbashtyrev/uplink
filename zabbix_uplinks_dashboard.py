@@ -9,6 +9,7 @@ import sys
 import pynetbox
 
 from env_urls import load_env_file_if_present
+from generate_commit_rates import is_uplink
 from zabbix_map import (
     DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
@@ -67,6 +68,8 @@ def _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name):
         if not hostid:
             continue
         for iface in devices[hostname]:
+            if not is_uplink(iface):
+                continue
             iface_name = iface.get("name", "")
             description = iface.get("description", "")
             isp = desc_to_name.get(description, description)

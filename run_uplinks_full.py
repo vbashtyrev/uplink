@@ -133,12 +133,18 @@ def _write_run_report(report_lines, run_log_path, report_file, log_func=None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Полная цепочка uplinks: сбор → commit_rates → NetBox → Zabbix (sync, карта, дашборды) → опционально Grafana. Отчёт о работе и об ошибках.",
+        description="Полная цепочка uplinks: сбор → commit_rates → NetBox → Zabbix (sync, карта, дашборды) → опционально Grafana. "
+        "Отчёт о работе и об ошибках. Обновить только от правленного dry-ssh.json: --from-file (или --no-fetch).",
     )
     parser.add_argument(
         "--no-fetch",
         action="store_true",
         help="Не опрашивать устройства по SSH; использовать существующий dry-ssh.json",
+    )
+    parser.add_argument(
+        "--from-file",
+        action="store_true",
+        help="То же, что --no-fetch: цепочка начиная с уже правильного dry-ssh.json (без SSH-сбора)",
     )
     parser.add_argument(
         "--refresh",
@@ -260,17 +266,19 @@ def main():
         print("Не удалось создать отладочный лог {}: {}".format(debug_log_path, e), file=sys.stderr)
         debug_log_path = None
 
+    skip_ssh_fetch = args.no_fetch or args.from_file
+
     # 1. Сбор данных с устройств; кэш на 24ч — при наличии свежего dry-ssh.json шаг пропускается (обход: --refresh)
-    if args.no_fetch:
+    if skip_ssh_fetch:
         if not os.path.isfile(dry_ssh_path):
-            _append_debug(debug_log_path, "Шаг 1: Сбор данных", skip_reason="--no-fetch, файл {} не найден".format(dry_ssh_path))
-            step("Шаг 1: Пропуск (--no-fetch)", False, "файл {} не найден".format(dry_ssh_path))
+            _append_debug(debug_log_path, "Шаг 1: Сбор данных", skip_reason="--no-fetch/--from-file, файл {} не найден".format(dry_ssh_path))
+            step("Шаг 1: Пропуск (--no-fetch / --from-file)", False, "файл {} не найден".format(dry_ssh_path))
             if args.stop_on_error:
                 _finish(report_lines, errors, args.report, run_log_path)
                 sys.exit(1)
         else:
-            _append_debug(debug_log_path, "Шаг 1: Сбор данных", skip_reason="--no-fetch, используется {}".format(dry_ssh_path))
-            log("[SKIP] Шаг 1: Сбор данных (--no-fetch), используется {}".format(dry_ssh_path))
+            _append_debug(debug_log_path, "Шаг 1: Сбор данных", skip_reason="--no-fetch/--from-file, используется {}".format(dry_ssh_path))
+            log("[SKIP] Шаг 1: Сбор данных (--no-fetch / --from-file), используется {}".format(dry_ssh_path))
             report_lines.append("")
     else:
         use_cache = False

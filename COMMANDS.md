@@ -202,7 +202,7 @@ python zabbix_map.py -f dry-ssh.json --zabbix --print-table
 python zabbix_map.py -f dry-ssh.json --zabbix --create-map
 ```
 
-Полное обновление карты (хосты, провайдеры, линки, привязка триггеров к линкам):
+Полное обновление карты (хосты, провайдеры, линки, привязка триггеров к линкам). С карты убираются элементы, которых нет в текущем `dry-ssh.json` (чтобы оставить старые — **`--keep-obsolete-map-elements`**):
 
 ```bash
 python zabbix_map.py -f dry-ssh.json --zabbix --update-map

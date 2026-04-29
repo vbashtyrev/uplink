@@ -9,6 +9,7 @@ import re
 import sys
 
 from env_urls import load_env_file_if_present
+from generate_commit_rates import is_uplink
 
 load_env_file_if_present()
 
@@ -33,7 +34,18 @@ from uplinks_config import (
 
 LEGACY_TRIGGER_DESC_90_SUFFIX = "High bandwidth ({}%)".format(90)
 LEGACY_TRIGGER_DESC_100_SUFFIX = "High bandwidth (threshold line)"
-LINK_DRAWTYPE_BOLD = 1
+# Zabbix 7: 0 line, 2 bold, 3 dotted, 4 dashed (значение 1 недопустимо в API → Wrong fields for map link).
+LINK_DRAWTYPE_BOLD = 2
+
+
+def _api_map_id(value):
+    """Целочисленный ID для полей map link / selement (Zabbix 7 API)."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
 
 
 def load_devices_json(path):
@@ -705,10 +717,16 @@ def ensure_map_exists(url, token, debug=False, width=None, height=None):
     return result["sysmapids"][0], None
 
 
-def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface, desc_to_name, debug=False):
+def update_uplinks_map(
+    url, token, devices, host_id_by_name, items_by_host_iface, desc_to_name, debug=False, prune_obsolete=True
+):
     """
-    Обновить карту: добавить/обновить хосты и провайдеры (image), построить линки.
-    Существующие элементы других хостов не трогаем. При --host — только этот хост и его линки.
+    Обновить карту: хосты, провайдеры (image), линки.
+
+    При prune_obsolete=True (по умолчанию для полного обновления): с карты убираются элементы,
+    которых нет в текущих данных (хосты и облака провайдеров не из dry-ssh, прочие типы элементов).
+    При --host в CLI передаётся prune_obsolete=False — остальные хосты на карте не трогаем.
+    Отключить очистку для полного прогона: --keep-obsolete-map-elements.
     """
     # Рёбра для линков. При наличии логических интерфейсов (ae5, ae5.0, et-0/0/3) на один uplink
     # оставляем одно ребро на (host, ISP): приоритет — интерфейс с items Zabbix, затем логический (ae5.0).
@@ -719,6 +737,8 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
         if not hostid:
             continue
         for iface in devices[hostname]:
+            if not is_uplink(iface):
+                continue
             iface_name = iface.get("name", "")
             description = iface.get("description", "")
             isp = desc_to_name.get(description, description)
@@ -800,30 +820,46 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
     sysmapid = existing[0]["sysmapid"]
     old_selements_raw = existing[0].get("selements", [])
 
+    wanted_host_ids = {str(hid) for _, hid in unique_hosts}
+    wanted_isp_labels = set(unique_isps)
+
     # Один элемент на hostid и один на провайдера (label), чтобы не дублировать при повторных update.
     # selementid_to_canonical: для подмены в линках удалённых дубликатов на оставляемый selementid
     old_selements = []
     old_by_eid = {}
     old_by_image_label = {}
     selementid_to_canonical = {}  # удалённый selementid -> канонический (оставляемый)
+    pruned_selements = 0
     for el in old_selements_raw:
         etype = int(el.get("elementtype", 0))
         sid = el.get("selementid")
         if etype == ELEMENT_TYPE_IMAGE:
             label = el.get("label", "")
+            if prune_obsolete and label not in wanted_isp_labels:
+                pruned_selements += 1
+                continue
             key_img = (ELEMENT_TYPE_IMAGE, label)
             if key_img in old_by_image_label:
                 selementid_to_canonical[str(sid)] = str(old_by_image_label[key_img])
                 continue
             old_by_image_label[key_img] = sid
         else:
+            if prune_obsolete and etype != ELEMENT_TYPE_HOST:
+                pruned_selements += 1
+                continue
             eid = _selement_hostid(el)
+            if prune_obsolete and etype == ELEMENT_TYPE_HOST:
+                if not eid or eid not in wanted_host_ids:
+                    pruned_selements += 1
+                    continue
             if eid is not None:
                 if eid in old_by_eid:
                     selementid_to_canonical[str(sid)] = str(old_by_eid[eid])
                     continue
                 old_by_eid[eid] = sid
         old_selements.append(el)
+    if prune_obsolete and pruned_selements:
+        print("Карта: удалено устаревших элементов (не в текущих данных): {}".format(pruned_selements), file=sys.stderr)
 
     # Добавляем только те элементы, которых ещё нет на карте; позиции берём из layout
     new_selements = []
@@ -878,8 +914,19 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
             if label in isp_pos:
                 el["x"], el["y"] = isp_pos[label]
 
+    # Удалённые/слитые selement всё ещё указаны в старых линках карты → Zabbix при map.update(selements):
+    # «Link selementid1 points to a nonexistent map selement». Сначала снимаем все линки.
+    need_clear_links = pruned_selements > 0 or len(old_selements) < len(old_selements_raw)
+    map_sid = _api_map_id(sysmapid)
+    if need_clear_links:
+        _, err_clear = zabbix_request(
+            url, token, "map.update", {"sysmapid": map_sid, "links": []}, debug=debug
+        )
+        if err_clear:
+            return "map.update (clear links before selements): {}".format(err_clear), sysmapid
+
     result, err = zabbix_request(url, token, "map.update", {
-        "sysmapid": sysmapid,
+        "sysmapid": map_sid,
         "width": map_width,
         "height": map_height,
         "label_type": 0,
@@ -941,10 +988,10 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
                 label_parts.append("In: {?last(/" + hostname + "/" + key_in + ")}")
             if key_out:
                 label_parts.append("Out: {?last(/" + hostname + "/" + key_out + ")}")
+        # Новый линк: не передаём linkid (read-only в API; linkid:0 даёт Wrong fields for map link).
         link = {
-            "linkid": 0,
-            "selementid1": sid1,
-            "selementid2": sid2,
+            "selementid1": _api_map_id(sid1),
+            "selementid2": _api_map_id(sid2),
             "label": "\n".join(label_parts),
         }
         # Привязать триггеры к линку с приоритетом:
@@ -961,7 +1008,7 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
                 return
             if any(str(x.get("triggerid")) == str(tid) for x in linktriggers):
                 return
-            entry = {"triggerid": tid, "color": color}
+            entry = {"triggerid": _api_map_id(tid), "color": color}
             if bold:
                 entry["drawtype"] = LINK_DRAWTYPE_BOLD
             linktriggers.append(entry)
@@ -988,18 +1035,22 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
         if l.get("linkid"):
             entry = {
                 "linkid": int(l["linkid"]),
-                "selementid1": s1,
-                "selementid2": s2,
+                "selementid1": _api_map_id(s1),
+                "selementid2": _api_map_id(s2),
                 "label": label,
             }
             # Сохранить привязки триггеров к линку при обновлении
             lt_list = l.get("linktriggers") or []
             if lt_list:
-                entry["linktriggers"] = [{"triggerid": lt.get("triggerid"), "color": lt.get("color", LINK_COLOR_HIGH)} for lt in lt_list if lt.get("triggerid")]
+                entry["linktriggers"] = [
+                    {"triggerid": _api_map_id(lt.get("triggerid")), "color": lt.get("color", LINK_COLOR_HIGH)}
+                    for lt in lt_list
+                    if lt.get("triggerid")
+                ]
         else:
             entry = {
-                "selementid1": s1,
-                "selementid2": s2,
+                "selementid1": _api_map_id(s1),
+                "selementid2": _api_map_id(s2),
                 "label": label,
             }
         links_merged.append(entry)
@@ -1009,6 +1060,11 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
         if "label" not in link:
             link["label"] = ""
         link["label"] = str(link.get("label") or "")
+
+    # Zabbix 7: у каждого объекта в links обязателен sysmapid, иначе map.update → Wrong fields for map link.
+    map_sysmapid = _api_map_id(sysmapid)
+    for link in links_merged:
+        link["sysmapid"] = map_sysmapid
 
     if debug or new_links:
         print("Линков: существующих {}, новых {}, всего {}".format(
@@ -1021,7 +1077,7 @@ def update_uplinks_map(url, token, devices, host_id_by_name, items_by_host_iface
 
     # Обновление линков карты
     result, err = zabbix_request(url, token, "map.update", {
-        "sysmapid": sysmapid,
+        "sysmapid": map_sysmapid,
         "links": links_merged,
     }, debug=debug)
     if err:
@@ -1080,6 +1136,11 @@ def main():
         "--host",
         metavar="HOSTNAME",
         help="Работать только с указанным хостом (имя из devices)",
+    )
+    parser.add_argument(
+        "--keep-obsolete-map-elements",
+        action="store_true",
+        help="При --update-map не удалять с карты хосты/провайдеры, которых нет в текущем JSON (старое поведение)",
     )
     parser.add_argument(
         "--export-map",
@@ -1224,8 +1285,16 @@ def main():
 
     # Обновление карты по требованию
     if args.update_map:
+        prune_map = (not args.host) and (not args.keep_obsolete_map_elements)
         err_msg, sysmapid = update_uplinks_map(
-            url, token, devices, host_id_by_name, items_by_host_iface, desc_to_name, debug=args.debug,
+            url,
+            token,
+            devices,
+            host_id_by_name,
+            items_by_host_iface,
+            desc_to_name,
+            debug=args.debug,
+            prune_obsolete=prune_map,
         )
         if err_msg:
             print(err_msg, file=sys.stderr)
@@ -1248,7 +1317,14 @@ def main():
                 MAP_NAME, sysmapid), file=sys.stderr)
         else:
             err_msg, sysmapid = update_uplinks_map(
-                url, token, devices, host_id_by_name, items_by_host_iface, desc_to_name, debug=args.debug,
+                url,
+                token,
+                devices,
+                host_id_by_name,
+                items_by_host_iface,
+                desc_to_name,
+                debug=args.debug,
+                prune_obsolete=True,
             )
             if err_msg:
                 print(err_msg, file=sys.stderr)
