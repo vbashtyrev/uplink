@@ -18,8 +18,6 @@ from zabbix_map import (
     zabbix_request,
 )
 from uplinks_config import (
-    MACRO_PREFIX_MAX,
-    MACRO_PREFIX_WARN,
     THRESHOLD_ITEM_KEY,
     THRESHOLD_PERCENT_HIGH,
     THRESHOLD_PERCENT_WARN,
@@ -37,8 +35,10 @@ from uplinks_config import (
 
 load_env_file_if_present()
 
-# Алиас для совместимости (поиск старых макросов при удалении)
-MACRO_PREFIX = MACRO_PREFIX_MAX
+# ВАЖНО: не используем {$IF.UTIL.*}, чтобы не ломать стандартные шаблонные триггеры
+# (они ожидают проценты). Эти макросы хранят абсолют bps-порог для наших простых триггеров.
+UPLINK_MACRO_PREFIX_MAX = "{$UPLINK.BPS.MAX"
+UPLINK_MACRO_PREFIX_WARN = "{$UPLINK.BPS.WARN"
 # NetBox commit_rate в Kbps → в bps для Zabbix
 KBPS_TO_BPS = 1000
 DEFAULT_DRY_SSH = "dry-ssh.json"
@@ -49,14 +49,14 @@ def _macro_name_for_interface(iface_name):
     """Полное имя макроса с контекстом по интерфейсу — для использования в триггере."""
     if not iface_name:
         iface_name = ""
-    return MACRO_PREFIX_MAX + ':"' + iface_name.strip() + '"}'
+    return UPLINK_MACRO_PREFIX_MAX + ':"' + iface_name.strip() + '"}'
 
 
 def _macro_name_warn_for_interface(iface_name):
     """Макрос 90% порога — для триггера «жёлтый» на карте."""
     if not iface_name:
         iface_name = ""
-    return MACRO_PREFIX_WARN + ':"' + iface_name.strip() + '"}'
+    return UPLINK_MACRO_PREFIX_WARN + ':"' + iface_name.strip() + '"}'
 
 
 def load_dry_ssh(path):
@@ -390,12 +390,12 @@ def get_zabbix_host_macros(url, token, hostids, debug=False):
 def set_zabbix_host_if_util_macros(url, token, hostid, new_if_util_list, debug=False):
     """
     Установить макросы commit rate по интерфейсам. Имена макросов с контекстом:
-    {$IF.UTIL.MAX:"Ethernet51/1"} и {$IF.UTIL.WARN:"Ethernet51/1"} (90% для жёлтого на карте).
-    new_if_util_list: список {"macro", "value", "type"} (macro начинается с {$IF.UTIL.MAX или {$IF.UTIL.WARN).
+    {$UPLINK.BPS.MAX:"Ethernet51/1"} и {$UPLINK.BPS.WARN:"Ethernet51/1"}.
+    new_if_util_list: список {"macro", "value", "type"}.
     Возврат (True, None) или (False, error_message).
     """
     to_delete = []
-    for prefix in (MACRO_PREFIX_MAX, MACRO_PREFIX_WARN):
+    for prefix in (UPLINK_MACRO_PREFIX_MAX, UPLINK_MACRO_PREFIX_WARN):
         result, err = zabbix_request(
             url, token, "usermacro.get",
             {"hostids": [hostid], "output": ["hostmacroid", "macro"], "search": {"macro": prefix}},
@@ -514,7 +514,7 @@ TRIGGER_PRIORITY_SLA_BREACH = 2  # как aggregate SLA breach (не красн�
 
 def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_name, debug=False, link_tags=None):
     """
-    Создать/обновить простой триггер max(Bits received, TRIGGER_FUNCTION_PERIOD) > {$IF.UTIL.MAX:"iface"}.
+    Создать/обновить простой триггер max(Bits received, TRIGGER_FUNCTION_PERIOD) > {$UPLINK.BPS.MAX:"iface"}.
     Линия порога на графике (Simple triggers) и красный линк на карте при 100%.
     Возврат (True, None) или (False, error_message).
     """
@@ -577,7 +577,7 @@ def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_na
 
 def ensure_simple_warn_trigger(url, token, host_technical, hostid, iface_name, debug=False, link_tags=None):
     """
-    Создать простой триггер WARN: max(Bits received, TRIGGER_FUNCTION_PERIOD) > {$IF.UTIL.WARN:"iface"}.
+    Создать простой триггер WARN: max(Bits received, TRIGGER_FUNCTION_PERIOD) > {$UPLINK.BPS.WARN:"iface"}.
     На карте линк становится жёлтым при достижении порога WARN.
     Возврат (True, None) или (False, error_message).
     """
@@ -780,7 +780,7 @@ def remove_threshold_items(url, token, hostid, debug=False):
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Синхронизировать {$IF.UTIL.MAX} в Zabbix из NetBox (commit rate контуров по кабелю к интерфейсу).",
+        description="Синхронизировать {$UPLINK.BPS.MAX}/{$UPLINK.BPS.WARN} в Zabbix из NetBox (commit rate по кабелю к интерфейсу).",
     )
     parser.add_argument("-d", "--dry-ssh", default=None, metavar="FILE", help="dry-ssh.json: для кабеля на физике (напр. et-0/0/3) задать контекст макроса по логическому имени (ae5.0) для Zabbix")
     parser.add_argument("--dry-run", action="store_true", help="Не менять макросы в Zabbix, только вывести что бы установили")

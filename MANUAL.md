@@ -25,6 +25,7 @@ export SSH_PASSWORD="..."
 ## 1. Обновление commit rates (полный цикл)
 
 Когда изменили оплаченные скорости по линкам или добавили новые — нужно обновить `commit_rates.json`, NetBox circuits и Zabbix (макросы, пороги на графиках).
+Для uplinks используются макросы `{$UPLINK.BPS.MAX/WARN}` (bps), чтобы не конфликтовать со стандартными шаблонами Zabbix на `{$IF.UTIL.*}` (проценты).
 
 **Вариант А — одной командой (рекомендуется):**
 
@@ -132,7 +133,26 @@ python netbox_uplinks_cleanup.py --dry-run    # что удалится в NetBo
 
 ---
 
-## 6. Одна локация
+## 7. Если раньше были записаны `{$IF.UTIL.*}` в bps (миграция)
+
+Симптом: шаблонный триггер high bandwidth не срабатывает, хотя трафик высокий.
+
+Нужно вернуть `{$IF.UTIL.*}` под шаблон и оставить bps только в `{$UPLINK.BPS.*}`:
+
+```bash
+# 1) Удалить host-level {$IF.UTIL.*} на uplink-хостах (разовый шаг)
+# (можно через UI или вашим рабочим скриптом/запросом API)
+
+# 2) Пересоздать актуальные макросы uplinks
+python zabbix_sync_commit_rate.py -d dry-ssh.json
+
+# 3) Если есть Burst — обновить per-link триггеры под {$UPLINK.BPS.*}
+python zabbix_sync_commit_rate.py -d dry-ssh.json -f commit_rates.json --create-link-triggers
+```
+
+---
+
+## 8. Одна локация
 
 Ограничить операции одной площадкой (первый сегмент hostname, например ALA):
 

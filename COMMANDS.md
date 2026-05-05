@@ -26,6 +26,8 @@ python run_uplinks_full.py --refresh
 
 # Без опроса устройств (использовать существующий dry-ssh.json)
 python run_uplinks_full.py --no-fetch
+# то же самое (алиас)
+python run_uplinks_full.py --from-file
 
 # С Grafana в конце (шаг 2 NetBox по умолчанию выполняется; пропустить: --no-netbox-apply)
 python run_uplinks_full.py --grafana
@@ -42,6 +44,7 @@ python run_uplinks_full.py --no-fetch --location ALA
 | Аргумент | Описание |
 |----------|----------|
 | `--no-fetch` | Не опрашивать устройства по SSH; использовать существующий dry-ssh.json |
+| `--from-file` | Алиас `--no-fetch` (начать цепочку от уже подготовленного dry-ssh.json) |
 | `--refresh` | Обновить кэш шага 1: принудительно выполнить сбор (игнорировать кэш на 24ч) |
 | `--dry-ssh FILE` | Путь к dry-ssh.json (по умолчанию dry-ssh.json) |
 | `--commit-rates FILE` | Путь к commit_rates.json (по умолчанию commit_rates.json) |
@@ -164,6 +167,8 @@ python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json --dry-run
 ```bash
 python zabbix_sync_commit_rate.py
 ```
+
+Скрипт пишет host-level макросы **`{$UPLINK.BPS.MAX:"iface"}`** и **`{$UPLINK.BPS.WARN:"iface"}`** (абсолют bps). Шаблонные **`{$IF.UTIL.*}`** не изменяются и остаются для стандартных триггеров Zabbix.
 
 Если в NetBox кабель на физическом интерфейсе (например et-0/0/3), а в Zabbix — логический (ae5.0), передать dry-ssh для подстановки имён:
 
