@@ -34,12 +34,12 @@ from uplinks_config import (
 
 LEGACY_TRIGGER_DESC_90_SUFFIX = "High bandwidth ({}%)".format(90)
 LEGACY_TRIGGER_DESC_100_SUFFIX = "High bandwidth (threshold line)"
-# Zabbix 7: 0 line, 2 bold, 3 dotted, 4 dashed (значение 1 недопустимо в API → Wrong fields for map link).
+# Zabbix 7: 0 line, 2 bold, 3 dotted, 4 dashed (value 1 is not allowed in the API → Wrong fields for map link).
 LINK_DRAWTYPE_BOLD = 2
 
 
 def _api_map_id(value):
-    """Целочисленный ID для полей map link / selement (Zabbix 7 API)."""
+    """Integer ID for map link/selement fields (Zabbix 7 API)."""
     if value is None or value == "":
         return None
     try:
@@ -49,25 +49,25 @@ def _api_map_id(value):
 
 
 def load_devices_json(path):
-    """Загрузить JSON с ключом devices. Возврат (data, None) или (None, error_msg).
-    Формат: devices[hostname] = [{"name": "...", "description": "...", ...}, ...].
-    В файле могут быть логические интерфейсы (Juniper: ae5, ae5.0, et-0/0/3); опциональные поля:
-    isLogical, isLag, physicalInterface, aggregateInterface, logicalInterface — используются при выборе
-    одного ребра на (host, ISP) для карты."""
+    """Load JSON with the key devices. Return (data, None) or (None, error_msg).
+    Format: devices[hostname] = [{"name": "...", "description": "...", ...}, ...].
+    The file may contain logical interfaces (Juniper: ae5, ae5.0, et-0/0/3); optional fields:
+    isLogical, isLag, physicalInterface, aggregateInterface, logicalInterface - used when selecting
+    one edge per (host, ISP) for the map."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
-        return None, "файл не найден: {}".format(path)
+        return None, "file not found: {}".format(path)
     except json.JSONDecodeError as e:
-        return None, "ошибка JSON: {}".format(e)
+        return None, "JSON error: {}".format(e)
     if "devices" not in data:
-        return None, "в файле нет ключа 'devices'"
+        return None, "the file does not contain the 'devices' key"
     return data, None
 
 
 def load_description_map(path):
-    """Загрузить сопоставление description -> отображаемое имя. Пустой dict если файла нет."""
+    """Load mapping description -> display name. Empty dict if file does not exist."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -79,7 +79,7 @@ def load_description_map(path):
 
 def load_zabbix_cache(path):
     """
-    Загрузить кэш из файла. Возврат (host_id_by_name, items_by_host_iface) или (None, None) при ошибке/отсутствии.
+    Load cache from file. Return (host_id_by_name, items_by_host_iface) or (None, None) on error/missing.
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -89,7 +89,7 @@ def load_zabbix_cache(path):
     if not isinstance(data, dict) or "host_id_by_name" not in data or "items_by_host_iface" not in data:
         return None, None
     host_id_by_name = data["host_id_by_name"]
-    items_list = data.get("items_by_host_iface")  # список [key, rec]
+    items_list = data.get("items_by_host_iface") # list [key, rec]
     items_by_host_iface = {}
     if isinstance(items_list, list):
         for k, rec in items_list:
@@ -103,7 +103,7 @@ def load_zabbix_cache(path):
 
 
 def save_zabbix_cache(path, host_id_by_name, items_by_host_iface):
-    """Сохранить host_id_by_name и items_by_host_iface в JSON (ключи элементов — списки для tuple)."""
+    """Save host_id_by_name and items_by_host_iface in JSON (item keys are lists for tuple)."""
     items_list = [[list(pair), rec] for pair, rec in items_by_host_iface.items()]
     data = {"host_id_by_name": host_id_by_name, "items_by_host_iface": items_list}
     with open(path, "w", encoding="utf-8") as f:
@@ -112,13 +112,13 @@ def save_zabbix_cache(path, host_id_by_name, items_by_host_iface):
 
 def zabbix_request(url, token, method, params=None, debug=False):
     """
-    Вызов Zabbix API 7 (JSON-RPC 2.0). Authorization: Bearer <token>.
-    Возврат (result, None) или (None, error_msg).
+    Call Zabbix API 7 (JSON-RPC 2.0). Authorization: Bearer <token>.
+    Return (result, None) or (None, error_msg).
     """
     try:
         import requests
     except ImportError:
-        return None, "для --zabbix нужен модуль requests (pip install requests)"
+        return None, "--zabbix requires the requests module (pip install requests)"
     if params is None:
         params = {}
     if debug:
@@ -142,7 +142,7 @@ def zabbix_request(url, token, method, params=None, debug=False):
         r.raise_for_status()
         data = r.json()
     except requests.RequestException as e:
-        return None, "запрос к Zabbix: {}".format(e)
+        return None, "query to Zabbix: {}".format(e)
     if "error" in data:
         err = data["error"]
         return None, "Zabbix API: {} ({})".format(
@@ -152,14 +152,14 @@ def zabbix_request(url, token, method, params=None, debug=False):
     if debug and data.get("result") is not None:
         res = data["result"]
         if isinstance(res, list):
-            print("  -> {} записей".format(len(res)), file=sys.stderr)
+            print(" -> {} records".format(len(res)), file=sys.stderr)
         else:
             print("  -> ok", file=sys.stderr)
     return data.get("result"), None
 
 
 def validate_zabbix_token(url, token, debug=False):
-    """Проверить токен: вызов user.get с Bearer (Zabbix 7)."""
+    """Check token: call user.get with Bearer (Zabbix 7)."""
     result, err = zabbix_request(url, token, "user.get", {"limit": 1}, debug=debug)
     if err:
         return False, err
@@ -167,7 +167,7 @@ def validate_zabbix_token(url, token, debug=False):
 
 
 def _get_zabbix_url_token():
-    """Получить ZABBIX_URL и ZABBIX_TOKEN из окружения, нормализовать URL (добавить api_jsonrpc.php при необходимости). Возврат (url, token) или (None, None)."""
+    """Get ZABBIX_URL and ZABBIX_TOKEN from the environment, normalize the URL (add api_jsonrpc.php if necessary). Return (url, token) or (None, None)."""
     url = os.environ.get("ZABBIX_URL", "").rstrip("/")
     token = os.environ.get("ZABBIX_TOKEN", "")
     if not url or not token:
@@ -177,14 +177,14 @@ def _get_zabbix_url_token():
     return url, token
 
 
-# PERM_READ = 1, PERM_READ_WRITE = 2 (константы Zabbix для шаринга карты)
+# PERM_READ = 1, PERM_READ_WRITE = 2 (Zabbix constants for map sharing)
 MAP_SHARE_PERMISSION = 2
 
 def _get_map_user_groups(url, token, debug=False):
     """
-    Список групп пользователя для шаринга карты: userGroups = [{usrgrpid, permission}, ...].
-    В Zabbix 7 map.create при включённой проверке прав может требовать userGroups. Пока не используется.
-    Возврат (list, None) или (None, error_msg).
+    List of user groups for map sharing: userGroups = [{usrgrpid, permission}, ...].
+    In Zabbix 7, map.create may require userGroups when permissions checking is enabled. Not yet in use.
+    Return (list, None) or (None, error_msg).
     """
     result, err = zabbix_request(
         url, token, "user.get",
@@ -192,7 +192,7 @@ def _get_map_user_groups(url, token, debug=False):
         debug=debug,
     )
     if err or not result:
-        return None, err or "user.get: пустой ответ"
+        return None, err or "user.get: empty response"
     usrgrps = result[0].get("usrgrps") or []
     user_groups = []
     for g in usrgrps:
@@ -200,12 +200,12 @@ def _get_map_user_groups(url, token, debug=False):
         if u is not None:
             user_groups.append({"usrgrpid": int(u), "permission": MAP_SHARE_PERMISSION})
     if not user_groups:
-        return None, "у пользователя нет групп (usrgrps); добавьте пользователя в группу в Zabbix"
+        return None, "user has no groups (usrgrps); add the user to a group in Zabbix"
     return user_groups, None
 
 
 def _interface_from_key(key):
-    """Из ключа вида net.if.in[Ethernet51/1] или net.if.out["eth0"] извлечь имя интерфейса."""
+    """From a key like net.if.in[Ethernet51/1] or net.if.out["eth0"] extract the interface name."""
     if not key:
         return None
     m = re.search(r"\[([^]]+)\]", key)
@@ -216,16 +216,16 @@ def _interface_from_key(key):
 
 
 def _interface_from_item_name(name):
-    """Из имени item вида '... Interface Ethernet51/1(Uplink: ...): Bits received' извлечь Ethernet51/1."""
+    """From the item name like '... Interface Ethernet51/1(Uplink: ...): Bits received', extract Ethernet51/1."""
     if not name:
         return None
-    # "Interface Ethernet51/1(" или "Interface Ethernet51/1:"
+    # "Interface Ethernet51/1(" or "Interface Ethernet51/1:"
     m = re.search(r"Interface\s+([^\s(:(]+)", name, re.IGNORECASE)
     return m.group(1).strip() if m else None
 
 
 def _normalize_interface_name(name):
-    """Привести имя интерфейса к одному виду для сравнения (например Ethernet51/1 и ethernet51/1)."""
+    """Convert the interface name to one type for comparison (for example, Ethernet51/1 and ethernet51/1)."""
     if not name:
         return ""
     return name.strip().lower()
@@ -233,9 +233,9 @@ def _normalize_interface_name(name):
 
 def _normalize_provider_name(name):
     """
-    Нормализовать имя провайдера для устойчивого матчинга:
-    игнорируем регистр и разделители (пробел/дефис/подчёркивание/знаки).
-    Пример: "ER-Telecom", "Er telecom" -> "ertelecom".
+    Normalize the provider name for stable matching:
+    We ignore case and delimiters (space/hyphen/underscore/signs).
+    Example: "ER-Telecom", "Er telecom" -> "ertelecom".
     """
     if not name:
         return ""
@@ -244,23 +244,23 @@ def _normalize_provider_name(name):
 
 def get_provider_aggregate_triggers(url, token, providers, debug=False):
     """
-    Получить triggerid агрегатных триггеров 90%/100% по провайдерам.
+    Get triggerid of aggregate triggers 90%/100% by providers.
 
-    Триггеры создаются zabbix_provider_aggregate.py на хостах «Uplinks {Provider}»:
-    - priority=1 (Information) — 90% от лимита;
-    - priority=2 (Warning) — 100% от лимита.
+    Triggers are created by zabbix_provider_aggregate.py on the “Uplinks {Provider}” hosts:
+    - priority=1 (Information) — 90% of the limit;
+    - priority=2 (Warning) — 100% of the limit.
 
-    Возврат: dict provider_name -> (triggerid_warn, triggerid_high).
+    Return: dict provider_name -> (triggerid_warn, triggerid_high).
     """
     providers = [p for p in (providers or []) if p]
     if not providers:
         return {}
-    # Найти хосты агрегатов: сначала по technical host (host), затем по visible name (name),
-    # так как для некоторых провайдеров (Fiord / PING-WIN) host и name могут отличаться.
+    # Find aggregate hosts: first by technical host (host), then by visible name (name),
+    # because for some providers (Fiord / PING-WIN) host and name may differ.
     host_names = [UPLINKS_AGGREGATE_HOST_PREFIX + p for p in providers]
     hostid_by_provider = {}
 
-    # host.get по полю host
+    # host.get by host field
     result, err = zabbix_request(
         url,
         token,
@@ -280,12 +280,12 @@ def get_provider_aggregate_triggers(url, token, providers, debug=False):
             c = str(candidate).strip()
             if not c:
                 continue
-            # Точное совпадение "Uplinks <Provider>"
+            # Exact match "Uplinks <Provider>"
             for p in providers:
                 wanted = UPLINKS_AGGREGATE_HOST_PREFIX + p
                 if c == wanted:
                     return p
-            # Нормализованное совпадение суффикса после префикса
+            # Normalized suffix after prefix match
             if c.startswith(UPLINKS_AGGREGATE_HOST_PREFIX):
                 suffix = c[len(UPLINKS_AGGREGATE_HOST_PREFIX):]
                 p = provider_key_to_name.get(_normalize_provider_name(suffix))
@@ -300,7 +300,7 @@ def get_provider_aggregate_triggers(url, token, providers, debug=False):
         if matched:
             hostid_by_provider[matched] = str(h.get("hostid"))
 
-    # Для недостающих — попытка по visible name (name)
+    # For missing ones - try by visible name (name)
     missing = [p for p in providers if p not in hostid_by_provider]
     if missing:
         names_filter = [UPLINKS_AGGREGATE_HOST_PREFIX + p for p in missing]
@@ -338,7 +338,7 @@ def get_provider_aggregate_triggers(url, token, providers, debug=False):
     if err or not trig_res:
         return {}
     triggers_by_provider = {p: {"warn": None, "high": None} for p in providers}
-    # Приоритеты заданы в zabbix_provider_aggregate: 1=Info (90%), 2=Warning (100%).
+    # Priorities are set in zabbix_provider_aggregate: 1=Info (90%), 2=Warning (100%).
     hostid_to_provider = {hid: p for p, hid in hostid_by_provider.items()}
     for t in trig_res:
         hosts = t.get("hosts") or []
@@ -416,28 +416,28 @@ def get_link_commit_triggers(url, token, hostids, debug=False):
 
 def fetch_zabbix_hosts_and_items(url, token, hostnames, debug=False):
     """
-    Найти в Zabbix хосты по именам и для каждого хоста собрать items «Bits received» / «Bits sent»
-    по ключу (интерфейс в key_). Возврат (host_id_by_name, items_by_host_interface, error).
+    Find hosts by name in Zabbix and collect items “Bits received” / “Bits sent” for each host
+    by key (interface in key_). Return (host_id_by_name, items_by_host_interface, error).
     items_by_host_interface: (hostname, interface_normalized) -> {"bits_in": key_, "bits_out": key_}
     """
     valid, err = validate_zabbix_token(url, token, debug=debug)
     if not valid:
         return None, None, err
 
-    # host.get: сначала по host (technical name), затем по name (visible name) для недостающих
+    # host.get: first by host (technical name), then by name (visible name) for missing ones
     result, err = zabbix_request(url, token, "host.get", {
         "output": ["hostid", "host", "name"],
         "filter": {"host": list(hostnames)},
     }, debug=debug)
     if err:
         return None, None, err
-    host_id_by_name = {}  # наш ключ (из файла) -> hostid; host (technical) для вывода
+    host_id_by_name = {} # our key (from file) -> hostid; host (technical) for output
     for h in result:
         hid = h["hostid"]
         host_id_by_name[h["host"]] = hid
     missing = hostnames - set(host_id_by_name.keys())
     if missing:
-        # попробовать по visible name (name в Zabbix)
+        # try by visible name (name in Zabbix)
         result2, err2 = zabbix_request(url, token, "host.get", {
             "output": ["hostid", "host", "name"],
             "filter": {"name": list(missing)},
@@ -447,10 +447,10 @@ def fetch_zabbix_hosts_and_items(url, token, hostnames, debug=False):
                 host_id_by_name[h["name"]] = h["hostid"]
         missing = hostnames - set(host_id_by_name.keys())
     if missing:
-        return None, None, "хосты не найдены в Zabbix: {}".format(", ".join(sorted(missing)))
+        return None, None, "hosts not found in Zabbix: {}".format(", ".join(sorted(missing)))
 
     hostids = list(host_id_by_name.values())
-    # item.get: search принимает строку, не массив — два запроса и объединяем
+    # item.get: search accepts a string, not an array - two queries and combine
     all_items = []
     for search_name in (BITS_RECEIVED_NAME, BITS_SENT_NAME):
         result, err = zabbix_request(url, token, "item.get", {
@@ -462,7 +462,7 @@ def fetch_zabbix_hosts_and_items(url, token, hostnames, debug=False):
             return None, None, err
         all_items.extend(result)
 
-    # hostid -> наш ключ hostname (из файла); ключи нормализуем к строке (API может вернуть int/str)
+    # hostid -> our hostname key (from file); we normalize the keys to a string (the API can return int/str)
     host_by_id = {str(v): k for k, v in host_id_by_name.items()}
 
     def _item_key(it):
@@ -470,7 +470,7 @@ def fetch_zabbix_hosts_and_items(url, token, hostnames, debug=False):
 
     # (hostname, interface_normalized) -> {"bits_in": key_, "bits_out": key_}
     items_by_host_iface = {}
-    debug_samples = []  # для --debug: первые items с разобранными полями
+    debug_samples = [] # for --debug: first items with parsed fields
     skipped_no_host = 0
     skipped_no_iface = 0
     for item in all_items:
@@ -483,7 +483,7 @@ def fetch_zabbix_hosts_and_items(url, token, hostnames, debug=False):
         name = item.get("name", "")
         iface_from_k = _interface_from_key(key_str)
         iface_from_n = _interface_from_item_name(name)
-        # Приоритет имени из item (Interface Ethernet51/1(...): Bits received), иначе из ключа (там ifHCInOctets.N)
+        # Name priority from item (Interface Ethernet51/1(...): Bits received), otherwise from the key (ifHCInOctets.N there)
         iface = iface_from_n or iface_from_k
         if not iface:
             skipped_no_iface += 1
@@ -501,7 +501,7 @@ def fetch_zabbix_hosts_and_items(url, token, hostnames, debug=False):
             })
         if (hostname, key_norm) not in items_by_host_iface:
             items_by_host_iface[(hostname, key_norm)] = {"bits_in": "", "bits_out": "", "itemid_in": "", "itemid_out": ""}
-        # В шаблонах имя может быть "Bits received" или "Interface Ethernet51/1(...): Bits received"
+        # In templates the name can be "Bits received" or "Interface Ethernet51/1(...): Bits received"
         itemid = item.get("itemid")
         if BITS_RECEIVED_NAME in name or name == BITS_RECEIVED_NAME:
             items_by_host_iface[(hostname, key_norm)]["bits_in"] = key_str
@@ -515,11 +515,11 @@ def fetch_zabbix_hosts_and_items(url, token, hostnames, debug=False):
     if debug:
         if all_items:
             raw = all_items[0]
-            print("DEBUG: один сырой item из API (ключи): {}".format(list(raw.keys())), file=sys.stderr)
+            print("DEBUG: one raw item from the API (keys): {}".format(list(raw.keys())), file=sys.stderr)
             print("DEBUG:   name={!r} key_={!r} key={!r} hostid={!r}".format(
                 raw.get("name"), raw.get("key_"), raw.get("key"), raw.get("hostid")), file=sys.stderr)
         print("DEBUG: skipped_no_host={} skipped_no_iface={}".format(skipped_no_host, skipped_no_iface), file=sys.stderr)
-        print("DEBUG: items_by_host_iface: {} пар (hostname, interface)".format(len(items_by_host_iface)), file=sys.stderr)
+        print("DEBUG: items_by_host_iface: {} pars (hostname, interface)".format(len(items_by_host_iface)), file=sys.stderr)
         for i, (hn, kn) in enumerate(sorted(items_by_host_iface.keys())[:15]):
             rec = items_by_host_iface[(hn, kn)]
             print("  [{}] ({!r}, {!r}) -> in={!r} out={!r}".format(i, hn, kn, rec.get("bits_in", "")[:50], rec.get("bits_out", "")[:50]), file=sys.stderr)
@@ -533,27 +533,27 @@ def fetch_zabbix_hosts_and_items(url, token, hostnames, debug=False):
 MAP_WIDTH = 1200
 MAP_HEIGHT = 800
 ELEMENT_TYPE_HOST = 0
-# В API: 0=host, 4=image (картинка с подписью)
+# In API: 0=host, 4=image (picture with caption)
 ELEMENT_TYPE_IMAGE = 4
 
-# Расстановка: блоки по провайдерам слева направо; граница карты 30, хосты не ближе 160 от провайдера по горизонтали, по вертикали шаг 100, между хостами по горизонтали 180
+# Arrangement: blocks by providers from left to right; map border is 30, hosts are no closer than 160 from the provider horizontally, vertical step is 100, between hosts horizontally is 180
 LAYOUT_MARGIN = 30
 LAYOUT_BLOCK_WIDTH = 500
 LAYOUT_ISP_Y_OFFSET = 50
-LAYOUT_MIN_HOST_TO_PROVIDER = 160   # минимум по горизонтали от провайдера до хоста
-LAYOUT_HOST_HORIZONTAL_GAP = 180    # горизонталь между хостами (две колонки)
-LAYOUT_HOST_Y_OFFSET = 100          # вертикаль: первый ряд хостов под провайдером
-LAYOUT_HOST_STEP_Y = 100            # вертикальный шаг между рядами хостов
+LAYOUT_MIN_HOST_TO_PROVIDER = 160 # horizontal minimum from provider to host
+LAYOUT_HOST_HORIZONTAL_GAP = 180 # horizontal between hosts (two columns)
+LAYOUT_HOST_Y_OFFSET = 100 # vertical: first row of hosts under the provider
+LAYOUT_HOST_STEP_Y = 100 # vertical step between rows of hosts
 LAYOUT_HOST_COLUMNS = 2
-# Минимальное расстояние между центрами элементов (чтобы не накладывались)
+# Minimum distance between the centers of elements (so as not to overlap)
 LAYOUT_MIN_DISTANCE = 80
-# Размер элемента на карте Zabbix (x,y — верхний левый угол); нужен для расчёта высоты карты
+# Size of the element on the Zabbix map (x,y - upper left corner); needed to calculate the map height
 SELEMENT_HEIGHT = 200
 SELEMENT_WIDTH = 200
 
 
 def _selement_hostid(el):
-    """Из элемента карты типа «хост» извлечь hostid (строка). API может вернуть elementid или elements[0].hostid."""
+    """From a map element of type "host", extract hostid (string). The API can return elementid or elements[0].hostid."""
     eid = el.get("elementid")
     if eid is None or eid == "":
         elems = el.get("elements") or []
@@ -565,7 +565,7 @@ def _selement_hostid(el):
 
 
 def _occupied_positions(host_pos, isp_pos, exclude_xy=None):
-    """Список занятых координат (x, y) для проверки коллизий. exclude_xy — не учитывать эту точку."""
+    """List of occupied coordinates (x, y) for collision checking. exclude_xy - ignore this point."""
     out = []
     for v in host_pos.values():
         if exclude_xy is None or v != exclude_xy:
@@ -577,7 +577,7 @@ def _occupied_positions(host_pos, isp_pos, exclude_xy=None):
 
 
 def _is_free(cx, cy, occupied, min_dist):
-    """True, если (cx, cy) не ближе min_dist ни к одной занятой точке."""
+    """True if (cx, cy) is not closer than min_dist to any occupied point."""
     for (ox, oy) in occupied:
         if (cx - ox) ** 2 + (cy - oy) ** 2 < min_dist * min_dist:
             return False
@@ -586,19 +586,19 @@ def _is_free(cx, cy, occupied, min_dist):
 
 def _place_single_host_provider(hx, hy, host_pos, isp_pos):
     """
-    Подобрать свободную позицию для провайдера с одним хостом (хост уже в другом блоке).
-    Порядок: слева, справа, снизу, сверху, между (ближе слева/справа).
-    Возврат (x, y) или (hx - 170, hy) если все занято.
+    Find a free position for a provider with one host (the host is already in another block).
+    Order: left, right, bottom, top, between (closest left/right).
+    Return (x, y) or (hx ​​- 170, hy) if everything is busy.
     """
     occupied = _occupied_positions(host_pos, isp_pos)
     min_d = LAYOUT_MIN_DISTANCE
     candidates = [
-        (hx - 170, hy),   # слева
-        (hx + 170, hy),   # справа
-        (hx, hy + 100),   # снизу
-        (hx, hy - 100),   # сверху
-        (hx - 85, hy),    # между (ближе слева)
-        (hx + 85, hy),    # между (ближе справа)
+        (hx - 170, hy), # left
+        (hx + 170, hy), # right
+        (hx, hy + 100), # from below
+        (hx, hy - 100), # on top
+        (hx - 85, hy), # between (closer to the left)
+        (hx + 85, hy), # between (closer to the right)
     ]
     for (cx, cy) in candidates:
         if _is_free(cx, cy, occupied, min_d):
@@ -608,10 +608,10 @@ def _place_single_host_provider(hx, hy, host_pos, isp_pos):
 
 def _compute_layout(edges, map_width, map_height):
     """
-    По рёбрам вычислить позиции хостов и провайдеров.
-    Провайдеры по убыванию числа подключений; блоки слева направо, при нехватке места — перенос на следующую строку.
-    Один хост у провайдера: провайдер и хост сбоку (те же правила ±170), на одной высоте.
-    Возврат: (host_pos, isp_pos, required_width, required_height).
+    Using the edges, calculate the positions of hosts and providers.
+    Providers in descending order of number of connections; blocks from left to right; if there is not enough space, move to the next line.
+    One host at the provider: provider and host on the side (same rules ±170), at the same height.
+    Return: (host_pos, isp_pos, required_width, required_height).
     """
     isp_to_hosts = {}
     for hostname, hostid, _if, isp, _in, _out, _ki, _ko, _desc in edges:
@@ -631,7 +631,7 @@ def _compute_layout(edges, map_width, map_height):
     block_y = LAYOUT_MARGIN
     row_max_height = 0
     max_x = map_width - LAYOUT_MARGIN
-    max_row_width = 0  # макс. ширина по всем рядам (для итогового размера карты)
+    max_row_width = 0 # max. width across all rows (for the final card size)
 
     for isp in isps_sorted:
         if block_x + LAYOUT_BLOCK_WIDTH > max_x and block_x > LAYOUT_MARGIN:
@@ -642,7 +642,7 @@ def _compute_layout(edges, map_width, map_height):
 
         provider_x = block_x + LAYOUT_BLOCK_WIDTH // 2
         hosts_in_block = sorted(isp_to_hosts[isp], key=lambda t: (t[0], t[1]))
-        # Один хост у провайдера = по числу подключений к ISP, а не по числу размещаемых в этом блоке
+        # One host per provider = by the number of connections to the ISP, not by the number placed in this block
         single_host = len(isp_to_hosts[isp]) == 1
         host_y_row0 = block_y + LAYOUT_ISP_Y_OFFSET + LAYOUT_HOST_Y_OFFSET
 
@@ -653,7 +653,7 @@ def _compute_layout(edges, map_width, map_height):
             placed_hosts.add(hostid)
             row, subcol = divmod(num_placed, LAYOUT_HOST_COLUMNS)
             if single_host:
-                # Провайдер и хост сбоку: те же ±170, провайдер слева, хост справа
+                # Provider and host on the side: the same ±170, provider on the left, host on the right
                 isp_pos[isp] = (provider_x - 170, host_y_row0)
                 x = provider_x + 170
                 y = host_y_row0
@@ -668,7 +668,7 @@ def _compute_layout(edges, map_width, map_height):
 
         if num_placed == 0:
             if single_host:
-                # Провайдер с одним хостом: хост уже в другом блоке — подбираем свободную позицию рядом
+                # Provider with one host: the host is already in another block - select a free position nearby
                 (_, only_hostid) = next(iter(hosts_in_block))
                 hx, hy = host_pos.get(str(only_hostid), (provider_x - 170, host_y_row0))
                 isp_pos[isp] = _place_single_host_provider(hx, hy, host_pos, isp_pos)
@@ -685,15 +685,15 @@ def _compute_layout(edges, map_width, map_height):
 
         block_x += LAYOUT_BLOCK_WIDTH
 
-    # Учитываем размер элемента: в API (x,y) — верхний левый угол, элемент SELEMENT_WIDTH x SELEMENT_HEIGHT
+    # Take into account the size of the element: in the API (x,y) - the upper left corner, element SELEMENT_WIDTH x SELEMENT_HEIGHT
     required_width = max(block_x + LAYOUT_MARGIN, max_row_width) + SELEMENT_WIDTH
     required_height = block_y + row_max_height + LAYOUT_MARGIN + SELEMENT_HEIGHT
     return host_pos, isp_pos, required_width, required_height
 
 
 def ensure_map_exists(url, token, debug=False, width=None, height=None):
-    """Создать карту [test] uplinks, если её ещё нет. Возврат (sysmapid или None, err).
-    width/height — при создании карты; если не заданы — MAP_WIDTH/MAP_HEIGHT."""
+    """Create a [test] uplinks map if it doesn't already exist. Return (sysmapid or None, err).
+    width/height — when creating a map; if not specified - MAP_WIDTH/MAP_HEIGHT."""
     existing, err = zabbix_request(url, token, "map.get", {
         "filter": {"name": MAP_NAME},
         "output": ["sysmapid"],
@@ -704,7 +704,7 @@ def ensure_map_exists(url, token, debug=False, width=None, height=None):
         return existing[0]["sysmapid"], None
     w = width if width is not None else MAP_WIDTH
     h = height if height is not None else MAP_HEIGHT
-    # В Zabbix 7 при включённой проверке прав карта может требовать userGroups (см. _get_map_user_groups)
+    # In Zabbix 7, with permission checking enabled, the map can require userGroups (see _get_map_user_groups)
     result, err = zabbix_request(url, token, "map.create", {
         "name": MAP_NAME,
         "width": w,
@@ -721,16 +721,16 @@ def update_uplinks_map(
     url, token, devices, host_id_by_name, items_by_host_iface, desc_to_name, debug=False, prune_obsolete=True
 ):
     """
-    Обновить карту: хосты, провайдеры (image), линки.
+    Update the map: hosts, providers (image), links.
 
-    При prune_obsolete=True (по умолчанию для полного обновления): с карты убираются элементы,
-    которых нет в текущих данных (хосты и облака провайдеров не из dry-ssh, прочие типы элементов).
-    При --host в CLI передаётся prune_obsolete=False — остальные хосты на карте не трогаем.
-    Отключить очистку для полного прогона: --keep-obsolete-map-elements.
+    When prune_obsolete=True (default for full update): elements are removed from the map
+    which are not in the current data (hosts and provider clouds not from dry-ssh, other types of elements).
+    With --host, prune_obsolete=False is passed to the CLI - we do not touch the other hosts on the map.
+    Disable cleanup for a full run: --keep-obsolete-map-elements.
     """
-    # Рёбра для линков. При наличии логических интерфейсов (ae5, ae5.0, et-0/0/3) на один uplink
-    # оставляем одно ребро на (host, ISP): приоритет — интерфейс с items Zabbix, затем логический (ae5.0).
-    # edges_raw: + has_items, is_logical, is_aggregate, description. Итоговый edge — 9 полей (без этих трёх флагов).
+    # Edges for links. If there are logical interfaces (ae5, ae5.0, et-0/0/3) per uplink
+    # leave one edge on (host, ISP): priority - interface with Zabbix items, then logical (ae5.0).
+    # edges_raw: + has_items, is_logical, is_aggregate, description. The final edge is 9 fields (without these three flags).
     edges_raw = []
     for hostname in sorted(devices.keys()):
         hostid = host_id_by_name.get(hostname)
@@ -754,7 +754,7 @@ def update_uplinks_map(
             edges_raw.append((hostname, str(hostid), iface_name, isp, itemid_in, itemid_out, key_in, key_out,
                               has_items, is_logical, is_aggregate, description))
 
-    # Одно ребро на (hostname, hostid, isp): приоритет — has_items, затем is_logical, затем не aggregate
+    # One edge on (hostname, hostid, isp): priority - has_items, then is_logical, then not aggregate
     def _edge_priority(e):
         _, _, _, _, _, _, _, _, has_items, is_logical, is_aggregate, _ = e
         return (has_items, is_logical, not is_aggregate)
@@ -775,13 +775,13 @@ def update_uplinks_map(
             unique_hosts.append((hostname, hostid))
 
     if not unique_hosts:
-        return "нет данных для карты (ни одного хост с uplink)", None
+        return "no data for card (no host with uplink)", None
 
-    # Базовый URL веб-интерфейса (без api_jsonrpc.php) для ссылок на графики
+    # Base URL of the web interface (without api_jsonrpc.php) for links to charts
     base_url = url.replace("/api_jsonrpc.php", "").rstrip("/")
     if not base_url.endswith("/"):
         base_url += "/"
-    # По каждому хосту — ссылки на график «Bits received» по интерфейсам; подпись: имя провайдера и Bits received
+    # For each host - links to the “Bits received” graph by interface; signature: provider name and Bits received
     host_to_urls = {}
     for hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out, description in edges:
         if not itemid_in:
@@ -797,12 +797,12 @@ def update_uplinks_map(
             seen_isp.add(isp)
             unique_isps.append(isp)
 
-    # Позиции по провайдерам: слева направо, провайдер с макс. подключений — первым
+    # Positions by providers: from left to right, provider with max. connections - first
     host_pos, isp_pos, required_width, required_height = _compute_layout(edges, MAP_WIDTH, MAP_HEIGHT)
     map_width = max(MAP_WIDTH, required_width)
     map_height = max(MAP_HEIGHT, required_height)
 
-    # Получить карту (создать пустую, если нет)
+    # Get a map (create an empty one if not)
     existing, err = zabbix_request(url, token, "map.get", {
         "filter": {"name": MAP_NAME},
         "output": ["sysmapid"],
@@ -823,12 +823,12 @@ def update_uplinks_map(
     wanted_host_ids = {str(hid) for _, hid in unique_hosts}
     wanted_isp_labels = set(unique_isps)
 
-    # Один элемент на hostid и один на провайдера (label), чтобы не дублировать при повторных update.
-    # selementid_to_canonical: для подмены в линках удалённых дубликатов на оставляемый selementid
+    # One element for hostid and one for provider (label), so as not to be duplicated during repeated updates.
+    # selementid_to_canonical: to replace deleted duplicates in links with the left selementid
     old_selements = []
     old_by_eid = {}
     old_by_image_label = {}
-    selementid_to_canonical = {}  # удалённый selementid -> канонический (оставляемый)
+    selementid_to_canonical = {} # removed selementid -> canonical (kept)
     pruned_selements = 0
     for el in old_selements_raw:
         etype = int(el.get("elementtype", 0))
@@ -859,9 +859,9 @@ def update_uplinks_map(
                 old_by_eid[eid] = sid
         old_selements.append(el)
     if prune_obsolete and pruned_selements:
-        print("Карта: удалено устаревших элементов (не в текущих данных): {}".format(pruned_selements), file=sys.stderr)
+        print("Map: deleted obsolete elements (not in current data): {}".format(pruned_selements), file=sys.stderr)
 
-    # Добавляем только те элементы, которых ещё нет на карте; позиции берём из layout
+    # Add only those elements that are not yet on the map; we take positions from layout
     new_selements = []
     for hostname, hostid in unique_hosts:
         if str(hostid) in old_by_eid:
@@ -899,7 +899,7 @@ def update_uplinks_map(
 
     selements_merged = list(old_selements) + new_selements
 
-    # Применить расстановку и ссылки на графики ко всем элементам (старым и новым)
+    # Apply layout and graph links to all elements (old and new)
     for el in selements_merged:
         etype = int(el.get("elementtype", 0))
         if etype == ELEMENT_TYPE_HOST:
@@ -914,8 +914,8 @@ def update_uplinks_map(
             if label in isp_pos:
                 el["x"], el["y"] = isp_pos[label]
 
-    # Удалённые/слитые selement всё ещё указаны в старых линках карты → Zabbix при map.update(selements):
-    # «Link selementid1 points to a nonexistent map selement». Сначала снимаем все линки.
+    # Removed/merged selements are still listed in the old map links → Zabbix with map.update(selements):
+    # "Link selementid1 points to a nonexistent map selement." First we remove all links.
     need_clear_links = pruned_selements > 0 or len(old_selements) < len(old_selements_raw)
     map_sid = _api_map_id(sysmapid)
     if need_clear_links:
@@ -936,7 +936,7 @@ def update_uplinks_map(
     if err:
         return "map.update (selements): {}".format(err), sysmapid
 
-    # Получить selementid для построения линков
+    # Get selementid for building links
     result, err = zabbix_request(url, token, "map.get", {
         "sysmapids": [sysmapid],
         "output": ["sysmapid"],
@@ -944,7 +944,7 @@ def update_uplinks_map(
         "selectLinks": "extend",
     }, debug=debug)
     if err or not result:
-        return "map.get: {}".format(err or "карта не найдена"), sysmapid
+        return "map.get: {}".format(err or "map not found"), sysmapid
     elem_list = result[0].get("selements", [])
     links_existing = result[0].get("links", [])
     host_to_selement = {}
@@ -961,8 +961,8 @@ def update_uplinks_map(
         elif etype == ELEMENT_TYPE_IMAGE:
             isp_to_selement[el.get("label", "")] = sid
 
-    # Триггеры 90%/100% для окраски линков: теперь используем агрегатные триггеры провайдера
-    # с хостов «Uplinks {Provider}» (создаются zabbix_provider_aggregate.py).
+    # Triggers 90%/100% for coloring links: now we use aggregate provider triggers
+    # from "Uplinks {Provider}" hosts (created by zabbix_provider_aggregate.py).
     providers_for_triggers = [isp for isp in unique_isps if isp]
     trigger_ids_by_provider = get_provider_aggregate_triggers(
         url, token, providers_for_triggers, debug=debug
@@ -977,24 +977,24 @@ def update_uplinks_map(
         sid2 = isp_to_selement.get(isp) if isp else None
         if not sid1 or not sid2:
             if debug or (not new_links and not our_host_sids):
-                print("DEBUG link skip: hostid={!r} isp={!r} sid1={} sid2={} (host_ids на карте: {!r}, isp labels: {!r})".format(
+                print("DEBUG link skip: hostid={!r} isp={!r} sid1={} sid2={} (host_ids on the map: {!r}, isp labels: {!r})".format(
                     hostid, isp, sid1, sid2, list(host_to_selement.keys())[:10], list(isp_to_selement.keys())[:10]), file=sys.stderr)
             continue
         our_host_sids.add(sid1)
-        # Подпись: интерфейс + строки In/Out с макросами {?last(/hostname/key)}
+        # Signature: interface + In/Out lines with macros {?last(/hostname/key)}
         label_parts = [iface_name or "—"]
         if key_in or key_out:
             if key_in:
                 label_parts.append("In: {?last(/" + hostname + "/" + key_in + ")}")
             if key_out:
                 label_parts.append("Out: {?last(/" + hostname + "/" + key_out + ")}")
-        # Новый линк: не передаём linkid (read-only в API; linkid:0 даёт Wrong fields for map link).
+        # New link: do not pass linkid (read-only in the API; linkid:0 gives Wrong fields for map link).
         link = {
             "selementid1": _api_map_id(sid1),
             "selementid2": _api_map_id(sid2),
             "label": "\n".join(label_parts),
         }
-        # Привязать триггеры к линку с приоритетом:
+        # Bind triggers to a link with priority:
         # 1) per-link commit (100/90), 2) provider aggregate (100/90).
         trigger_warn, trigger_high = trigger_ids_by_provider.get(isp or "", (None, None))
         link_warn, link_high = trigger_ids_by_link.get(
@@ -1021,7 +1021,7 @@ def update_uplinks_map(
             link["linktriggers"] = linktriggers
         new_links.append(link)
 
-    # Существующие линки: только те, что не от наших хостов; подменяем удалённые дубликаты на канонический selementid
+    # Existing links: only those that are not from our hosts; replace deleted duplicates with the canonical selementid
     our_host_sids_str = {str(s) for s in our_host_sids}
     links_merged = []
     for l in links_existing:
@@ -1039,7 +1039,7 @@ def update_uplinks_map(
                 "selementid2": _api_map_id(s2),
                 "label": label,
             }
-            # Сохранить привязки триггеров к линку при обновлении
+            # Save trigger bindings to the link when updating
             lt_list = l.get("linktriggers") or []
             if lt_list:
                 entry["linktriggers"] = [
@@ -1055,27 +1055,27 @@ def update_uplinks_map(
             }
         links_merged.append(entry)
     links_merged.extend(new_links)
-    # Гарантировать у каждого линка ключ label (строка), чтобы не было пропусков в JSON.
+    # Ensure that each link has a label key (string) so that there are no gaps in the JSON.
     for link in links_merged:
         if "label" not in link:
             link["label"] = ""
         link["label"] = str(link.get("label") or "")
 
-    # Zabbix 7: у каждого объекта в links обязателен sysmapid, иначе map.update → Wrong fields for map link.
+    # Zabbix 7: each object in links must have sysmapid, otherwise map.update → Wrong fields for map link.
     map_sysmapid = _api_map_id(sysmapid)
     for link in links_merged:
         link["sysmapid"] = map_sysmapid
 
     if debug or new_links:
-        print("Линков: существующих {}, новых {}, всего {}".format(
+        print("Links: existing {}, new {}, total {}".format(
             len(links_existing), len(new_links), len(links_merged)), file=sys.stderr)
     if not new_links and edges:
         want_hosts = sorted(set(e[1] for e in edges))
         want_isps = sorted(set(e[3] for e in edges if e[3]))
-        print("Линки не созданы. Ищем hostid: {!r}, isp: {!r}. На карте hostid: {!r}, isp: {!r}".format(
+        print("Links have not been created. We are looking for hostid: {!r}, isp: {!r}. On the map hostid: {!r}, isp: {!r}".format(
             want_hosts[:15], want_isps[:15], sorted(host_to_selement.keys())[:15], sorted(isp_to_selement.keys())[:15]), file=sys.stderr)
 
-    # Обновление линков карты
+    # Update map links
     result, err = zabbix_request(url, token, "map.update", {
         "sysmapid": map_sysmapid,
         "links": links_merged,
@@ -1088,74 +1088,74 @@ def update_uplinks_map(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Данные для карты Zabbix. По умолчанию: hostname, interface, description, ISP."
+        description="Data for Zabbix map. Default: hostname, interface, description, ISP."
     )
     parser.add_argument(
         "-f", "--file",
         default=DEFAULT_INPUT,
         metavar="FILE",
-        help="Путь к JSON с devices (по умолчанию {})".format(DEFAULT_INPUT),
+        help="Path to JSON with devices (default {})".format(DEFAULT_INPUT),
     )
     parser.add_argument(
         "-m", "--description-map",
         default=DESCRIPTION_MAP_FILE,
         metavar="FILE",
-        help="Файл сопоставления description -> имя (по умолчанию {})".format(DESCRIPTION_MAP_FILE),
+        help="Map file description -> name (default {})".format(DESCRIPTION_MAP_FILE),
     )
     parser.add_argument(
         "--zabbix",
         action="store_true",
-        help="Запросить Zabbix API: найти хосты и items Bits received/sent (для карты или таблицы)",
+        help="Query Zabbix API: find hosts and items Bits received/sent (for map or table)",
     )
     parser.add_argument(
         "--print-table",
         action="store_true",
-        help="Вывести в консоль таблицу (hostname, interface, description, ISP; с --zabbix — hostid и ключи items)",
+        help="Output the table to the console (hostname, interface, description, ISP; with --zabbix - hostid and items keys)",
     )
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Вывести отладочную информацию при работе с Zabbix API",
+        help="Output debugging information when working with Zabbix API",
     )
     parser.add_argument(
         "--create-map",
         action="store_true",
-        help="Только создать карту [test] uplinks, если её ещё нет (пустая)",
+        help="Only create a [test] uplinks map if it doesn't exist yet (empty)",
     )
     parser.add_argument(
         "--update-map",
         action="store_true",
-        help="Обновить карту: хосты, провайдеры, линки; с --host — только указанный хост и его линки",
+        help="Update map: hosts, providers, links; with --host - only the specified host and its links",
     )
     parser.add_argument(
         "--no-cache",
         action="store_true",
-        help="Не использовать кэш Zabbix, запросить данные заново (по умолчанию кэш в {})".format(ZABBIX_CACHE_FILE),
+        help="Do not use Zabbix cache, request data again (default cache in {})".format(ZABBIX_CACHE_FILE),
     )
     parser.add_argument(
         "--host",
         metavar="HOSTNAME",
-        help="Работать только с указанным хостом (имя из devices)",
+        help="Work only with the specified host (name from devices)",
     )
     parser.add_argument(
         "--keep-obsolete-map-elements",
         action="store_true",
-        help="При --update-map не удалять с карты хосты/провайдеры, которых нет в текущем JSON (старое поведение)",
+        help="When --update-map, do not remove hosts/providers from the map that are not in the current JSON (old behavior)",
     )
     parser.add_argument(
         "--export-map",
         metavar="SYSMAPID",
-        help="Вывести JSON карты из API (sysmapid) для сравнения с ручной картой; нужны ZABBIX_URL и ZABBIX_TOKEN",
+        help="Output JSON maps from the API (sysmapid) for comparison with a manual map; ZABBIX_URL and ZABBIX_TOKEN are needed",
     )
     parser.add_argument(
         "--generate-description-map",
         action="store_true",
-        help="Собрать все description из файла devices и вывести шаблон JSON (description -> description). "
-             "Сохранить в description_to_name.json и отредактировать: свести варианты к одному имени (напр. Beeline 5, Uplink: Beeline 5 -> Beeline)",
+        help="Collect all descriptions from the devices file and output the JSON template (description -> description). "
+             "Save to description_to_name.json and edit: reduce options to one name (eg Beeline 5, Uplink: Beeline 5 -> Beeline)",
     )
     args = parser.parse_args()
 
-    # Генерация шаблона description_to_name: собрать все description из файла
+    # Generating the description_to_name template: collect all descriptions from the file
     if args.generate_description_map:
         data, err = load_devices_json(args.file)
         if err:
@@ -1168,7 +1168,7 @@ def main():
                 if d:
                     descriptions.add(d)
         existing = load_description_map(args.description_map)
-        # Существующие маппинги сохраняем, новые description -> как есть (потом отредактировать)
+        # We save the existing mappings, new description -> as is (then edit)
         out = dict(existing)
         for d in sorted(descriptions):
             if d not in out:
@@ -1176,11 +1176,11 @@ def main():
         print(json.dumps(out, indent=2, ensure_ascii=False))
         sys.exit(0)
 
-    # Режим экспорта: только map.get и вывод JSON
+    # Export mode: map.get and JSON output only
     if args.export_map:
         url, token = _get_zabbix_url_token()
         if not url:
-            print("Для --export-map задайте ZABBIX_URL и ZABBIX_TOKEN", file=sys.stderr)
+            print("For --export-map, set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
             sys.exit(1)
         result, err = zabbix_request(url, token, "map.get", {
             "sysmapids": [args.export_map],
@@ -1189,22 +1189,22 @@ def main():
             "selectLinks": "extend",
         }, debug=args.debug)
         if err or not result:
-            print(err or "карта не найдена", file=sys.stderr)
+            print(err or "card not found", file=sys.stderr)
             sys.exit(1)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         sys.exit(0)
 
-    # Только создать карту — не грузим данные, не выводим таблицу
+    # Only create a map - do not load data, do not display a table
     if args.create_map and not args.update_map and not args.zabbix and not args.print_table:
         url, token = _get_zabbix_url_token()
         if not url:
-            print("Задайте ZABBIX_URL и ZABBIX_TOKEN", file=sys.stderr)
+            print("Set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
             sys.exit(1)
         sysmapid, err = ensure_map_exists(url, token, debug=args.debug)
         if err:
             print(err, file=sys.stderr)
             sys.exit(1)
-        print("Карта создана (или уже есть): sysmapid={}".format(sysmapid), file=sys.stderr)
+        print("Map created (or already exists): sysmapid={}".format(sysmapid), file=sys.stderr)
         sys.exit(0)
 
     data, err = load_devices_json(args.file)
@@ -1216,12 +1216,12 @@ def main():
     devices = data["devices"]
     if args.host:
         if args.host not in devices:
-            print("Хост {!r} не найден в devices. Доступные: {}".format(
+            print("Host {!r} not found in devices. Available: {}".format(
                 args.host, ", ".join(sorted(devices.keys()))), file=sys.stderr)
             sys.exit(1)
         devices = {args.host: devices[args.host]}
 
-    # По умолчанию (без --update-map и --print-table) создаём карту, если её ещё нет.
+    # By default (without --update-map and --print-table) we create a map if it does not already exist.
     default_create_map = not args.update_map and not args.print_table
 
     use_zabbix = args.zabbix or args.create_map or args.update_map or default_create_map
@@ -1229,7 +1229,7 @@ def main():
     if use_zabbix:
         url, token = _get_zabbix_url_token()
         if not url:
-            print("Для --zabbix, --create-map и --update-map задайте ZABBIX_URL и ZABBIX_TOKEN", file=sys.stderr)
+            print("For --zabbix, --create-map and --update-map set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
             sys.exit(1)
         hostnames = set(devices.keys())
         cache_path = os.path.join(os.path.dirname(os.path.abspath(args.file)) if args.file else ".", ZABBIX_CACHE_FILE)
@@ -1241,7 +1241,7 @@ def main():
                 host_id_by_name = {k: cached_host[k] for k in hostnames if k in cached_host}
                 items_by_host_iface = {(h, i): rec for (h, i), rec in cached_items.items() if h in host_id_by_name}
                 if args.debug:
-                    print("DEBUG: данные загружены из кэша {}".format(cache_path), file=sys.stderr)
+                    print("DEBUG: data loaded from cache {}".format(cache_path), file=sys.stderr)
         if host_id_by_name is None or items_by_host_iface is None:
             host_id_by_name, items_by_host_iface, err = fetch_zabbix_hosts_and_items(
                 url, token, hostnames, debug=args.debug
@@ -1252,11 +1252,11 @@ def main():
             if not args.no_cache:
                 save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
                 if args.debug:
-                    print("DEBUG: кэш сохранён в {}".format(cache_path), file=sys.stderr)
+                    print("DEBUG: cache saved in {}".format(cache_path), file=sys.stderr)
     else:
         host_id_by_name = {}
 
-    # Таблица для вывода в консоль (только при --print-table)
+    # Table to output to the console (only with --print-table)
     rows = []
     if args.print_table:
         header = ("hostname", "interface", "description", "ISP")
@@ -1283,7 +1283,7 @@ def main():
                     row = (hostname, hostid, iface_name, description, isp, rec.get("bits_in", ""), rec.get("bits_out", ""))
                 rows.append(row)
 
-    # Обновление карты по требованию
+    # Map update on demand
     if args.update_map:
         prune_map = (not args.host) and (not args.keep_obsolete_map_elements)
         err_msg, sysmapid = update_uplinks_map(
@@ -1299,10 +1299,10 @@ def main():
         if err_msg:
             print(err_msg, file=sys.stderr)
             sys.exit(1)
-        print("Карта обновлена: sysmapid={}".format(sysmapid), file=sys.stderr)
-    # Поведение по умолчанию: создать карту с элементами, если её ещё нет
+        print("Map updated: sysmapid={}".format(sysmapid), file=sys.stderr)
+    # Default behavior: create a map with elements if it doesn't already exist
     elif default_create_map and use_zabbix:
-        # Проверяем, есть ли уже карта с таким именем
+        # Check if there is already a card with the same name
         existing, err = zabbix_request(
             url, token, "map.get",
             {"filter": {"name": MAP_NAME}, "output": ["sysmapid"]},
@@ -1313,7 +1313,7 @@ def main():
             sys.exit(1)
         if existing:
             sysmapid = existing[0].get("sysmapid")
-            print("Карта уже существует: name={!r}, sysmapid={}. Используйте --update-map для обновления.".format(
+            print("Map already exists: name={!r}, sysmapid={}. Use --update-map to update.".format(
                 MAP_NAME, sysmapid), file=sys.stderr)
         else:
             err_msg, sysmapid = update_uplinks_map(
@@ -1329,9 +1329,9 @@ def main():
             if err_msg:
                 print(err_msg, file=sys.stderr)
                 sys.exit(1)
-            print("Карта создана: name={!r}, sysmapid={}".format(MAP_NAME, sysmapid), file=sys.stderr)
+            print("Map created: name={!r}, sysmapid={}".format(MAP_NAME, sysmapid), file=sys.stderr)
 
-    # Печать таблицы только по запросу
+    # Print table only when requested
     if args.print_table and rows:
         num_cols = len(rows[0])
         widths = [max(len(str(rows[i][c])) for i in range(len(rows))) for c in range(num_cols)]

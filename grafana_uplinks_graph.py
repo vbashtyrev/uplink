@@ -87,12 +87,12 @@ def _graph_to_inline_csv(graph):
     """Convert graph (nodes, edges) to two CSV strings for Infinity inline mode."""
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
-    # Узлы: id, title (обязательные для Node graph)
+    #
     rows_n = []
     for n in nodes:
         rows_n.append(",".join([_csv_escape(n.get("id", "")), _csv_escape(n.get("title", ""))]))
     nodes_csv = "id,title\n" + "\n".join(rows_n)
-    # Рёбра: id, source, target (обязательные), detail__*
+    #
     edge_cols = ["id", "source", "target", "detail__hostname", "detail__iface", "detail__isp", "detail__itemid_in", "detail__itemid_out"]
     rows_e = []
     for e in edges:
@@ -123,9 +123,9 @@ def _grafana_push_dashboard(grafana_url, api_key, graph, dashboard_uid, dashboar
     try:
         import requests
     except ImportError:
-        return "для --grafana-api нужен модуль requests (pip install requests)"
+        return "message"
     if not grafana_url or not api_key:
-        return "задайте GRAFANA_URL и GRAFANA_API_KEY (или GRAFANA_TOKEN)"
+        return "message"
     headers = {
         "Content-Type": "application/json",
         "Authorization": "Bearer {}".format(api_key),
@@ -144,7 +144,7 @@ def _grafana_push_dashboard(grafana_url, api_key, graph, dashboard_uid, dashboar
             dash_id = dash.get("id")
             version = (dash.get("version") or 0) + 1
             if debug:
-                print("Grafana: найден дашборд id={} version->{}".format(dash_id, version), file=sys.stderr)
+                print("message".format(dash_id, version), file=sys.stderr)
     except requests.RequestException:
         pass
 
@@ -256,7 +256,7 @@ def main():
         help="Infinity datasource UID (default: GRAFANA_INFINITY_UID or 'infinity')",
     )
     parser.add_argument("--no-cache", action="store_true", help="Do not use local Zabbix cache file")
-    parser.add_argument("--debug", action="store_true", help="Отладочный вывод")
+    parser.add_argument("--debug", action="store_true", help="message")
     args = parser.parse_args()
 
     data, err = load_devices_json(args.file)
@@ -273,7 +273,7 @@ def main():
     if args.zabbix:
         url, token = _get_zabbix_url_token()
         if not url:
-            print("Задайте ZABBIX_URL и ZABBIX_TOKEN", file=sys.stderr)
+            print("message", file=sys.stderr)
             sys.exit(1)
         hostnames = set(devices.keys())
         cache_path = os.path.join(
@@ -297,10 +297,10 @@ def main():
 
     edges = build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name)
     if not edges:
-        print("Нет рёбер для графа (нет хостов в Zabbix или пустой devices)", file=sys.stderr)
+        print("message", file=sys.stderr)
         sys.exit(1)
 
-    # Узлы: хосты + провайдеры
+    #
     node_ids = set()
     nodes = []
     for hostname, hostid, _if, isp, _in, _out, _ki, _ko, _desc in edges:
@@ -313,7 +313,7 @@ def main():
             node_ids.add(iid)
             nodes.append({"id": iid, "title": isp or "—"})
 
-    # Рёбра: id, source, target; detail__* для Data link и для запросов к Zabbix в Grafana (In/Out — из Zabbix DS)
+    #
     edges_out = []
     for i, (hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out, description) in enumerate(edges):
         edge_obj = {
@@ -336,7 +336,7 @@ def main():
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(json_str)
         if args.debug:
-            print("Записано: {} (узлов: {}, рёбер: {})".format(args.output, len(nodes), len(edges_out)), file=sys.stderr)
+            print("message".format(args.output, len(nodes), len(edges_out)), file=sys.stderr)
     else:
         print(json_str)
 
@@ -356,7 +356,7 @@ def main():
             print(err, file=sys.stderr)
             sys.exit(1)
         if not args.output:
-            print("Дашборд создан/обновлён: {} (uid={})".format(args.dashboard_title, args.dashboard_uid), file=sys.stderr)
+            print("message".format(args.dashboard_title, args.dashboard_uid), file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -7,8 +7,8 @@ MAP_ICON_CLOUD = 4
 
 # Dashboards
 DASHBOARD_NAME = "Uplinks"
-DASHBOARD_NAME_BY_LOCATION = "Uplinks (по локациям)"
-DASHBOARD_NAME_BY_PROVIDER = "Uplinks по провайдерам"
+DASHBOARD_NAME_BY_LOCATION = "Uplinks (by location)"
+DASHBOARD_NAME_BY_PROVIDER = "Uplinks by providers"
 # Optional static providers for summary dashboard (usually empty, providers come from NetBox).
 PROVIDERS_FOR_SUMMARY = []
 
@@ -29,7 +29,7 @@ TRIGGER_DESC_100_SUFFIX = "Commit rate exceeded (100%)"
 TRIGGER_DESC_SEARCH = "Commit rate exceeded ("
 # SLA breach rule for provider aggregates: 100% for a sustained period
 SLA_TRIGGER_FUNCTION_PERIOD = "1h"
-# Per-link Burst: описание после «Interface {name}: » — только этот триггер с тегом sla=true
+# Per-link Burst: description after “Interface {name}: ” - only this trigger with the sla=true tag
 TRIGGER_DESC_SLA_BREACH_SUFFIX = "SLA breach: >= 100% of commit for {}".format(
     SLA_TRIGGER_FUNCTION_PERIOD
 )

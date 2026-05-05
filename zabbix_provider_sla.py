@@ -70,7 +70,7 @@ def _iter_burst_links(commit_rates):
 
 
 def _burst_report_rows(commit_rates):
-    """Один ряд на circuit_id: первый встреченный интерфейс."""
+    """One row per circuit_id: the first interface encountered."""
     seen = set()
     rows = []
     for dev_name, iface_name, prov, cid in _iter_burst_links(commit_rates):
@@ -112,9 +112,7 @@ def _get_hostid_for_device(url, token, dev_name, debug=False):
 
 
 def _get_burst_link_triggers(url, token, hostid, iface_name, debug=False):
-    """
-    Триггеры 90% / 100% / SLA breach на интерфейсе (как aggregate: приоритет sla, иначе high).
-    """
+    """Triggers 90% / 100% / SLA breach on the interface (as an aggregate: priority sla, otherwise high)."""
     prefix = "Interface {}:".format((iface_name or "").strip())
     res, err = zabbix_request(
         url,
@@ -172,12 +170,10 @@ def _default_window(days):
 
 
 def _get_aggregate_triggers(url, token, providers, debug=False):
-    """
-    Return provider -> (triggerid_warn, triggerid_high, triggerid_sla) for aggregate hosts.
+    """Return provider -> (triggerid_warn, triggerid_high, triggerid_sla) for aggregate hosts.
 
-    Выбор по описанию (как в zabbix_provider_aggregate), не по priority: у 100% и SLA breach
-    оба priority=2, иначе zabbix_provider_sla мог бы взять «не тот» триггер.
-    """
+    Selection by description (as in zabbix_provider_aggregate), not by priority: 100% and SLA breach
+    both priority=2, otherwise zabbix_provider_sla could take the “wrong” trigger."""
     if not providers:
         return {}
     host_names = [UPLINKS_AGGREGATE_HOST_PREFIX + p for p in providers]
@@ -420,8 +416,8 @@ def main():
     if target_sla is not None:
         print("Target SLA (_provider_sla): {:.5f}%".format(target_sla))
     print(
-        "SLA%% по окну: триггер SLA breach (устойчивое превышение), если есть; "
-        "иначе мгновенный 100%%. Период breach: uplinks_config.SLA_TRIGGER_FUNCTION_PERIOD."
+        "SLA%% by window: SLA breach trigger (sustained exceedance), if any;"
+        "otherwise instant 100%%. Breach period: uplinks_config.SLA_TRIGGER_FUNCTION_PERIOD."
     )
     print("")
 

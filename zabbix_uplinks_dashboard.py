@@ -45,18 +45,18 @@ def _get_providers_from_netbox(tag, debug=False):
     token = os.environ.get("NETBOX_TOKEN", "").strip()
     if not url or not token:
         if debug:
-            print("NetBox: NETBOX_URL/NETBOX_TOKEN не заданы — провайдеры только из конфига", file=sys.stderr)
+            print("NetBox: NETBOX_URL/NETBOX_TOKEN are not set - providers only from the config", file=sys.stderr)
         return []
     try:
         nb = pynetbox.api(url, token=token)
         providers = list(nb.circuits.providers.filter(tag=tag))
         names = [p.name for p in providers if getattr(p, "name", None)]
         if debug and names:
-            print("NetBox: провайдеры с тегом {}: {}".format(tag, ", ".join(names)), file=sys.stderr)
+            print("NetBox: providers with tag {}: {}".format(tag, ", ".join(names)), file=sys.stderr)
         return names
     except Exception as e:
         if debug:
-            print("NetBox: не удалось получить провайдеров ({}): {}".format(tag, e), file=sys.stderr)
+            print("NetBox: failed to get providers ({}): {}".format(tag, e), file=sys.stderr)
         return []
 
 
@@ -143,7 +143,7 @@ def _make_graph_widget(index, hostname, iface_name, isp, itemid_in, itemid_out, 
             {"type": 0, "name": "ds.{}.fill".format(ds_idx), "value": 3},
         ])
         num_ds += 1
-    # Линия порога рисуется через Simple trigger (простой триггер max(bits_in,<period>)>{$IF.UTIL.MAX:"..."} создаётся zabbix_sync_commit_rate.py; период в uplinks_config: TRIGGER_FUNCTION_PERIOD)
+    # The threshold line is drawn via Simple trigger (simple trigger max(bits_in,<period>)>{$IF.UTIL.MAX:"..."} is created by zabbix_sync_commit_rate.py; period in uplinks_config: TRIGGER_FUNCTION_PERIOD)
     if not itemid_in and not itemid_out:
         return None
     return {
@@ -200,7 +200,7 @@ def create_or_update_dashboard(url, token, edges, dashboard_name, debug=False, s
                 widget_index += 1
 
     if not widgets:
-        return None, "нет ни одного интерфейса с item In/Out в Zabbix"
+        return None, "there are no interfaces with item In/Out in Zabbix"
 
     page = {"widgets": widgets}
     existing, err = zabbix_request(url, token, "dashboard.get", {
@@ -221,7 +221,7 @@ def create_or_update_dashboard(url, token, edges, dashboard_name, debug=False, s
         if err:
             return None, "dashboard.update: {}".format(err)
         if debug:
-            print("Дашборд обновлён: {} (id={}, виджетов: {})".format(dashboard_name, dashboardid, len(widgets)), file=sys.stderr)
+            print("Dashboard updated: {} (id={}, widgets: {})". format(dashboard_name, dashboardid, len(widgets)), file=sys.stderr)
         return dashboardid, None
     else:
         result, err = zabbix_request(url, token, "dashboard.create", {
@@ -234,12 +234,12 @@ def create_or_update_dashboard(url, token, edges, dashboard_name, debug=False, s
             return None, "dashboard.create: {}".format(err)
         dashboardid = result["dashboardids"][0]
         if debug:
-            print("Дашборд создан: {} (id={}, виджетов: {})".format(dashboard_name, dashboardid, len(widgets)), file=sys.stderr)
+            print("Dashboard created: {} (id={}, widgets: {})". format(dashboard_name, dashboardid, len(widgets)), file=sys.stderr)
         return dashboardid, None
 
 
 def create_dashboard_by_location(url, token, edges, dashboard_name, debug=False, show_threshold=True):
-    """Создать/обновить дашборд с одной страницей на локацию (те же графики, разбиты по вкладкам)."""
+    """Create/update a dashboard with one page per location (the same graphs, divided into tabs)."""
     widget_h = 5
     row_max_width = 72
     by_location = {}
@@ -271,7 +271,7 @@ def create_dashboard_by_location(url, token, edges, dashboard_name, debug=False,
             pages.append({"name": loc, "widgets": page_widgets})
 
     if not pages:
-        return None, "нет ни одного интерфейса с item In/Out в Zabbix"
+        return None, "there are no interfaces with item In/Out in Zabbix"
 
     existing, err = zabbix_request(url, token, "dashboard.get", {
         "filter": {"name": dashboard_name},
@@ -293,7 +293,7 @@ def create_dashboard_by_location(url, token, edges, dashboard_name, debug=False,
         if err:
             return None, "dashboard.update: {}".format(err)
         if debug:
-            print("Дашборд (по локациям) обновлён: {} (id={}, страниц: {}, виджетов: {})".format(
+            print("Dashboard (by location) updated: {} (id={}, pages: {}, widgets: {})". format(
                 dashboard_name, dashboardid, len(pages), total_widgets), file=sys.stderr)
         return dashboardid, None
     else:
@@ -307,21 +307,21 @@ def create_dashboard_by_location(url, token, edges, dashboard_name, debug=False,
             return None, "dashboard.create: {}".format(err)
         dashboardid = result["dashboardids"][0]
         if debug:
-            print("Дашборд (по локациям) создан: {} (id={}, страниц: {}, виджетов: {})".format(
+            print("Dashboard (by location) created: {} (id={}, pages: {}, widgets: {})". format(
                 dashboard_name, dashboardid, len(pages), total_widgets), file=sys.stderr)
         return dashboardid, None
 
 
 def _get_aggregate_itemids(url, token, providers, debug=False):
-    """Для каждого провайдера из списка получить itemid calculated items на хосте «Uplinks {Provider}».
-    Возврат: dict provider -> (itemid_in или None, itemid_out или None)."""
+    """For each provider from the list, get the itemid calculated items on the host “Uplinks {Provider}”.
+    Return: dict provider -> (itemid_in or None, itemid_out or None)."""
     if not providers:
         return {}
     host_names = [UPLINKS_AGGREGATE_HOST_PREFIX + p for p in providers]
     out = {p: (None, None) for p in providers}
 
-    # Сначала ищем агрегатные хосты по technical host, затем по visible name (как в карте),
-    # чтобы покрыть случаи, когда host и name отличаются.
+    # First we look for aggregate hosts by technical host, then by visible name (as in the map),
+    # to cover cases where host and name are different.
     hostname_to_id = {}
     hosts, err = zabbix_request(
         url,
@@ -383,12 +383,12 @@ def _get_aggregate_itemids(url, token, providers, debug=False):
 def create_dashboard_by_provider(
     url, token, edges, dashboard_name, providers_filter, debug=False, show_threshold=True
 ):
-    """Создать/обновить дашборд с одной страницей на провайдера (только провайдеры из списка с >1 линком).
+    """Create/update a dashboard with one page per provider (only providers from the list with >1 link).
 
-    На каждой странице:
-    - Bits received (summary) и Bits sent (summary) — стеки по линкам провайдера;
-    - при наличии хостов «Uplinks {Provider}» — виджеты Total Bits received/sent (aggregate)
-      по calculated items aggregate.bits.in[] / aggregate.bits.out[]."""
+    On each page:
+    - Bits received (summary) and Bits sent (summary) - stacks along the provider’s links;
+    - if there are “Uplinks {Provider}” hosts - Total Bits received/sent (aggregate) widgets
+      by calculated items aggregate.bits.in[] / aggregate.bits.out[]."""
     widget_h = 6
     row_max_width = 72
     by_provider = {}
@@ -397,7 +397,7 @@ def create_dashboard_by_provider(
         if not isp:
             continue
         by_provider.setdefault(isp, []).append(edge)
-    # Только провайдеры из списка, независимо от числа линков (даже один линк = своя вкладка).
+    # Only providers from the list, regardless of the number of links (even one link = its own tab).
     providers_ok = [
         isp for isp in (p.strip() for p in providers_filter if p and p.strip())
         if by_provider.get(isp)
@@ -414,16 +414,16 @@ def create_dashboard_by_provider(
             continue
         widgets = []
 
-        # Разделяем линки по наличию In/Out
+        # Separate links based on the presence of In/Out
         in_edges = [e for e in prov_edges if e[4]]
         out_edges = [e for e in prov_edges if e[5]]
 
         def _make_summary_graph(kind, edges_list, y):
-            """Собрать svggraph с одним data set (Item list) и несколькими itemids (по одному на линк).
+            """Assemble an svggraph with one data set (Item list) and several itemids (one per link).
 
-            Используем itemids напрямую (а не паттерны), чтобы в график попадали
-            только те items, которые мы выбрали как uplink (Bits received/sent),
-            без посторонних item'ов по тому же интерфейсу."""
+            We use itemids directly (and not patterns) so that the chart includes
+            only those items that we have selected as uplink (Bits received/sent),
+            without extraneous items via the same interface."""
             if not edges_list:
                 return None
             ref = "P{}_{}".format(kind, isp)[:20]
@@ -432,11 +432,11 @@ def create_dashboard_by_provider(
                 {"type": 1, "name": "reference", "value": ref},
                 {"type": 0, "name": "legend", "value": 1},
                 {"type": 0, "name": "legend_statistic", "value": 1},
-                {"type": 0, "name": "simple_triggers", "value": 1},  # линия порога 90%/100% по провайдеру
+                {"type": 0, "name": "simple_triggers", "value": 1}, # threshold line 90%/100% by provider
             ]
-            # Сводный график: линия порога — по агрегатному триггеру провайдера (Uplinks {Provider}).
-            # Один data set (ds.0) в режиме Item list: несколько конкретных itemids,
-            # Zabbix стекает их (stacked=1), давая суммарную кривую по провайдеру.
+            # Summary graph: threshold line - by provider aggregate trigger (Uplinks {Provider}).
+            # One data set (ds.0) in Item list mode: several specific itemids,
+            # Zabbix stacks them (stacked=1), giving a total curve by provider.
             colors = [
                 "1A7F37", "E02F44", "0066CC", "CC8800", "9900CC",
                 "008B8B", "DC143C", "228B22", "483D8B", "FF1493",
@@ -455,7 +455,7 @@ def create_dashboard_by_provider(
                     continue
                 if kind == "out" and not itemid_out:
                     continue
-                # Добавляем конкретный itemid uplink'а
+                # Add a specific itemid of the uplink
                 item_id = itemid_in if kind == "in" else itemid_out
                 try:
                     item_id_int = int(item_id)
@@ -469,7 +469,7 @@ def create_dashboard_by_provider(
                 host_item_idx += 1
             if host_item_idx == 0:
                 return None
-            # Легенда: фиксированный режим и число строк = числу линов провайдера (но не более 10)
+            # Legend: fixed mode and number of lines = number of provider lines (but not more than 10)
             fields.extend([
                 {"type": 0, "name": "legend_lines_mode", "value": 0},  # Fixed
                 {"type": 0, "name": "legend_lines", "value": min(host_item_idx, 10)},
@@ -485,7 +485,7 @@ def create_dashboard_by_provider(
                 "fields": fields,
             }
 
-        # Сначала виджеты суммарного трафика (aggregate) — сверху
+        # First, total traffic widgets (aggregate) - on top
         agg_in_id, agg_out_id = aggregate_itemids.get(isp, (None, None))
         y_agg = 0
         for kind, item_id, label in [
@@ -504,7 +504,7 @@ def create_dashboard_by_provider(
                 {"type": 1, "name": "reference", "value": ref_agg},
                 {"type": 0, "name": "legend_statistic", "value": 1},
                 {"type": 0, "name": "legend_lines", "value": 1},
-                {"type": 0, "name": "simple_triggers", "value": 1},  # линия порога 90%/100% по _provider_limits
+                {"type": 0, "name": "simple_triggers", "value": 1}, # threshold line 90%/100% by _provider_limits
                 {"type": 0, "name": "ds.0.dataset_type", "value": 0},
                 {"type": 4, "name": "ds.0.itemids.0", "value": item_id_int},
                 {"type": 1, "name": "ds.0.color.0", "value": "1A7F37" if kind == "in" else "E02F44"},
@@ -524,7 +524,7 @@ def create_dashboard_by_provider(
             })
             y_agg += widget_h
 
-        # Ниже — стеки по линкам (summary)
+        # Below are stacks by links (summary)
         g_in = _make_summary_graph("in", in_edges, y=y_agg)
         g_out = _make_summary_graph("out", out_edges, y=y_agg + widget_h)
         for g in (g_in, g_out):
@@ -535,7 +535,7 @@ def create_dashboard_by_provider(
             pages.append({"name": isp, "widgets": widgets})
 
     if not pages:
-        return None, "нет провайдеров с более чем одним линком (проверьте PROVIDERS_FOR_SUMMARY и данные)"
+        return None, "no providers with more than one link (check PROVIDERS_FOR_SUMMARY and data)"
 
     existing, err = zabbix_request(url, token, "dashboard.get", {
         "filter": {"name": dashboard_name},
@@ -557,7 +557,7 @@ def create_dashboard_by_provider(
         if err:
             return None, "dashboard.update: {}".format(err)
         if debug:
-            print("Дашборд (по провайдерам) обновлён: {} (id={}, страниц: {}, виджетов: {})".format(
+            print("Dashboard (by providers) updated: {} (id={}, pages: {}, widgets: {})". format(
                 dashboard_name, dashboardid, len(pages), total_widgets), file=sys.stderr)
         return dashboardid, None
     else:
@@ -571,28 +571,28 @@ def create_dashboard_by_provider(
             return None, "dashboard.create: {}".format(err)
         dashboardid = result["dashboardids"][0]
         if debug:
-            print("Дашборд (по провайдерам) создан: {} (id={}, страниц: {}, виджетов: {})".format(
+            print("Dashboard (by providers) created: {} (id={}, pages: {}, widgets: {})". format(
                 dashboard_name, dashboardid, len(pages), total_widgets), file=sys.stderr)
         return dashboardid, None
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Создать/обновить дашборд Zabbix с графиками In/Out по uplink из dry-ssh.json.",
+        description="Create/update Zabbix dashboard with In/Out graphs by uplink from dry-ssh.json.",
     )
-    parser.add_argument("-f", "--file", default=DEFAULT_INPUT, help="Путь к dry-ssh.json")
-    parser.add_argument("-m", "--description-map", default=DESCRIPTION_MAP_FILE, help="Файл description_to_name.json")
-    parser.add_argument("--dashboard-name", default=DASHBOARD_NAME, help="Название основного дашборда в Zabbix")
+    parser.add_argument("-f", "--file", default=DEFAULT_INPUT, help="Path to dry-ssh.json")
+    parser.add_argument("-m", "--description-map", default=DESCRIPTION_MAP_FILE, help="File description_to_name.json")
+    parser.add_argument("--dashboard-name", default=DASHBOARD_NAME, help="Name of the main dashboard in Zabbix")
     parser.add_argument("--dashboard-by-location", default=DASHBOARD_NAME_BY_LOCATION, metavar="NAME",
-                        help="Создать второй дашборд с графиками по страницам (одна страница = одна локация). Пустая строка — не создавать")
+                        help="Create a second dashboard with graphs by page (one page = one location). Empty line - do not create")
     parser.add_argument("--dashboard-by-provider", default=DASHBOARD_NAME_BY_PROVIDER, metavar="NAME",
-                        help="Сводный дашборд по провайдерам с >1 линком (вкладка = провайдер). Пустая строка — не создавать")
+                        help="Summary dashboard for providers with >1 link (tab = provider). Empty line - do not create")
     parser.add_argument("--providers", nargs="*", default=None, metavar="NAME",
-                        help="Провайдеры для сводного дашборда (по умолчанию из uplinks_config: Cogent, HE)")
-    parser.add_argument("--no-cache", action="store_true", help="Не использовать кэш Zabbix")
+                        help="Providers for the summary dashboard (default from uplinks_config: Cogent, HE)")
+    parser.add_argument("--no-cache", action="store_true", help="Do not use Zabbix cache")
     parser.add_argument("--no-show-threshold", action="store_true",
-                        help="Не рисовать пороги триггеров (Simple triggers) на графиках")
-    parser.add_argument("--debug", action="store_true", help="Отладочный вывод")
+                        help="Do not draw trigger thresholds (Simple triggers) on graphs")
+    parser.add_argument("--debug", action="store_true", help="Debug output")
     args = parser.parse_args()
     show_threshold = not args.no_show_threshold
 
@@ -605,7 +605,7 @@ def main():
 
     url, token = _get_zabbix_url_token()
     if not url:
-        print("Задайте ZABBIX_URL и ZABBIX_TOKEN", file=sys.stderr)
+        print("Set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
         sys.exit(1)
 
     hostnames = set(devices.keys())
@@ -632,7 +632,7 @@ def main():
 
     edges = _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name)
     if not edges:
-        print("Нет данных для дашборда (нет хостов в Zabbix или uplink без items)", file=sys.stderr)
+        print("No data for dashboard (no hosts in Zabbix or uplink without items)", file=sys.stderr)
         sys.exit(1)
 
     dashboardid, err = create_or_update_dashboard(
@@ -641,7 +641,7 @@ def main():
     if err:
         print(err, file=sys.stderr)
         sys.exit(1)
-    print("OK: дашборд «{}» (id={})".format(args.dashboard_name, dashboardid))
+    print("OK: dashboard “{}” (id={})".format(args.dashboard_name, dashboardid))
 
     if args.dashboard_by_location:
         dashboardid2, err2 = create_dashboard_by_location(
@@ -650,13 +650,13 @@ def main():
         if err2:
             print(err2, file=sys.stderr)
             sys.exit(1)
-        print("OK: дашборд «{}» (id={})".format(args.dashboard_by_location, dashboardid2))
+        print("OK: dashboard “{}” (id={})".format(args.dashboard_by_location, dashboardid2))
 
     if args.dashboard_by_provider.strip():
         if args.providers is not None:
             providers_filter = args.providers
         else:
-            # Конфиг + провайдеры из NetBox с тегом automatization (без дубликатов, порядок: конфиг, затем NetBox)
+            # Config + providers from NetBox with the automatization tag (no duplicates, order: config, then NetBox)
             from_netbox = _get_providers_from_netbox(NETBOX_AUTOMATION_TAG, debug=args.debug)
             seen = set()
             providers_filter = []
@@ -672,7 +672,7 @@ def main():
         if err3:
             print(err3, file=sys.stderr)
             sys.exit(1)
-        print("OK: дашборд «{}» (id={})".format(args.dashboard_by_provider.strip(), dashboardid3))
+        print("OK: dashboard “{}” (id={})".format(args.dashboard_by_provider.strip(), dashboardid3))
 
 
 if __name__ == "__main__":

@@ -66,7 +66,7 @@ def _iter_burst_links(commit_rates):
 
 
 def _burst_circuits_unique(commit_rates):
-    """Unique circuit_id -> provider (первый встреченный)."""
+    """Unique circuit_id -> provider (first encountered)."""
     out = {}
     for _dev, _iface, prov, cid in _iter_burst_links(commit_rates):
         if cid not in out:
@@ -197,7 +197,7 @@ def _get_or_create_provider_service(url, token, provider, parentid, debug=False)
 
 
 def _delete_legacy_sla_source_service(url, token, provider, debug=False):
-    """Удалить старый вспомогательный сервис SLA source, если остался после миграции."""
+    """Delete the old SLA source auxiliary service, if left after migration."""
     service_name = "Uplinks {} SLA source".format(provider)
     res, err = zabbix_request(
         url,
@@ -220,7 +220,7 @@ def _delete_legacy_sla_source_service(url, token, provider, debug=False):
 
 
 def _get_or_create_burst_circuit_service(url, token, provider, circuit_id, parentid, debug=False):
-    """Сервис на один Burst-контур: проблемы с circuit + sla + billing=burst."""
+    """Service for one Burst circuit: problems with circuit + sla + billing=burst."""
     service_name = "Uplinks Burst {}".format(circuit_id)
     problem_tags = [
         {"tag": "circuit", "value": circuit_id, "operator": 0},
@@ -278,7 +278,7 @@ def _get_or_create_burst_circuit_service(url, token, provider, circuit_id, paren
 
 
 def _ensure_burst_circuit_sla(url, token, circuit_id, slo, debug=False):
-    """SLA для сервиса Uplinks Burst {circuit_id} (совпадение по тегам circuit + role)."""
+    """SLA for the Uplinks Burst service {circuit_id} (match by circuit + role tags)."""
     if slo is None:
         return None, None
     sla_name = "Uplinks Burst {} SLA".format(circuit_id)
@@ -414,7 +414,7 @@ def main():
 
     ok, err = validate_zabbix_token(url, token, debug=args.debug)
     if not ok:
-        print("Ошибка авторизации в Zabbix (token): {}".format(err), file=sys.stderr)
+        print("Authorization error in Zabbix (token): {}".format(err), file=sys.stderr)
         sys.exit(1)
 
     providers = _get_providers_from_limits(commit_rates)

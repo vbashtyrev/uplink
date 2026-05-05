@@ -76,7 +76,7 @@ def cleanup_circuit_terminations(nb, circuit_ids, dry_run=False, debug=False):
     if not to_delete:
         return 0
     if dry_run:
-        print("dry-run: circuit_terminations.delete {} (для {} circuits)".format(len(to_delete), len(circuit_ids)))
+        print("dry-run: circuit_terminations.delete {} (for {} circuits)".format(len(to_delete), len(circuit_ids)))
         return len(to_delete)
     deleted = 0
     for tid in to_delete:
@@ -135,7 +135,7 @@ def cleanup_circuit_types(nb, tag_slug, dry_run=False, debug=False):
             circuits_using = list(nb.circuits.circuits.filter(type_id=cid))
             if circuits_using:
                 if debug:
-                    print("circuit_type id={} ({}): пропуск, контуров: {}".format(
+                    print("circuit_type id={} ({}): skip, circuits: {}".format(
                         cid, getattr(ct, "name", ""), len(circuits_using)), file=sys.stderr)
                 continue
         except Exception as e:
@@ -174,7 +174,7 @@ def cleanup_providers(nb, tag_slug, dry_run=False, debug=False):
             circuits_using = list(nb.circuits.circuits.filter(provider_id=pid))
             if circuits_using:
                 if debug:
-                    print("provider id={} ({}): пропуск, контуров: {}".format(
+                    print("provider id={} ({}): skip, contours: {}".format(
                         pid, getattr(p, "name", ""), len(circuits_using)), file=sys.stderr)
                 continue
         except Exception as e:

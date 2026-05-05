@@ -23,31 +23,29 @@ load_env_file_if_present()
 
 
 def load_file(path):
-    """Загрузить JSON из файла. Возврат (data, None) или (None, error_msg)."""
+    """Load JSON from file. Return (data, None) or (None, error_msg)."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
-        return None, "файл не найден: {}".format(path)
+        return None, "file not found: {}".format(path)
     except json.JSONDecodeError as e:
-        return None, "ошибка JSON: {}".format(e)
+        return None, "JSON error: {}".format(e)
     if "devices" not in data:
-        return None, "в файле нет ключа 'devices'"
+        return None, "there is no 'devices' key in the file"
     return data, None
 
 
 def interface_name_variants(name):
-    """
-    Сгенерировать варианты имени интерфейса для поиска в Netbox.
-    Исходный вид: Ethernet51/1. Варианты:
-    - с маленькой буквы: ethernet51/1
-    - сокращения с /: Eth51/1, eth51/1, Et51/1, et51/1
-    - без слэша и цифры после: Ethernet51, ethernet51, Eth51, eth51, Et51, et51
-    """
+    """Generate interface name options for searching in Netbox.
+    Original view: Ethernet51/1. Options:
+    - with a small letter: ethernet51/1
+    - abbreviations with /: Eth51/1, eth51/1, Et51/1, et51/1
+    - without slash and numbers after: Ethernet51, ethernet51, Eth51, eth51, Et51, et51"""
     if not name or not name.strip():
         return []
     name = name.strip()
-    # Разбить на префикс (Ethernet/Eth/Et) и числовую часть (51/1 или 51)
+    # Split into prefix (Ethernet/Eth/Et) and numeric part (51/1 or 51)
     m = re.match(r"^([A-Za-z]+)(\d+(?:/\d+)?)$", name)
     if not m:
         return [name, name.lower()]
@@ -67,9 +65,9 @@ def interface_name_variants(name):
 
     variants = []
     for p in prefixes:
-        variants.append(p + num_part)       # с слэшем
-        variants.append(p + num_no_slash)  # без слэша
-    # Убрать дубликаты, сохранить порядок; первым оставить точное совпадение
+        variants.append(p + num_part)       # with a slash
+        variants.append(p + num_no_slash)  # without slash
+    # Remove duplicates, maintain order; be the first to leave an exact match
     seen = set()
     result = []
     for v in [name] + variants:
@@ -80,36 +78,34 @@ def interface_name_variants(name):
 
 
 def compare_hostnames(file_devices, netbox_names):
-    """Вернуть (only_in_file, only_in_netbox)."""
+    """return (only_in_file, only_in_netbox)."""
     file_set = set(file_devices)
     nb_set = set(netbox_names)
     return sorted(file_set - nb_set), sorted(nb_set - file_set)
 
 
-# Коды примечаний для note (расшифровка — в NOTE_LEGEND)
+# Note codes for note (deciphered in NOTE_LEGEND)
 NOTE_OK = ""
-NOTE_ALT = 1   # альтернативное написание (eth51/1 и т.п.)
-NOTE_LOWER = 2 # имя в нижнем регистре
-NOTE_NO_SLASH = 3  # без слэша и номера после
-NOTE_MISSING = 4    # не найден в Netbox
+NOTE_ALT = 1   # alternative spelling (eth51/1, etc.)
+NOTE_LOWER = 2 # lowercase name
+NOTE_NO_SLASH = 3  # without slash and number after
+NOTE_MISSING = 4    # not found in Netbox
 
 NOTE_LEGEND = {
-    NOTE_ALT: "в Netbox найден как другой вариант: альтернативное написание (например 'eth51/1')",
-    NOTE_LOWER: "в Netbox найден как другой вариант: имя в нижнем регистре",
-    NOTE_NO_SLASH: "в Netbox найден как другой вариант: без слэша и номера после (например 'eth49')",
-    NOTE_MISSING: "в Netbox не найден (ни один вариант)",
+    NOTE_ALT: "found as another option in Netbox: alternative spelling (e.g. 'eth51/1')",
+    NOTE_LOWER: "in Netbox found as another option: lowercase name",
+    NOTE_NO_SLASH: "found in Netbox as another option: without slash and number after (for example 'eth49')",
+    NOTE_MISSING: "not found in Netbox (no option)",
 }
 
 
 def check_intname(device_name, int_name, nb_interfaces_by_name):
-    """
-    Проверить, есть ли интерфейс с именем int_name у устройства.
-    nb_interfaces_by_name — dict: name (как в Netbox) -> interface object.
-    Возврат: (status, nb_name, note_code).
+    """Check if the device has an interface named int_name.
+    nb_interfaces_by_name - dict: name (as in Netbox) -> interface object.
+    Return: (status, nb_name, note_code).
     status: "ok" | "found" | "missing"
-    nb_name: имя в Netbox (при ok = int_name, при found = найденный вариант, при missing = "")
-    note_code: NOTE_OK | 1..4
-    """
+    nb_name: name in Netbox (if ok = int_name, if found = found option, if missing = "")
+    note_code: NOTE_OK | 1..4"""
     if int_name in nb_interfaces_by_name:
         return "ok", int_name, NOTE_OK
     variants = interface_name_variants(int_name)
@@ -124,10 +120,8 @@ def check_intname(device_name, int_name, nb_interfaces_by_name):
 
 
 def resolve_interface(int_name, nb_interfaces_by_name):
-    """
-    Найти интерфейс в Netbox по имени (точное или вариант).
-    Возврат: (nb_name, iface_object | None). Если не найден — ("", None).
-    """
+    """Find an interface in Netbox by name (exact or variant).
+    Return: (nb_name, iface_object | None). If not found - ("", None)."""
     if int_name in nb_interfaces_by_name:
         return int_name, nb_interfaces_by_name[int_name]
     for v in interface_name_variants(int_name)[1:]:
@@ -136,66 +130,66 @@ def resolve_interface(int_name, nb_interfaces_by_name):
     return "", None
 
 
-# Коды примечаний для description (5–6)
-DESC_NOTE_DIFF = 5   # описание различается
-DESC_NOTE_NO_INT = 6 # интерфейс не найден в Netbox
+# Note codes for description (5–6)
+DESC_NOTE_DIFF = 5   # description varies
+DESC_NOTE_NO_INT = 6 # interface not found in Netbox
 
-# Коды для mediaType (7–9)
-MT_NOTE_DIFF = 7       # mediaType (из dry-ssh) и type в Netbox различаются по справочнику типов
-MT_NOTE_F_NOT_IN_REF = 8  # тип из dry-ssh не найден в справочнике типов (netbox_interface_types.json)
-MT_NOTE_N_NOT_IN_REF = 9  # тип в Netbox не найден в справочнике типов
+# Codes for mediaType (7–9)
+MT_NOTE_DIFF = 7       # mediaType (from dry-ssh) and type in Netbox differ by type dictionary
+MT_NOTE_F_NOT_IN_REF = 8  # type from dry-ssh not found in type dictionary (netbox_interface_types.json)
+MT_NOTE_N_NOT_IN_REF = 9  # Netbox type not found in type dictionary
 
-# Код для bandwidth/speed (10)
-BW_NOTE_DIFF = 10      # bandwidth (dry-ssh) и speed (Netbox) различаются
+# Code for bandwidth/speed (10)
+BW_NOTE_DIFF = 10      # bandwidth (dry-ssh) and speed (Netbox) are different
 
-# Код для duplex (11)
-DUP_NOTE_DIFF = 11     # duplex из dry-ssh и duplex в Netbox различаются
+# Code for duplex (11)
+DUP_NOTE_DIFF = 11     # duplex from dry-ssh and duplex in Netbox are different
 
-# Код для MAC / physicalAddress (12)
-MAC_NOTE_DIFF = 12     # physicalAddress (dry-ssh) и mac (Netbox) различаются
-MAC_NOTE_NOT_BOTH = 16  # в Netbox заполнено не оба поля: mac_address и mac_addresses
+# Code for MAC/physicalAddress (12)
+MAC_NOTE_DIFF = 12     # physicalAddress (dry-ssh) and mac (Netbox) are different
+MAC_NOTE_NOT_BOTH = 16  # in Netbox both fields are not filled in: mac_address and mac_addresses
 
-# Код для MTU (13)
-MTU_NOTE_DIFF = 13     # mtu из dry-ssh и mtu в Netbox различаются
+# Code for MTU (13)
+MTU_NOTE_DIFF = 13     # mtu from dry-ssh and mtu in Netbox are different
 
-# Код для tx_power (14)
-TXPOWER_NOTE_DIFF = 14  # txPower (dry-ssh) и tx_power (Netbox) различаются
+# Code for tx_power (14)
+TXPOWER_NOTE_DIFF = 14  # txPower (dry-ssh) and tx_power (Netbox) are different
 
-# Код для forwardingModel / mode (15)
-FWD_NOTE_DIFF = 15     # forwardingModel (dry-ssh) и mode (Netbox) различаются
+# Code for forwardingModel/mode (15)
+FWD_NOTE_DIFF = 15     # forwardingModel (dry-ssh) and mode (Netbox) are different
 
-# Код для IP-адресов (17)
-IP_NOTE_DIFF = 17      # ipv4/ipv6 адреса (файл) и привязанные к интерфейсу в Netbox различаются
+# Code for IP addresses (17)
+IP_NOTE_DIFF = 17      # ipv4/ipv6 addresses (file) and those associated with the interface in Netbox are different
 
-# Код для LAG / Related Interfaces (18)
-LAG_NOTE_DIFF = 18     # aggregateInterface (файл) и lag (Netbox) различаются
+# Code for LAG/Related Interfaces (18)
+LAG_NOTE_DIFF = 18     # aggregateInterface (file) and lag (Netbox) are different
 
-# Код для Parent interface (19)
-PARENT_NOTE_DIFF = 19  # aggregateInterface (файл) и parent (Netbox) различаются у логических интерфейсов
+# Code for Parent interface (19)
+PARENT_NOTE_DIFF = 19  # aggregateInterface (file) and parent (Netbox) are different for logical interfaces
 
-# Общая легенда для одной таблицы
+# General legend for one table
 ALL_LEGEND = {
     **NOTE_LEGEND,
-    DESC_NOTE_DIFF: "описание в файле и в Netbox различается",
-    DESC_NOTE_NO_INT: "интерфейс не найден в Netbox",
-    MT_NOTE_DIFF: "mediaType из dry-ssh и type в Netbox различаются (по value из справочника типов)",
-    MT_NOTE_F_NOT_IN_REF: "тип из dry-ssh не найден в справочнике типов (netbox_interface_types.json)",
-    MT_NOTE_N_NOT_IN_REF: "тип в Netbox не найден в справочнике типов (netbox_interface_types.json)",
-    BW_NOTE_DIFF: "bandwidth (dry-ssh, bps) и speed (Netbox, Kbps) различаются после приведения к bps",
-    DUP_NOTE_DIFF: "duplex из dry-ssh и duplex в Netbox различаются",
-    MAC_NOTE_DIFF: "physicalAddress (dry-ssh) и mac (Netbox) различаются",
-    MAC_NOTE_NOT_BOTH: "в Netbox заполнено не оба поля: mac_address на интерфейсе и сущность dcim.mac-addresses",
-    MTU_NOTE_DIFF: "mtu из dry-ssh и mtu в Netbox различаются",
-    TXPOWER_NOTE_DIFF: "txPower (dry-ssh) и tx_power (Netbox) различаются",
-    FWD_NOTE_DIFF: "forwardingModel (dry-ssh) и mode (Netbox) различаются",
-    IP_NOTE_DIFF: "IPv4/IPv6 адреса (файл) и привязанные к интерфейсу в Netbox различаются",
-    LAG_NOTE_DIFF: "aggregateInterface (файл) и LAG / Related Interfaces (Netbox) различаются",
-    PARENT_NOTE_DIFF: "aggregateInterface (файл) и Parent interface (Netbox) различаются у логических интерфейсов",
+    DESC_NOTE_DIFF: "the description in the file and in Netbox is different",
+    DESC_NOTE_NO_INT: "interface not found in Netbox",
+    MT_NOTE_DIFF: "mediaType from dry-ssh and type in Netbox differ (by value from the type dictionary)",
+    MT_NOTE_F_NOT_IN_REF: "type from dry-ssh not found in type dictionary (netbox_interface_types.json)",
+    MT_NOTE_N_NOT_IN_REF: "the type in Netbox was not found in the type dictionary (netbox_interface_types.json)",
+    BW_NOTE_DIFF: "bandwidth (dry-ssh, bps) and speed (Netbox, Kbps) differ after conversion to bps",
+    DUP_NOTE_DIFF: "duplex from dry-ssh and duplex in Netbox are different",
+    MAC_NOTE_DIFF: "physicalAddress (dry-ssh) and mac (Netbox) are different",
+    MAC_NOTE_NOT_BOTH: "in Netbox both fields are not filled in: mac_address on the interface and the dcim.mac-addresses entity",
+    MTU_NOTE_DIFF: "mtu from dry-ssh and mtu in Netbox are different",
+    TXPOWER_NOTE_DIFF: "txPower (dry-ssh) and tx_power (Netbox) are different",
+    FWD_NOTE_DIFF: "forwardingModel (dry-ssh) and mode (Netbox) are different",
+    IP_NOTE_DIFF: "IPv4/IPv6 addresses (file) and those associated with the interface in Netbox are different",
+    LAG_NOTE_DIFF: "aggregateInterface (file) and LAG/Related Interfaces (Netbox) are different",
+    PARENT_NOTE_DIFF: "aggregateInterface (file) and Parent interface (Netbox) are different for logical interfaces",
 }
 
 
 def _normalize_duplex(val):
-    """Привести duplex к 'full' или 'half' для сравнения. Arista: duplexFull/duplexHalf, Netbox: full/Full."""
+    """Cast duplex to 'full' or 'half' for comparison. Arista: duplexFull/duplexHalf, Netbox: full/Full."""
     if val is None:
         return ""
     s = str(val).strip().lower()
@@ -209,7 +203,7 @@ def _normalize_duplex(val):
 
 
 def _fwd_file_to_netbox_mode(fwd_f):
-    """Значение mode для Netbox по forwardingModel из файла: routed → None, bridged → tagged."""
+    """Mode value for Netbox by forwardingModel from the file: routed → None, bridged → tagged."""
     if not fwd_f:
         return None
     s = str(fwd_f).strip().lower()
@@ -221,7 +215,7 @@ def _fwd_file_to_netbox_mode(fwd_f):
 
 
 def _normalize_mac(val):
-    """Привести MAC к виду с двоеточиями, нижний регистр (для сравнения physicalAddress и mac_address)."""
+    """Convert MAC to colons, lower case (for comparison physicalAddress and mac_address)."""
     if val is None:
         return ""
     s = str(val).strip().lower().replace("-", ":").replace(".", ":")
@@ -229,16 +223,14 @@ def _normalize_mac(val):
 
 
 def _mac_netbox_format(val):
-    """Формат MAC для NetBox API: двоеточия, верхний регистр (44:4C:A8:BF:2E:91)."""
+    """MAC format for NetBox API: colons, uppercase (44:4C:A8:BF:2E:91)."""
     n = _normalize_mac(val)
     return n.upper() if n else ""
 
 
 def _get_interface_mac(nb_iface):
-    """
-    Получить MAC интерфейса из NetBox. В новых версиях MAC хранится в сущности
-    dcim.mac-addresses, интерфейс имеет mac_address (может быть null) и mac_addresses (список).
-    """
+    """Get the MAC interface from NetBox. In newer versions the MAC is stored in the entity
+    dcim.mac-addresses, the interface has mac_address (can be null) and mac_addresses (list)."""
     if nb_iface is None:
         return ""
     direct = getattr(nb_iface, "mac_address", None)
@@ -254,7 +246,7 @@ def _get_interface_mac(nb_iface):
 
 
 def _mac_both_filled(nb_iface):
-    """Проверить, что в Netbox заполнены оба: отображение MAC на интерфейсе (mac_address или primary_mac_address) и список mac_addresses."""
+    """Check that both the MAC display on the interface (mac_address or primary_mac_address) and the mac_addresses list are populated in Netbox."""
     if nb_iface is None:
         return False
     direct = getattr(nb_iface, "mac_address", None)
@@ -266,7 +258,7 @@ def _mac_both_filled(nb_iface):
 
 
 def _normalize_ip_address(addr):
-    """Нормализовать адрес для сравнения: строка без пробелов, нижний регистр для IPv6."""
+    """Normalize address for comparison: string without spaces, lower case for IPv6."""
     if addr is None:
         return ""
     s = str(addr).strip().lower()
@@ -274,10 +266,8 @@ def _normalize_ip_address(addr):
 
 
 def _is_global_routable_address(addr_with_prefix):
-    """
-    Только глобальные маршрутизируемые адреса (IPv4 и IPv6).
-    Исключаем: private, link-local, unique local, loopback — как в uplinks_stats.
-    """
+    """Globally routed addresses only (IPv4 and IPv6).
+    We exclude: private, link-local, unique local, loopback - as in uplinks_stats."""
     if not addr_with_prefix or not isinstance(addr_with_prefix, str):
         return False
     s = addr_with_prefix.strip().split("/")[0].lower()
@@ -310,10 +300,8 @@ def _is_global_routable_address(addr_with_prefix):
 
 
 def _get_interface_ip_addresses(nb, nb_iface):
-    """
-    Список IP (addr, vrf_id), привязанных к интерфейсу в Netbox. Только глобальные маршрутизируемые.
-    vrf_id — id VRF в NetBox или None (global).
-    """
+    """List of IPs (addr, vrf_id) associated with the interface in Netbox. Global routable only.
+    vrf_id — VRF id in NetBox or None (global)."""
     if nb is None or nb_iface is None:
         return []
     try:
@@ -337,7 +325,7 @@ def _get_interface_ip_addresses(nb, nb_iface):
 
 
 def _resolve_vrf_name_to_id(nb, vrf_name, cache):
-    """По имени VRF в NetBox вернуть id. cache — dict для кэша (name -> id)."""
+    """By VRF name in NetBox, return id. cache - dict for cache (name -> id)."""
     if not nb or not vrf_name or not str(vrf_name).strip():
         return None
     name = str(vrf_name).strip()
@@ -355,7 +343,7 @@ def _resolve_vrf_name_to_id(nb, vrf_name, cache):
 
 
 def _resolve_vrf_id_to_name(nb, vrf_id, id_to_name_cache):
-    """По id VRF в NetBox вернуть имя для отображения. id_to_name_cache — dict (id -> name). None → '—'."""
+    """By VRF id in NetBox, return the display name. id_to_name_cache - dict (id -> name). None → '—'."""
     if vrf_id is None:
         return "—"
     if id_to_name_cache is not None and vrf_id in id_to_name_cache:
@@ -374,10 +362,8 @@ def _resolve_vrf_id_to_name(nb, vrf_id, id_to_name_cache):
 
 
 def _get_related_interface_id(nb_iface, attr_name):
-    """
-    Получить id связанного интерфейса (lag или parent) из объекта интерфейса NetBox.
-    attr_name — "lag" или "parent". Возврат: int id или None.
-    """
+    """Get the id of the associated interface (lag or parent) from the NetBox interface object.
+    attr_name — "lag" or "parent". Return: int id or None."""
     if nb_iface is None:
         return None
     obj = getattr(nb_iface, attr_name, None)
@@ -389,11 +375,9 @@ def _get_related_interface_id(nb_iface, attr_name):
 
 
 def _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, relation_attr, is_target_entry_fn, relation_label):
-    """
-    Второй проход: выставить связь (lag или parent) у интерфейсов по payload.
-    relation_attr — "lag" или "parent"; is_target_entry_fn(entry, int_name) — предикат «эта запись участвует»;
-    relation_label — подпись для сообщений ("LAG", "parent").
-    """
+    """Second pass: set the connection (lag or parent) for the interfaces by payload.
+    relation_attr — "lag" or "parent"; is_target_entry_fn(entry, int_name) — predicate “this entry is participating”;
+    relation_label — signature for messages (“LAG”, “parent”)."""
     for entry in payload:
         if not isinstance(entry, dict):
             continue
@@ -410,13 +394,13 @@ def _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, r
         if _get_related_interface_id(nb_iface, relation_attr) != getattr(nb_target, "id", None):
             try:
                 nb_iface.update({relation_attr: nb_target.id})
-                print("{} {}: {} установлен на {}".format(dev_name, int_name, relation_label, aggregate_name), flush=True)
+                print("{} {}: {} set to {}".format(dev_name, int_name, relation_label, aggregate_name), flush=True)
             except Exception as e:
-                print("Ошибка установки {} {} {} → {}: {}".format(dev_name, int_name, relation_label, aggregate_name, e), file=sys.stderr, flush=True)
+                print("Installation error {} {} {} → {}: {}".format(dev_name, int_name, relation_label, aggregate_name, e), file=sys.stderr, flush=True)
 
 
 def _find_ip_in_netbox(nb, address, vrf_id):
-    """Найти в NetBox IP по address и vrf_id (None = global). Возврат список из 0 или 1 элемента."""
+    """Find IP in NetBox by address and vrf_id (None = global). Return a list of 0 or 1 element."""
     try:
         if vrf_id is not None:
             candidates = list(nb.ipam.ip_addresses.filter(address=address, vrf_id=vrf_id))
@@ -429,7 +413,7 @@ def _find_ip_in_netbox(nb, address, vrf_id):
 
 
 def _find_ip_in_netbox_any_vrf(nb, address):
-    """Найти в NetBox любой IP с данным address (любой VRF или без VRF). Возврат список из 0 или 1 элемента."""
+    """Find in NetBox any IP with a given address (any VRF or without VRF). Return a list of 0 or 1 element."""
     try:
         candidates = list(nb.ipam.ip_addresses.filter(address=address))
         return candidates[:1]
@@ -438,11 +422,9 @@ def _find_ip_in_netbox_any_vrf(nb, address):
 
 
 def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface, addrs_f, vrf_id_f=None):
-    """
-    Привести привязку IP к интерфейсу в NetBox к списку из файла.
-    addrs_f — список глобальных адресов (строки), vrf_id_f — id VRF в NetBox или None (global).
-    Учитывается VRF: один и тот же адрес в разных VRF считаются разными.
-    """
+    """Bring the IP binding to the interface in NetBox to the list from the file.
+    addrs_f — list of global addresses (strings), vrf_id_f — VRF id in NetBox or None (global).
+    VRF is taken into account: the same address in different VRFs is considered different."""
     if nb is None or nb_iface is None:
         return
     addrs_n_tuples = _get_interface_ip_addresses(nb, nb_iface)
@@ -458,7 +440,7 @@ def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface,
                 ip_obj.assigned_object_id = None
                 ip_obj.assigned_object_type = None
                 ip_obj.save()
-                print("IP {} {} {}: отвязан от интерфейса".format(dev_name, iface_display_name, addr), flush=True)
+                print("IP {} {} {}: unlinked from interface".format(dev_name, iface_display_name, addr), flush=True)
         for addr, vrf_id in to_add:
             existing = _find_ip_in_netbox(nb, addr, vrf_id)
             if existing:
@@ -469,9 +451,9 @@ def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface,
                 ip_obj.assigned_object_id = nb_iface.id
                 ip_obj.assigned_object_type = "dcim.interface"
                 ip_obj.save()
-                print("IP {} {} {}: привязан к интерфейсу".format(dev_name, iface_display_name, addr), flush=True)
+                print("IP {} {} {}: bound to interface".format(dev_name, iface_display_name, addr), flush=True)
             else:
-                # IP с нужным VRF не найден — возможно, адрес есть в другом VRF (например global); обновляем VRF и привязываем
+                # An IP with the required VRF was not found - perhaps the address is in another VRF (for example global); update VRF and bind
                 existing_any = _find_ip_in_netbox_any_vrf(nb, addr)
                 if existing_any:
                     ip_obj = existing_any[0]
@@ -486,9 +468,9 @@ def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface,
                             ip_obj.assigned_object_type = "dcim.interface"
                         ip_obj.save()
                         if cur_vrf_id != vrf_id:
-                            print("IP {} {} {}: VRF изменён на целевой".format(dev_name, iface_display_name, addr), flush=True)
+                            print("IP {} {} {}: VRF changed to target".format(dev_name, iface_display_name, addr), flush=True)
                         if cur_id != nb_iface.id:
-                            print("IP {} {} {}: привязан к интерфейсу".format(dev_name, iface_display_name, addr), flush=True)
+                            print("IP {} {} {}: bound to interface".format(dev_name, iface_display_name, addr), flush=True)
                 else:
                     create_kw = dict(
                         address=addr,
@@ -498,17 +480,15 @@ def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface,
                     if vrf_id is not None:
                         create_kw["vrf"] = vrf_id
                     nb.ipam.ip_addresses.create(**create_kw)
-                    print("IP {} {} {}: создан и привязан к интерфейсу".format(dev_name, iface_display_name, addr), flush=True)
+                    print("IP {} {} {}: created and bound to interface".format(dev_name, iface_display_name, addr), flush=True)
     except Exception as e:
-        print("Ошибка применения IP {} {}: {}".format(dev_name, iface_display_name, e), file=sys.stderr, flush=True)
+        print("Error applying IP {} {}: {}".format(dev_name, iface_display_name, e), file=sys.stderr, flush=True)
 
 
 def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f):
-    """
-    Создать или найти запись MAC в NetBox, привязать к интерфейсу, выставить primary_mac_address.
-    Если MAC уже есть, но привязан к другому интерфейсу — переносим на текущий (assigned_object_id).
-    mac_f — значение physicalAddress из файла.
-    """
+    """Create or find a MAC entry in NetBox, bind it to the interface, set primary_mac_address.
+    If there is already a MAC, but it is attached to another interface, we transfer it to the current one (assigned_object_id).
+    mac_f — physicalAddress value from the file."""
     if not mac_f or not nb_iface:
         return
     mac_netbox = _mac_netbox_format(mac_f)
@@ -523,31 +503,31 @@ def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f):
             current_assigned_id = getattr(rec, "assigned_object_id", None)
             if current_assigned_id is not None and current_assigned_id != nb_iface.id:
                 try:
-                    # NetBox не даёт переназначить MAC, пока он primary на старом интерфейсе — сначала сбрасываем
+                    # NetBox does not allow you to reassign the MAC while it is primary on the old interface - first reset
                     old_iface = nb.dcim.interfaces.get(current_assigned_id)
                     primary = getattr(old_iface, "primary_mac_address", None) if old_iface else None
                     primary_id = primary if isinstance(primary, (int, type(None))) else getattr(primary, "id", None)
                     if old_iface is not None and primary_id == mac_id:
                         old_iface.update({"primary_mac_address": None})
-                        print("MAC {} {} {}: сброшен primary на старом интерфейсе (id={})".format(dev_name, iface_display_name, mac_netbox, current_assigned_id), flush=True)
+                        print("MAC {} {} {}: primary reset on old interface (id={})".format(dev_name, iface_display_name, mac_netbox, current_assigned_id), flush=True)
                     setattr(rec, "assigned_object_type", "dcim.interface")
                     setattr(rec, "assigned_object_id", nb_iface.id)
                     rec.save()
-                    print("MAC {} {} {}: перенесён на интерфейс {} — {}".format(dev_name, iface_display_name, mac_netbox, iface_display_name, url), flush=True)
+                    print("MAC {} {} {}: moved to interface {} - {}".format(dev_name, iface_display_name, mac_netbox, iface_display_name, url), flush=True)
                 except Exception as e_move:
-                    print("Ошибка переноса MAC {} {} {} на интерфейс: {} — {}".format(dev_name, iface_display_name, mac_netbox, url, e_move), file=sys.stderr, flush=True)
+                    print("Error transferring MAC {} {} {} to interface: {} - {}".format(dev_name, iface_display_name, mac_netbox, url, e_move), file=sys.stderr, flush=True)
                     return
             elif current_assigned_id is None:
                 try:
                     setattr(rec, "assigned_object_type", "dcim.interface")
                     setattr(rec, "assigned_object_id", nb_iface.id)
                     rec.save()
-                    print("MAC {} {} {}: привязан к интерфейсу — {}".format(dev_name, iface_display_name, mac_netbox, url), flush=True)
+                    print("MAC {} {} {}: bound to interface - {}".format(dev_name, iface_display_name, mac_netbox, url), flush=True)
                 except Exception as e_bind:
-                    print("Ошибка привязки MAC {} {} {}: {} — {}".format(dev_name, iface_display_name, mac_netbox, url, e_bind), file=sys.stderr, flush=True)
+                    print("MAC {} {} {} binding error: {} - {}".format(dev_name, iface_display_name, mac_netbox, url, e_bind), file=sys.stderr, flush=True)
                     return
             else:
-                print("MAC {} {} {}: уже в Netbox на этом интерфейсе — {}".format(dev_name, iface_display_name, mac_netbox, url), flush=True)
+                print("MAC {} {} {}: already in Netbox on this interface - {}".format(dev_name, iface_display_name, mac_netbox, url), flush=True)
         else:
             created = nb.dcim.mac_addresses.create(
                 mac_address=mac_netbox,
@@ -556,34 +536,32 @@ def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f):
             )
             rec = created
             url = getattr(created, "url", None) or getattr(created, "display", created)
-            print("MAC {} {} {}: создан — {}".format(dev_name, iface_display_name, mac_netbox, url), flush=True)
+            print("MAC {} {} {}: created - {}".format(dev_name, iface_display_name, mac_netbox, url), flush=True)
         mac_id = getattr(rec, "id", None)
         if mac_id is not None:
             try:
                 nb_iface.update({"primary_mac_address": mac_id})
-                print("Обновлено {} {}: primary_mac_address={}".format(dev_name, iface_display_name, mac_id), flush=True)
+                print("Updated {} {}: primary_mac_address={}".format(dev_name, iface_display_name, mac_id), flush=True)
             except Exception as e2:
-                print("Ошибка установки primary_mac_address {} {}: {} — {}".format(dev_name, iface_display_name, mac_id, e2), file=sys.stderr, flush=True)
+                print("Error setting primary_mac_address {} {}: {} - {}".format(dev_name, iface_display_name, mac_id, e2), file=sys.stderr, flush=True)
     except Exception as e:
-        print("Ошибка MAC {} {} {}: {} — {}".format(dev_name, iface_display_name, mac_netbox, e), file=sys.stderr, flush=True)
+        print("MAC Error {} {} {}: {} - {}".format(dev_name, iface_display_name, mac_netbox, e), file=sys.stderr, flush=True)
 
 
 def load_mt_ref(path):
-    """
-    Загрузить справочник типов интерфейсов из JSON (формат netbox_interface_types.json).
-    Возврат: (ref_values_set, ref_list, None) или (None, None, error_msg).
-    ref_list — список dict с value/label для проверки по label (файл/SSH часто отдаёт label, не value).
-    """
+    """Load a directory of interface types from JSON (netbox_interface_types.json format).
+    Return: (ref_values_set, ref_list, None) or (None, None, error_msg).
+    ref_list - a dict list with value/label for checking by label (file/SSH often returns label, not value)."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
-        return None, None, "файл не найден: {}".format(path)
+        return None, None, "file not found: {}".format(path)
     except json.JSONDecodeError as e:
-        return None, None, "ошибка JSON: {}".format(e)
+        return None, None, "JSON error: {}".format(e)
     types_list = data.get("interface_types") if isinstance(data, dict) else data
     if not isinstance(types_list, list):
-        return None, None, "в файле ожидается ключ 'interface_types' (список)"
+        return None, None, "the file expects the key 'interface_types' (list)"
     values = set()
     for item in types_list:
         if isinstance(item, dict) and item.get("value"):
@@ -594,7 +572,7 @@ def load_mt_ref(path):
 
 
 def _mt_in_ref(mt_str, ref_values, ref_list):
-    """Проверить, что тип mt_str есть в справочнике (по value или label)."""
+    """Check that the type mt_str is in the directory (by value or label)."""
     if not mt_str:
         return True
     if not ref_values:
@@ -604,10 +582,8 @@ def _mt_in_ref(mt_str, ref_values, ref_list):
 
 
 def _mt_to_value(mt_str, ref_values, ref_list):
-    """
-    Привести тип (value или label из файла/SSH/Netbox) к каноническому value по справочнику.
-    Возврат: value из справочника или исходная строка, если не найдено.
-    """
+    """Convert the type (value or label from file/SSH/Netbox) to the canonical value according to the reference book.
+    Return: value from the directory or the original string if not found."""
     if not mt_str or not ref_list:
         return (mt_str or "").strip()
     mt = (mt_str or "").strip()
@@ -626,7 +602,7 @@ def _mt_to_value(mt_str, ref_values, ref_list):
 
 
 def _netbox_type_to_str(nb_iface):
-    """Взять тип интерфейса из объекта Netbox (type.value или type.label)."""
+    """Get the interface type from the Netbox object (type.value or type.label)."""
     t = getattr(nb_iface, "type", None)
     if t is None:
         return ""
@@ -640,43 +616,43 @@ def _netbox_type_to_str(nb_iface):
 def main():
     parser = argparse.ArgumentParser(
         prog="netbox_checks.py",
-        description="Проверки Netbox по данным из JSON (файл/SSH). Сверка полей интерфейсов, при --apply — обновление в Netbox.",
+        description="Netbox checks against data from JSON (file/SSH). Reconciliation of interface fields, with --apply - update in Netbox.",
     )
-    # --- Входные данные ---
-    g_in = parser.add_argument_group("Входные данные (файл, хост, платформа)")
+    # --- Input data ---
+    g_in = parser.add_argument_group("Input data (file, host, platform)")
     g_in.add_argument(
         "--file", "-f",
         default="dry-ssh.json",
         metavar="FILE",
-        help="JSON с устройствами и интерфейсами (по умолчанию dry-ssh.json)",
+        help="JSON with devices and interfaces (default dry-ssh.json)",
     )
     g_in.add_argument(
         "--host",
         metavar="NAME",
-        help="Обработать только один хост (имя устройства)",
+        help="Process only one host (device name)",
     )
     g_in.add_argument(
         "--platform",
         choices=("arista", "juniper", "all"),
         default="all",
-        help="Платформа в NetBox: arista, juniper или all (по умолчанию — все)",
+        help="Platform in NetBox: arista, juniper or all (default - all)",
     )
-    # --- Проверки (какие поля сверять) ---
-    g_checks = parser.add_argument_group("Проверки (какие поля сверять)")
+    # --- Checks (which fields to check) ---
+    g_checks = parser.add_argument_group("Checks (which fields to check)")
     g_checks.add_argument(
         "--intname",
         action="store_true",
-        help="Имена интерфейсов (файл vs Netbox) с поиском по вариантам",
+        help="Interface names (file vs Netbox) with search by options",
     )
     g_checks.add_argument(
         "--description",
         action="store_true",
-        help="Поле description",
+        help="Description field",
     )
     g_checks.add_argument(
         "--mediatype",
         action="store_true",
-        help="mediaType (файл) / type (Netbox)",
+        help="mediaType (file) / type (Netbox)",
     )
     g_checks.add_argument(
         "--mt-ref",
@@ -684,18 +660,18 @@ def main():
         const="netbox_interface_types.json",
         default="netbox_interface_types.json",
         metavar="FILE",
-        help="Справочник типов для mediaType (по умолчанию netbox_interface_types.json)",
+        help="Type reference for mediaType (default netbox_interface_types.json)",
     )
     g_checks.add_argument(
         "--no-mt-ref",
         action="store_true",
         dest="no_mt_ref",
-        help="Не загружать справочник типов",
+        help="Don't load the type dictionary",
     )
     g_checks.add_argument(
         "--bandwidth",
         action="store_true",
-        help="bandwidth (файл) / speed (Netbox)",
+        help="bandwidth (file) / speed (Netbox)",
     )
     g_checks.add_argument(
         "--duplex",
@@ -705,7 +681,7 @@ def main():
     g_checks.add_argument(
         "--mac",
         action="store_true",
-        help="physicalAddress (файл) / mac_address (Netbox)",
+        help="physicalAddress (file) / mac_address (Netbox)",
     )
     g_checks.add_argument(
         "--mtu",
@@ -716,75 +692,75 @@ def main():
         "--tx-power",
         action="store_true",
         dest="tx_power",
-        help="txPower (файл) / tx_power (Netbox)",
+        help="txPower (file) / tx_power (Netbox)",
     )
     g_checks.add_argument(
         "--forwarding-model",
         action="store_true",
         dest="forwarding_model",
-        help="forwardingModel (файл) / mode (Netbox) — режим работы порта",
+        help="forwardingModel (file) / mode (Netbox) - port operating mode",
     )
     g_checks.add_argument(
         "--ip-address",
         action="store_true",
         dest="ip_address",
-        help="IPv4/IPv6 адреса (файл: ipv4_addresses, ipv6_addresses) vs привязанные к интерфейсу в Netbox",
+        help="IPv4/IPv6 addresses (file: ipv4_addresses, ipv6_addresses) vs bound to an interface in Netbox",
     )
     g_checks.add_argument(
         "--lag",
         action="store_true",
-        help="LAG / Related Interfaces: aggregateInterface (файл) vs lag (Netbox) у физических интерфейсов",
+        help="LAG / Related Interfaces: aggregateInterface (file) vs lag (Netbox) for physical interfaces",
     )
     g_checks.add_argument(
         "--parent",
         action="store_true",
-        help="Parent interface: aggregateInterface (файл) vs parent (Netbox) у логических интерфейсов (ae5.0 → ae5)",
+        help="Parent interface: aggregateInterface (file) vs parent (Netbox) for logical interfaces (ae5.0 → ae5)",
     )
     g_checks.add_argument(
         "--all",
         action="store_true",
         dest="all_checks",
-        help="Включить все проверки сразу",
+        help="Enable all checks at once",
     )
-    # --- Вывод ---
-    g_out = parser.add_argument_group("Вывод")
+    # --- Conclusion ---
+    g_out = parser.add_argument_group("Conclusion")
     g_out.add_argument("--version", action="version", version="%(prog)s " + __version__)
     g_out.add_argument(
         "--show-change",
         action="store_true",
         dest="show_change",
-        help="Колонки «что подставим в Netbox» по выбранным ключам (mtToSet, descToSet, …)",
+        help="Columns “what will we substitute in Netbox” according to the selected keys (mtToSet, descToSet, ...)",
     )
     g_out.add_argument(
         "--hide-empty-note-cols",
         action="store_true",
         dest="hide_empty_note_cols",
-        help="Не выводить колонки примечаний (nD, nM, …), если во всех строках пусто",
+        help="Do not display comment columns (nD, nM, ...) if all rows are empty",
     )
     g_out.add_argument(
         "--hide-no-diff-cols",
         action="store_true",
         dest="hide_no_diff_cols",
-        help="Не выводить группы колонок (файл/Netbox/примечание), в которых ни в одной строке нет расхождения",
+        help="Do not display groups of columns (file/Netbox/note) in which there is no discrepancy in any rows",
     )
     g_out.add_argument(
         "--hide-ok-hosts",
         action="store_true",
         dest="hide_ok_hosts",
-        help="Не выводить в таблице хосты без расхождений; вывести их списком и статистику (хосты/интерфейсы OK и с расхождениями)",
+        help="Do not display hosts in the table without discrepancies; display them in a list and statistics (hosts/interfaces OK and with discrepancies)",
     )
     g_out.add_argument(
         "--json",
         action="store_true",
-        help="Вывод в JSON (по умолчанию — таблица)",
+        help="Output to JSON (table by default)",
     )
-    # --- Применение в Netbox ---
-    g_apply = parser.add_argument_group("Применение в Netbox")
+    # --- Application in Netbox ---
+    g_apply = parser.add_argument_group("Application in Netbox")
     g_apply.add_argument(
         "--apply",
         action="store_true",
         dest="apply",
-        help="При разнице по выбранным ключам обновлять интерфейс в Netbox (при этом таблица не выводится)",
+        help="If there is a difference in the selected keys, update the interface in Netbox (the table is not displayed)",
     )
     args = parser.parse_args()
 
@@ -803,7 +779,7 @@ def main():
         args.parent = True
     if args.no_mt_ref:
         args.mt_ref = None
-    # При одном --hide-ok-hosts без проверок включаем все проверки (чтобы был вывод списка и статистики)
+    # With one --hide-ok-hosts without checks, we enable all checks (so that a list and statistics are displayed)
     if args.hide_ok_hosts and not (
         args.intname or args.description or args.mediatype or args.bandwidth or args.duplex
         or args.mac or args.mtu or args.tx_power or args.forwarding_model or args.ip_address or args.lag or args.parent
@@ -840,14 +816,14 @@ def main():
         args.lag = True
         args.parent = True
         args.show_change = True
-        # Не скрывать колонки без расхождений, если пользователь явно запросил --show-change
+        # Don't hide columns without discrepancies if user explicitly requests --show-change
         args.hide_no_diff_cols = not show_change_requested
 
     url = os.environ.get("NETBOX_URL")
     token = os.environ.get("NETBOX_TOKEN")
     netbox_tag = os.environ.get("NETBOX_TAG", "border")
     if not url or not token:
-        print("Задайте NETBOX_URL и NETBOX_TOKEN")
+        print("Set NETBOX_URL and NETBOX_TOKEN")
         return 1
 
     data, err = load_file(args.file)
@@ -857,7 +833,7 @@ def main():
 
     if args.host:
         if args.host not in data["devices"]:
-            print("Хост '{}' не найден в файле.".format(args.host), file=sys.stderr)
+            print("Host '{}' not found in file.".format(args.host), file=sys.stderr)
             return 1
         data["devices"] = {args.host: data["devices"][args.host]}
 
@@ -866,12 +842,12 @@ def main():
         nb = pynetbox.api(url, token=token)
         nb_devices = list(nb.dcim.devices.filter(tag=netbox_tag))
     except Exception as e:
-        print("Ошибка доступа к NetBox: {}.".format(netbox_error_message(e)), file=sys.stderr)
+        print("Error accessing NetBox: {}.".format(netbox_error_message(e)), file=sys.stderr)
         return 1
     nb_names = [d.name for d in nb_devices]
     nb_by_name = {d.name: d for d in nb_devices}
 
-    # Сверка hostname'ов (при --host не выводим: список «только в Netbox» не нужен)
+    # Reconciliation of hostnames (if --host is not displayed: the list “only in Netbox” is not needed)
     only_file, only_nb = compare_hostnames(file_devices, nb_names)
     if args.platform != "all" and only_nb:
         only_nb = [
@@ -884,28 +860,28 @@ def main():
         ]
     if not args.host and (only_file or only_nb):
         if only_file:
-            print("Только в файле (нет в Netbox по тегу {}): {}".format(netbox_tag, ", ".join(only_file)))
+            print("Only in file (not in Netbox by tag {}): {}".format(netbox_tag, ", ".join(only_file)))
         if only_nb:
-            print("Только в Netbox (нет в файле): {}".format(", ".join(only_nb)))
+            print("Netbox only (not in file): {}".format(", ".join(only_nb)))
         print()
 
     mt_ref_values = None
     mt_ref_list = None
-    # Справочник типов нужен при сверке mediatype и при создании интерфейсов (--apply --intname), чтобы подставить slug NetBox
+    # The type directory is needed when checking mediatype and when creating interfaces (--apply --intname) to substitute the NetBox slug
     if (args.mediatype or (args.apply and args.intname)) and args.mt_ref:
         mt_ref_values, mt_ref_list, ref_err = load_mt_ref(args.mt_ref)
         if ref_err:
-            print("Справочник типов (--mt-ref): {}.".format(ref_err), flush=True)
+            print("Type reference (--mt-ref): {}.".format(ref_err), flush=True)
         elif mt_ref_values:
-            print("Справочник типов загружен: {} записей ({}).".format(len(mt_ref_values), args.mt_ref), flush=True)
+            print("The type directory has been loaded with: {} entries ({}).".format(len(mt_ref_values), args.mt_ref), flush=True)
 
     if args.mediatype and mt_ref_values is None:
-        print("Внимание: без справочника типов (--mt-ref) значения mediaType не приводятся к одному формату, "
-              "сверка может показывать расхождения из-за разного написания (файл vs Netbox).", file=sys.stderr, flush=True)
+        print("Attention: without a type ref (--mt-ref), mediaType values ​​are not converted to the same format,"
+              "reconciliation may show discrepancies due to different spellings (file vs Netbox).", file=sys.stderr, flush=True)
 
     out = {}
     if args.intname or args.description or args.mediatype or (args.show_change and mt_ref_values) or args.bandwidth or args.duplex or args.mac or args.mtu or args.tx_power or args.forwarding_model or args.ip_address or args.lag or args.parent:
-        # Один проход: строки (..., mtToSet=10, ...); индексы 26-30 — *ToSet при --show-change
+        # One pass: lines (..., mtToSet=10, ...); indexes 26-30 — *ToSet with --show-change
         rows = []
         note_codes_used = set()
         vrf_cache = {}
@@ -966,16 +942,16 @@ def main():
                 if args.mediatype or args.show_change:
                     if nb_iface is not None:
                         mt_n = _netbox_type_to_str(nb_iface)
-                    # LAG: в файле mediaType не задаётся, в NetBox type=lag — не считать расхождением
+                    # LAG: mediaType is not set in the file, in NetBox type=lag - do not consider it a discrepancy
                     is_lag = entry.get("isLag") or (int_name and str(int_name).startswith("ae") and "." not in str(int_name))
                     is_lag_ok = is_lag and not mt_f and mt_n == "lag"
-                    # Logical unit (ae5.0): в файле mediaType не задаётся, в NetBox type=virtual — не считать расхождением
+                    # Logical unit (ae5.0): mediaType is not set in the file, in NetBox type=virtual - do not consider it a discrepancy
                     is_logical_ok = is_logical_unit and not mt_f and mt_n == "virtual"
                     type_ok = is_lag_ok or is_logical_ok
                     ref_list = mt_ref_list or []
                     mt_f_value = _mt_to_value(mt_f, mt_ref_values or set(), ref_list) if mt_ref_values else mt_f
                     mt_n_value = _mt_to_value(mt_n, mt_ref_values or set(), ref_list) if mt_ref_values else mt_n
-                    # slug для Netbox (value из справочника) — для вывода mtToSet и для --apply
+                    # slug for Netbox (value from the directory) - for mtToSet output and for --apply
                     if mt_ref_values and mt_f_value:
                         mt_to_set = mt_f_value
                     if args.mediatype and nb_iface is not None:
@@ -1001,7 +977,7 @@ def main():
                 speed_n = None
                 nB = ""
                 if args.bandwidth:
-                    # bandwidth из dry-ssh — в bps (битах/с), speed из Netbox — в Kbps
+                    # bandwidth from dry-ssh - in bps (bits/s), speed from Netbox - in Kbps
                     bw_f = entry.get("bandwidth")
                     if bw_f is not None and not isinstance(bw_f, (int, float)):
                         try:
@@ -1016,12 +992,12 @@ def main():
                             except (TypeError, ValueError):
                                 pass
                     if bw_f is not None:
-                        # Показываем разницу, если в Netbox нет speed или он не совпадает с файлом
+                        # We show the difference if there is no speed in Netbox or it does not match the file
                         if speed_n is None:
                             nB = str(BW_NOTE_DIFF)
                             note_codes_used.add(BW_NOTE_DIFF)
                         else:
-                            speed_n_bps = speed_n * 1000  # Netbox speed в Kbps -> bps
+                            speed_n_bps = speed_n * 1000  # Netbox speed in Kbps -> bps
                             if bw_f != speed_n_bps:
                                 nB = str(BW_NOTE_DIFF)
                                 note_codes_used.add(BW_NOTE_DIFF)
@@ -1039,12 +1015,12 @@ def main():
                             dup_n = str(d or "").strip()
                     dup_f_norm = _normalize_duplex(dup_f)
                     if not dup_f_norm and entry.get("bandwidth") and entry.get("bandwidth") >= 10_000_000_000:
-                        dup_f_norm = "full"  # 10G+ только full duplex, проверять не имеет смысла
+                        dup_f_norm = "full"  # 10G+ only full duplex, no point in checking
                     dup_n_norm = _normalize_duplex(dup_n)
                     if dup_f_norm and dup_n_norm and dup_f_norm != dup_n_norm:
                         nDup = str(DUP_NOTE_DIFF)
                         note_codes_used.add(DUP_NOTE_DIFF)
-                    # в таблице показываем нормализованные значения (full/half), чтобы duplexFull и Full не выглядели по-разному
+                    # in the table we show normalized values ​​(full/half) so that duplexFull and Full do not look different
                     dup_f_out = dup_f_norm if dup_f_norm else dup_f
                     dup_n_out = dup_n_norm if dup_n_norm else dup_n
                 else:
@@ -1058,7 +1034,7 @@ def main():
                     mac_f = str(mac_f_raw or "").strip() if mac_f_raw is not None else ""
                     if nb_iface is not None:
                         mac_n = _get_interface_mac(nb_iface)
-                    # MAC проверяем только у физических интерфейсов (не LAG, не logical unit)
+                    # We check MAC only for physical interfaces (not LAG, not logical unit)
                     is_lag_for_mac = entry.get("isLag") or (int_name and str(int_name).startswith("ae") and "." not in str(int_name))
                     is_logical = entry.get("isLogical") or (int_name and "." in str(int_name))
                     is_physical_for_mac = not is_lag_for_mac and not is_logical
@@ -1114,7 +1090,7 @@ def main():
                     if txp_f != "" and (txp_n == "" or txp_f != txp_n):
                         nTxp = str(TXPOWER_NOTE_DIFF)
                         note_codes_used.add(TXPOWER_NOTE_DIFF)
-                # вывод tx_power целым числом, без точки
+                # output tx_power as an integer, without a dot
                 txp_f_out = str(int(txp_f)) if isinstance(txp_f, (int, float)) else txp_f
                 txp_n_out = str(int(txp_n)) if isinstance(txp_n, (int, float)) else txp_n
                 fwd_f = ""
@@ -1128,8 +1104,8 @@ def main():
                             fwd_n = str(mode_raw.get("value") or mode_raw.get("label") or "").strip()
                         else:
                             fwd_n = str(mode_raw or "").strip()
-                    # В Netbox: routed → mode=null, bridged → mode=tagged; сравнение по значению для Netbox
-                    # У logical unit в файле forwardingModel не задаётся — не считать расхождением
+                    # In Netbox: routed → mode=null, bridged → mode=tagged; comparison by value for Netbox
+                    # The logical unit does not have a forwardingModel specified in the file - do not consider it a discrepancy
                     fwd_f_cmp = (_fwd_file_to_netbox_mode(fwd_f) or "")
                     fwd_n_cmp = (fwd_n or "").strip().lower()
                     if fwd_f_cmp != fwd_n_cmp and not (is_logical_unit and not fwd_f):
@@ -1194,14 +1170,14 @@ def main():
                     if parent_f != parent_n:
                         nParent = str(PARENT_NOTE_DIFF)
                         note_codes_used.add(PARENT_NOTE_DIFF)
-                # значения «что подставим» для --show-change — только когда есть расхождение (есть что применять)
+                # “what will we substitute” values ​​for --show-change - only when there is a discrepancy (there is something to apply)
                 desc_to_set = desc_f if (args.show_change and args.description and nD) else ""
                 speed_to_set = (bw_f // 1000) if (args.show_change and args.bandwidth and bw_f is not None and nB) else ""
                 dup_to_set = (_normalize_duplex(dup_f) or dup_f) if (args.show_change and args.duplex and dup_f and nDup) else ""
                 mtu_to_set_val = mtu_f if (args.show_change and args.mtu and mtu_f != "") else ""
                 mtu_to_set_display = mtu_to_set_val if nMtu else ""
                 txp_to_set = txp_f_out if (args.show_change and args.tx_power and nTxp) else ""
-                # --apply: вносить изменения в Netbox по выбранным ключам при разнице
+                # --apply: make changes to Netbox for selected keys if there is a difference
                 if args.apply and nb_iface is not None:
                     updates = {}
                     if args.intname and (nb_name or "").strip() != (int_name or "").strip():
@@ -1221,14 +1197,14 @@ def main():
                     if args.tx_power and txp_f != "" and isinstance(txp_f, (int, float)) and (txp_n == "" or txp_f != txp_n):
                         updates["tx_power"] = txp_f
                     if args.forwarding_model and nFwd and fwd_f:
-                        # В Netbox: routed → mode=null, bridged → mode=tagged
+                        # In Netbox: routed → mode=null, bridged → mode=tagged
                         updates["mode"] = _fwd_file_to_netbox_mode(fwd_f)
-                    # Related Interfaces (LAG): физические члены LAG должны ссылаться на интерфейс LAG
+                    # Related Interfaces (LAG): Physical members of a LAG must reference a LAG interface
                     if aggregate_name and not entry.get("isLag") and not is_logical_unit:
                         nb_lag = nb_by_iface_name.get(aggregate_name)
                         if nb_lag and _get_related_interface_id(nb_iface, "lag") != getattr(nb_lag, "id", None):
                             updates["lag"] = nb_lag.id
-                    # Parent interface: логические юниты (ae5.0) должны ссылаться на родительский LAG (ae5)
+                    # Parent interface: logical units (ae5.0) must reference parent LAG (ae5)
                     elif aggregate_name and is_logical_unit:
                         nb_parent_iface = nb_by_iface_name.get(aggregate_name)
                         if nb_parent_iface and _get_related_interface_id(nb_iface, "parent") != getattr(nb_parent_iface, "id", None):
@@ -1236,19 +1212,19 @@ def main():
                     if updates:
                         try:
                             nb_iface.update(updates)
-                            print("Обновлено {} {}: {}".format(dev_name, nb_name or int_name, list(updates.keys())), flush=True)
+                            print("Updated {} {}: {}".format(dev_name, nb_name or int_name, list(updates.keys())), flush=True)
                         except Exception as e:
-                            print("Ошибка обновления {} {}: {} — {}".format(dev_name, nb_name or int_name, updates, e), file=sys.stderr, flush=True)
-                    # MAC в Netbox — отдельная сущность (dcim.mac-addresses); только у физических интерфейсов
+                            print("{} {} update error: {} - {}".format(dev_name, nb_name or int_name, updates, e), file=sys.stderr, flush=True)
+                    # MAC in Netbox is a separate entity (dcim.mac-addresses); only for physical interfaces
                     if args.mac and is_physical_for_mac and (nMac or (mac_f and not mac_n)) and nb_iface is not None:
                         _apply_mac_to_interface(nb, dev_name, nb_name or int_name, nb_iface, mac_f)
-                    # IP в Netbox — ipam.ip_addresses с assigned_object_id/type; привести к списку из файла
+                    # IP in Netbox - ipam.ip_addresses with assigned_object_id/type; result in a list from a file
                     if args.ip_address and nIp and nb_iface is not None:
                         _apply_ip_addresses_to_interface(nb, dev_name, nb_name or int_name, nb_iface, addrs_f, vrf_id_f)
                 elif args.apply and args.intname and note_code == NOTE_MISSING:
-                    # Интерфейс в NetBox не найден — создаём и сразу заполняем все поля из файла
+                    # The interface was not found in NetBox - create and immediately fill in all fields from the file
                     create_data = {"device": device.id, "name": int_name}
-                    # LAG (агрегат ae): в NetBox тип Link Aggregation Group (LAG), slug = "lag"
+                    # LAG (aggregate ae): in NetBox type Link Aggregation Group (LAG), slug = "lag"
                     if entry.get("isLag"):
                         create_data["type"] = "lag"
                     elif is_logical_unit:
@@ -1291,22 +1267,22 @@ def main():
                         mode_val = _fwd_file_to_netbox_mode(fwd_raw)
                         if mode_val is not None:
                             create_data["mode"] = mode_val
-                    # Parent interface для логического юнита (ae5.0 → ae5)
+                    # Parent interface for logical unit (ae5.0 → ae5)
                     if is_logical_unit and aggregate_name and aggregate_name in nb_by_iface_name:
                         create_data["parent"] = nb_by_iface_name[aggregate_name].id
                     try:
                         nb_iface = nb.dcim.interfaces.create(**create_data)
-                        nb_by_iface_name[int_name] = nb_iface  # чтобы второй проход (LAG) и последующие записи видели новый интерфейс
-                        print("Создан интерфейс {} {}: {}".format(dev_name, int_name, list(create_data.keys())), flush=True)
+                        nb_by_iface_name[int_name] = nb_iface  # so that the second pass (LAG) and subsequent writes see the new interface
+                        print("Interface {} {} created: {}".format(dev_name, int_name, list(create_data.keys())), flush=True)
                         if args.mac and is_physical_for_mac and mac_f:
                             _apply_mac_to_interface(nb, dev_name, int_name, nb_iface, mac_f)
                         if args.ip_address and addrs_f:
                             _apply_ip_addresses_to_interface(nb, dev_name, int_name, nb_iface, addrs_f, vrf_id_f)
                     except Exception as e:
-                        print("Ошибка создания {} {}: {} — {}".format(dev_name, int_name, create_data, e), file=sys.stderr, flush=True)
+                        print("Error creating {} {}: {} - {}".format(dev_name, int_name, create_data, e), file=sys.stderr, flush=True)
                 mt_to_set_display = mt_to_set if nM else ""
                 rows.append((dev_name, int_name, nb_name, note, desc_f, desc_n, nD, mt_f, mt_n, nM, mt_to_set_display, bw_f, speed_n, nB, dup_f_out, dup_n_out, nDup, mac_f, mac_n, nMac, mtu_f, mtu_n, nMtu, txp_f_out, txp_n_out, nTxp, desc_to_set, speed_to_set, dup_to_set, mtu_to_set_display, txp_to_set, fwd_f, fwd_n, nFwd, fwd_to_set, ip_f, ip_n, ip_vrf_f_display, ip_vrf_n_display, nIp, lag_f, lag_n, nLag, parent_f, parent_n, nParent))
-            # Второй проход: LAG и Parent — при создании интерфейса агрегат мог ещё не существовать
+            # Second pass: LAG and Parent - when creating the interface, the unit might not yet exist
             if args.apply and args.intname:
                 def _is_physical_lag_member(e, n):
                     return not e.get("isLag") and not (e.get("isLogical") or (n and "." in str(n) and str(n).startswith("ae")))
@@ -1315,12 +1291,12 @@ def main():
                 _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, "lag", _is_physical_lag_member, "LAG")
                 _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, "parent", _is_logical_unit_entry, "parent")
         if skipped_no_netbox:
-            print("Пропущено (устройство есть в файле, но нет в Netbox по тегу): {}.".format(", ".join(skipped_no_netbox)))
+            print("Skipped (the device is in the file, but not in Netbox by tag): {}.".format(", ".join(skipped_no_netbox)))
         if skipped_not_list:
-            print("Пропущено (в файле не список интерфейсов): {}.".format(", ".join(skipped_not_list)))
+            print("Omitted (the file does not contain a list of interfaces): {}.".format(", ".join(skipped_not_list)))
         if skipped_platform:
-            print("Пропущено (платформа не {}): {}.".format(args.platform, ", ".join(skipped_platform)))
-        # Статистика и фильтр «хосты без расхождений» при --hide-ok-hosts
+            print("Missing (platform not {}): {}.".format(args.platform, ", ".join(skipped_platform)))
+        # Statistics and filter “hosts without discrepancies” with --hide-ok-hosts
         rows_display = rows
         ok_hosts = set()
         not_ok_hosts_set = set()
@@ -1340,8 +1316,8 @@ def main():
                 rows_display = [r for r in rows if r[0] not in ok_hosts]
                 ok_list = sorted(ok_hosts)
                 if ok_list:
-                    print("Хосты без расхождений ({}): {}".format(len(ok_list), ", ".join(ok_list)), flush=True)
-                print("Статистика: хосты OK {}, хосты с расхождениями {}; интерфейсы OK {}, интерфейсы с расхождениями {}.".format(
+                    print("Hosts without discrepancies ({}): {}".format(len(ok_list), ", ".join(ok_list)), flush=True)
+                print("Statistics: hosts OK {}, hosts with discrepancies {}; interfaces OK {}, interfaces with discrepancies {}.".format(
                     hosts_ok_count, hosts_not_ok_count, interfaces_ok_count, interfaces_not_ok_count), flush=True)
                 if rows_display or not args.apply:
                     print(flush=True)
@@ -1353,7 +1329,7 @@ def main():
                 col_spec = _filter_no_diff_cols(col_spec, rows_display)
             has_any_diff = any(_row_has_diff(r) for r in rows_display) if rows_display else False
             if rows_display and not has_any_diff:
-                print("Итог: все проверенные поля совпадают с NetBox. Расхождений не найдено.", flush=True)
+                print("Result: all checked fields match NetBox. No discrepancies found.", flush=True)
                 print(flush=True)
             if args.json:
                 out["rows"] = [
@@ -1373,29 +1349,29 @@ def main():
             else:
                 _print_combined_table(rows_display, note_codes_used, col_spec)
         else:
-            print("При --apply таблица не выводится (данные уже обновлены в Netbox).", flush=True)
+            print("With --apply, the table is not displayed (the data has already been updated in Netbox).", flush=True)
 
     if args.json and out:
         print(json.dumps(out, indent=2, ensure_ascii=False))
     return 0
 
 
-# Индексы колонок примечаний в строке (note, nD, nM, nB, nDup, nMac, nMtu, nTxp, nFwd, nIp, nLag, nParent) — для определения «есть расхождение»
+# Indexes of note columns in a line (note, nD, nM, nB, nDup, nMac, nMtu, nTxp, nFwd, nIp, nLag, nParent) - to determine “there is a discrepancy”
 ROW_NOTE_INDICES = (3, 6, 9, 13, 16, 19, 22, 25, 33, 39, 42, 45)
 
 
 def _row_has_diff(row):
-    """Есть ли в строке хотя бы одно примечание/расхождение."""
+    """Is there at least one comment/discrepancy on the line?"""
     for i in ROW_NOTE_INDICES:
         if i < len(row) and row[i]:
             return True
     return False
 
 
-# Заголовки колонок-примечаний (nD, nM, nB, …) — для --hide-empty-note-cols
+# Note column headings (nD, nM, nB, ...) - for --hide-empty-note-cols
 NOTE_COL_HEADERS = {"nD", "nM", "nB", "nDup", "nMac", "nMtu", "nTxp", "nFwd", "nIp", "nLag", "nParent"}
 
-# Группы колонок по проверке: при пустом примечании во всех строках скрываем всю группу (--hide-no-diff-cols)
+# Column groups for verification: if the note is empty in all lines, hide the entire group (--hide-no-diff-cols)
 DIFF_GROUPS_BY_NOTE = {
     "nD": {"descF", "descN", "nD", "descToSet"},
     "nM": {"mtF", "mtN", "nM", "mtToSet"},
@@ -1412,7 +1388,7 @@ DIFF_GROUPS_BY_NOTE = {
 
 
 def _filter_empty_note_cols(col_spec, rows):
-    """Убрать из col_spec колонки примечаний, у которых во всех строках пусто."""
+    """Remove comment columns from col_spec that have empty rows in all rows."""
     def keep(col):
         header, idx, _ = col
         if header not in NOTE_COL_HEADERS:
@@ -1422,7 +1398,7 @@ def _filter_empty_note_cols(col_spec, rows):
 
 
 def _filter_no_diff_cols(col_spec, rows):
-    """Убрать группы колонок (файл/Netbox/примечание), где во всех строках примечание пусто — расхождений нет."""
+    """Remove column groups (file/Netbox/note), where the note is empty in all lines - there are no discrepancies."""
     headers_in_spec = {c[0] for c in col_spec}
     cols_to_remove = set()
     for note, group in DIFF_GROUPS_BY_NOTE.items():
@@ -1438,10 +1414,8 @@ def _filter_no_diff_cols(col_spec, rows):
 
 
 def _build_col_spec(args):
-    """
-    Список колонок по переданным ключам. Элемент: (header, row_index, max_width).
-    row: name=0..intN=2, note=3, descF=4,descN=5,nD=6, mtF=7..mtToSet=10, bwF=11,speedN=12,nB=13, dupF=14,dupN=15,nDup=16, macF=17,macN=18,nMac=19, mtuF=20,mtuN=21,nMtu=22, txpF=23,txpN=24,nTxp=25, descToSet=26..txpToSet=30, fwdF=31,fwdN=32,nFwd=33,fwdToSet=34.
-    """
+    """List of columns by passed keys. Element: (header, row_index, max_width).
+    row: name=0..intN=2, note=3, descF=4,descN=5,nD=6, mtF=7..mtToSet=10, bwF=11,speedN=12,nB=13, dupF=14,dupN=15,nDup=16, macF=17,macN=18,nMac=19, mtuF=20,mtuN=21,nMtu=22, txpF=23,txpN=24,nTxp=25, descToSet=26..txpToSet=30, fwdF=31,fwdN=32,nFwd=33,fwdToSet=34."""
     max_desc_len = 50
     cols = [("name", 0, 999), ("intF", 1, 999), ("intN", 2, 999)]
     if args.intname:
@@ -1486,7 +1460,7 @@ def _build_col_spec(args):
 
 
 def _row_to_dict(r, col_spec):
-    """Собрать из строки row словарь только по ключам из col_spec (header -> value)."""
+    """Assemble a dictionary from the row row using only the keys from col_spec (header -> value)."""
     d = {}
     for header, idx, max_w in col_spec:
         if idx < len(r):
@@ -1495,7 +1469,7 @@ def _row_to_dict(r, col_spec):
 
 
 def _print_combined_table(rows, note_codes_used, col_spec, max_desc_len=50):
-    """Таблица только по колонкам из col_spec. col_spec: список (header, row_index, max_width)."""
+    """Table only based on columns from col_spec. col_spec: list(header, row_index, max_width)."""
     if not rows or not col_spec:
         return
     headers = [c[0] for c in col_spec]

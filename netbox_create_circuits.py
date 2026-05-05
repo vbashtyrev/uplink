@@ -22,19 +22,19 @@ CIRCUIT_STATUS_ACTIVE = "active"
 
 
 def load_commit_rates(path):
-    """Загрузить commit_rates.json. Возврат dict или (None, error)."""
+    """Load commit_rates.json. Return dict or (None, error)."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
-        return None, "файл не найден: {}".format(path)
+        return None, "file not found: {}".format(path)
     except json.JSONDecodeError as e:
-        return None, "ошибка JSON: {}".format(e)
+        return None, "JSON error: {}".format(e)
     return {k: v for k, v in data.items() if not k.startswith("_")}, None
 
 
 def load_dry_ssh(path):
-    """Загрузить dry-ssh.json для маппинга логический интерфейс -> физический. Возврат devices dict или None."""
+    """Load dry-ssh.json for mapping logical interface -> physical. Return devices dict or None."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -44,10 +44,8 @@ def load_dry_ssh(path):
 
 
 def _get_or_create_automation_tag(nb):
-    """
-    Найти или создать в NetBox тег с именем/slug AUTOMATION_TAG.
-    Возврат: объект тега (pynetbox Record) или None.
-    """
+    """Find or create a tag in NetBox named /slug AUTOMATION_TAG.
+    Return: tag object (pynetbox Record) or None."""
     if not AUTOMATION_TAG:
         return None
     try:
@@ -66,10 +64,8 @@ def _get_or_create_automation_tag(nb):
 
 
 def _ensure_record_tag(nb, record, tag_obj, endpoint):
-    """
-    Добавить тег tag_obj к объекту NetBox, если его ещё нет.
-    При PATCH NetBox ожидает список ID тегов. endpoint — например nb.circuits.providers.
-    """
+    """Add a tag_obj tag to the NetBox object if it doesn't already exist.
+    When PATCH NetBox expects a list of tag IDs. endpoint - for example nb.circuits.providers."""
     if not record or not tag_obj:
         return
     tag_id = getattr(tag_obj, "id", None)
@@ -79,7 +75,7 @@ def _ensure_record_tag(nb, record, tag_obj, endpoint):
     if not rid:
         return
     try:
-        # Перезагрузка по id, чтобы в ответе были теги (filter часто их не возвращает)
+        # Reload by id so that the response contains tags (filter often does not return them)
         full = endpoint.get(rid)
         current = getattr(full, "tags", []) or []
     except Exception:
@@ -94,10 +90,8 @@ def _ensure_record_tag(nb, record, tag_obj, endpoint):
 
 
 def resolve_physical_interface(dev_name, iface_name, dry_ssh_devices):
-    """
-    Для виртуального/логического интерфейса (ae5.0 и т.п.) вернуть физический из dry-ssh.
-    Иначе вернуть iface_name как есть.
-    """
+    """For a virtual/logical interface (ae5.0, etc.), return the physical one from dry-ssh.
+    Otherwise return iface_name as is."""
     if not dry_ssh_devices or dev_name not in dry_ssh_devices:
         return iface_name
     for entry in dry_ssh_devices[dev_name]:
@@ -115,13 +109,13 @@ def resolve_physical_interface(dev_name, iface_name, dry_ssh_devices):
 
 
 def location_from_hostname(hostname):
-    """Первый сегмент до дефиса."""
+    """The first segment before the hyphen."""
     parts = (hostname or "").split("-")
     return parts[0] if parts and parts[0] else ""
 
 
 def get_or_create_provider(nb, name):
-    """Вернуть провайдера по имени; при отсутствии создать."""
+    """Return provider by name; in the absence of create."""
     existing = list(nb.circuits.providers.filter(name=name))
     tag_obj = _get_or_create_automation_tag(nb)
     if existing:
@@ -134,13 +128,13 @@ def get_or_create_provider(nb, name):
         if tag_obj:
             kwargs["tags"] = [tag_obj.id]
         p = nb.circuits.providers.create(**kwargs)
-        return p, "создан"
+        return p, "created"
     except Exception as e:
         return None, str(e)
 
 
 def get_or_create_circuit_type(nb, name=CIRCUIT_TYPE_DEFAULT):
-    """Вернуть circuit type по имени; при отсутствии создать."""
+    """Return circuit type by name; in the absence of create."""
     existing = list(nb.circuits.circuit_types.filter(name=name))
     tag_obj = _get_or_create_automation_tag(nb)
     if existing:
@@ -153,7 +147,7 @@ def get_or_create_circuit_type(nb, name=CIRCUIT_TYPE_DEFAULT):
         if tag_obj:
             kwargs["tags"] = [tag_obj.id]
         ct = nb.circuits.circuit_types.create(**kwargs)
-        return ct, "создан"
+        return ct, "created"
     except Exception as e:
         return None, str(e)
 
@@ -161,15 +155,15 @@ def get_or_create_circuit_type(nb, name=CIRCUIT_TYPE_DEFAULT):
 def get_or_create_circuit(
     nb, cid, provider, circuit_type, commit_rate_kbps, status=CIRCUIT_STATUS_ACTIVE, clear_null_commit=False
 ):
-    """Вернуть circuit по cid и provider; при отсутствии создать; при наличии — обновить commit_rate по файлу."""
+    """Return circuit by cid and provider; in the absence of create; if available, update commit_rate for the file."""
     existing = list(nb.circuits.circuits.filter(cid=cid, provider_id=provider.id))
     tag_obj = _get_or_create_automation_tag(nb)
     if existing:
         c = existing[0]
         if tag_obj:
             _ensure_record_tag(nb, c, tag_obj, nb.circuits.circuits)
-        # Обновить commit_rate в NetBox по файлу, если отличается.
-        # При clear_null_commit и commit_rate_kbps=None очищаем commit_rate в NetBox.
+        # Update commit_rate in NetBox by file if different.
+        # With clear_null_commit and commit_rate_kbps=None, we clear commit_rate in NetBox.
         current = getattr(c, "commit_rate", None)
         if current is not None:
             try:
@@ -181,16 +175,16 @@ def get_or_create_circuit(
             if current != want:
                 try:
                     _patch_circuit_commit_rate(nb, c.id, want)
-                    return c, "commit_rate обновлён"
+                    return c, "commit_rate updated"
                 except Exception as e:
-                    print("Ошибка обновления commit_rate для {}: {}".format(cid, e), file=sys.stderr)
+                    print("Error updating commit_rate for {}: {}".format(cid, e), file=sys.stderr)
                     return c, None
         elif clear_null_commit and current is not None:
             try:
                 _patch_circuit_commit_rate(nb, c.id, None)
-                return c, "commit_rate очищен"
+                return c, "commit_rate cleared"
             except Exception as e:
-                print("Ошибка очистки commit_rate для {}: {}".format(cid, e), file=sys.stderr)
+                print("Error clearing commit_rate for {}: {}".format(cid, e), file=sys.stderr)
                 return c, None
         return c, None
     try:
@@ -200,23 +194,23 @@ def get_or_create_circuit(
         if tag_obj:
             kwargs["tags"] = [tag_obj.id]
         c = nb.circuits.circuits.create(**kwargs)
-        # После create явно выставить commit_rate через PATCH (pynetbox create иногда не передаёт)
+        # After create, explicitly set commit_rate via PATCH (pynetbox create sometimes does not transmit)
         if commit_rate_kbps is not None and c and getattr(c, "id", None):
             try:
                 _patch_circuit_commit_rate(nb, c.id, commit_rate_kbps)
             except Exception as e:
-                print("Предупреждение: commit_rate не установлен для {}: {}".format(cid, e), file=sys.stderr)
-        return c, "создан"
+                print("Warning: commit_rate not set for {}: {}".format(cid, e), file=sys.stderr)
+        return c, "created"
     except Exception as e:
         return None, str(e)
 
 
 def _patch_circuit_commit_rate(nb, circuit_id, commit_rate_kbps):
-    """Установить/очистить commit_rate у контура через REST PATCH."""
+    """Set/clear commit_rate for a circuit via REST PATCH."""
     base_url = (getattr(nb, "base_url", None) or getattr(nb, "url", None) or os.environ.get("NETBOX_URL", "")).rstrip("/")
     token = getattr(nb, "token", None) or os.environ.get("NETBOX_TOKEN")
     if not base_url or not token:
-        raise RuntimeError("нет base_url или token у pynetbox api")
+        raise RuntimeError("there is no base_url or token for pynetbox api")
     if base_url.endswith("/api"):
         url = "{}/circuits/circuits/{}/".format(base_url, circuit_id)
     else:
@@ -232,12 +226,12 @@ def _patch_circuit_commit_rate(nb, circuit_id, commit_rate_kbps):
 
 
 def _patch_interface_mark_connected(nb, interface_id, value):
-    """Сброс mark_connected у интерфейса через REST PATCH (pynetbox не всегда принимает этот аргумент)."""
+    """Resetting mark_connected on the interface via REST PATCH (pynetbox does not always accept this argument)."""
     base_url = (getattr(nb, "base_url", None) or getattr(nb, "url", None) or os.environ.get("NETBOX_URL", "")).rstrip("/")
     token = getattr(nb, "token", None) or os.environ.get("NETBOX_TOKEN")
     if not base_url or not token:
-        raise RuntimeError("нет base_url или token у pynetbox api")
-    # base_url уже может заканчиваться на /api — не дублировать
+        raise RuntimeError("there is no base_url or token for pynetbox api")
+    # base_url can already end in /api - do not duplicate
     if base_url.endswith("/api"):
         url = "{}/dcim/interfaces/{}/".format(base_url, interface_id)
     else:
@@ -252,19 +246,17 @@ def _patch_interface_mark_connected(nb, interface_id, value):
 
 
 def create_termination_and_cable(nb, circuit, device, nb_iface, term_side="A", report=None):
-    """
-    Создать circuit termination (site устройства) и кабель до интерфейса.
-    Если termination уже есть — не создаём повторно; кабель создаём при отсутствии.
-    report — опциональный dict для отчёта: deleted_cables, disabled_mark_connected, created_cables (списки кортежей (dev_name, iface_name, ...)).
-    """
+    """Create a circuit termination (site device) and a cable to the interface.
+    If termination already exists, we do not create it again; We create a cable if it is missing.
+    report - optional dict for the report: deleted_cables, disabled_mark_connected, created_cables (lists of tuples (dev_name, iface_name, ...))."""
     site = getattr(device, "site", None)
     if not site:
-        return None, "у устройства {} нет site".format(device.name)
+        return None, "device {} does not have a site".format(device.name)
     site_id = site if isinstance(site, int) else getattr(site, "id", None)
     if not site_id:
-        return None, "у устройства {} нет site".format(device.name)
+        return None, "device {} does not have a site".format(device.name)
 
-    # Есть ли уже termination у этого circuit (A или Z)
+    # Does this circuit already have a termination (A or Z)
     terminations = list(nb.circuits.circuit_terminations.filter(circuit_id=circuit.id))
     ct = None
     for t in terminations:
@@ -272,7 +264,7 @@ def create_termination_and_cable(nb, circuit, device, nb_iface, term_side="A", r
             ct = t
             break
     if not ct:
-        # NetBox 4.2+: termination привязывается через termination_type + termination_id (site, location и т.д.)
+        # NetBox 4.2+: termination is bound via termination_type + termination_id (site, location, etc.)
         try:
             ct = nb.circuits.circuit_terminations.create(
                 circuit=circuit.id,
@@ -281,7 +273,7 @@ def create_termination_and_cable(nb, circuit, device, nb_iface, term_side="A", r
                 termination_id=site_id,
             )
         except Exception as e1:
-            # NetBox 3.x: поле site=
+            # NetBox 3.x: site= field
             try:
                 ct = nb.circuits.circuit_terminations.create(
                     circuit=circuit.id,
@@ -294,7 +286,7 @@ def create_termination_and_cable(nb, circuit, device, nb_iface, term_side="A", r
     dev_name = getattr(device, "name", "")
     iface_name = getattr(nb_iface, "name", "")
 
-    # Кабель: circuit termination <-> interface. Сначала отключаем существующий кабель и mark_connected
+    # Cable: circuit termination <-> interface. First we disconnect the existing cable and mark_connected
     if getattr(ct, "cable", None) is not None:
         tag_obj = _get_or_create_automation_tag(nb)
         if tag_obj:
@@ -306,22 +298,22 @@ def create_termination_and_cable(nb, circuit, device, nb_iface, term_side="A", r
             except Exception:
                 pass
         return ct, None
-    # У интерфейса уже есть кабель или mark_connected — отключаем, чтобы подключить как в файле
+    # The interface already has a cable or mark_connected - disable it to connect as in the file
     try:
         existing_cable = getattr(nb_iface, "cable", None)
         if existing_cable is not None:
             cable_id = existing_cable.id if hasattr(existing_cable, "id") else existing_cable
-            # pynetbox delete() ожидает список id
+            # pynetbox delete() expects a list of ids
             nb.dcim.cables.delete([cable_id])
             if report is not None:
                 report["deleted_cables"].append((dev_name, iface_name, cable_id))
         if getattr(nb_iface, "mark_connected", False):
-            # pynetbox Record.update() не принимает mark_connected в части версий — сбрасываем через REST PATCH
+            # pynetbox Record.update() does not accept mark_connected regarding versions - reset via REST PATCH
             _patch_interface_mark_connected(nb, nb_iface.id, False)
             if report is not None:
                 report["disabled_mark_connected"].append((dev_name, iface_name))
     except Exception as e:
-        return ct, "отключение старого кабеля/mark_connected: {}".format(e)
+        return ct, "disconnecting the old cable/mark_connected: {}".format(e)
     try:
         tag_obj = _get_or_create_automation_tag(nb)
         cable_kwargs = {
@@ -343,15 +335,15 @@ def create_termination_and_cable(nb, circuit, device, nb_iface, term_side="A", r
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Создать circuits в NetBox по commit_rates.json (по умолчанию — все площадки).")
-    parser.add_argument("-f", "--commit-rates", default=DEFAULT_COMMIT_RATES, help="Путь к commit_rates.json")
-    parser.add_argument("-d", "--dry-ssh", default=None, metavar="FILE", help="dry-ssh.json для маппинга логический интерфейс -> физический (кабель к физическому)")
-    parser.add_argument("--location", default=None, metavar="LOC", help="Обработать только указанную локацию (первый сегмент hostname); по умолчанию — все")
-    parser.add_argument("--dry-run", action="store_true", help="Не вносить изменения в NetBox")
+    parser = argparse.ArgumentParser(description="Create circuits in NetBox using commit_rates.json (by default - all sites).")
+    parser.add_argument("-f", "--commit-rates", default=DEFAULT_COMMIT_RATES, help="Path to commit_rates.json")
+    parser.add_argument("-d", "--dry-ssh", default=None, metavar="FILE", help="dry-ssh.json for mapping logical interface -> physical (cable to physical)")
+    parser.add_argument("--location", default=None, metavar="LOC", help="Process only the specified location (the first hostname segment); default - all")
+    parser.add_argument("--dry-run", action="store_true", help="Do not make changes to NetBox")
     parser.add_argument(
         "--clear-null-commit",
         action="store_true",
-        help="Если commit_rate_gbps=null в файле, очистить commit_rate в NetBox для существующего circuit",
+        help="If commit_rate_gbps=null in file, clear commit_rate in NetBox for existing circuit",
     )
     args = parser.parse_args()
 
@@ -364,28 +356,28 @@ def main():
     token = os.environ.get("NETBOX_TOKEN")
     tag = os.environ.get("NETBOX_TAG", "border")
     if not url or not token:
-        print("Задайте NETBOX_URL и NETBOX_TOKEN", file=sys.stderr)
+        print("Set NETBOX_URL and NETBOX_TOKEN", file=sys.stderr)
         sys.exit(1)
 
     nb = pynetbox.api(url, token=token)
 
-    # Устройства NetBox по тегу
+    # NetBox devices by tag
     try:
         devices = list(nb.dcim.devices.filter(tag=tag))
     except Exception as e:
-        print("Ошибка NetBox: {}".format(e), file=sys.stderr)
+        print("NetBox Error: {}".format(e), file=sys.stderr)
         sys.exit(1)
     nb_devices_by_name = {d.name: d for d in devices}
 
     circuit_type_obj, ct_err = get_or_create_circuit_type(nb, CIRCUIT_TYPE_DEFAULT)
     if not circuit_type_obj:
-        print("Не удалось получить/создать circuit type: {}".format(ct_err or "?"), file=sys.stderr)
+        print("Failed to get/create circuit type: {}".format(ct_err or "?"), file=sys.stderr)
         sys.exit(1)
 
     dry_ssh_path = args.dry_ssh or (DEFAULT_DRY_SSH if os.path.isfile(DEFAULT_DRY_SSH) else None)
     dry_ssh_devices = load_dry_ssh(dry_ssh_path) if dry_ssh_path else None
     if dry_ssh_path and not dry_ssh_devices:
-        print("Внимание: dry-ssh не загружен (файл не найден или пустой), виртуальные интерфейсы не будут заменены на физические.", file=sys.stderr)
+        print("Attention: dry-ssh is not loaded (file not found or empty), virtual interfaces will not be replaced with physical ones.", file=sys.stderr)
 
     report = {
         "created_providers": [],
@@ -404,7 +396,7 @@ def main():
             continue
         device = nb_devices_by_name.get(dev_name)
         if not device:
-            errors.append("{}: устройство не найдено в NetBox (tag={})".format(dev_name, tag))
+            errors.append("{}: device not found in NetBox (tag={})".format(dev_name, tag))
             continue
         ifaces = list(nb.dcim.interfaces.filter(device_id=device.id))
         nb_by_iface = {i.name: i for i in ifaces}
@@ -414,18 +406,18 @@ def main():
             provider_name = (entry.get("provider") or "").strip() or "Uplink"
             circuit_id = (entry.get("circuit_id") or "").strip()
             if not circuit_id:
-                errors.append("{} {}: пустой circuit_id".format(dev_name, iface_name))
+                errors.append("{} {}: empty circuit_id".format(dev_name, iface_name))
                 continue
             rate_gbps = entry.get("commit_rate_gbps")
             commit_rate_kbps = int(rate_gbps * 1_000_000) if rate_gbps is not None else None
 
-            # Для виртуальных (ae5.0 и т.п.) берём физический интерфейс из dry-ssh для кабеля
+            # For virtual ones (ae5.0, etc.) we take the physical interface from dry-ssh for the cable
             cable_iface_name = resolve_physical_interface(dev_name, iface_name, dry_ssh_devices)
             if cable_iface_name != iface_name:
                 report["virtual_to_physical"].append((dev_name, iface_name, cable_iface_name))
             _, nb_iface = resolve_interface(cable_iface_name, nb_by_iface)
             if not nb_iface:
-                errors.append("{} {}: интерфейс не найден в NetBox (для кабеля: {})".format(
+                errors.append("{} {}: interface not found in NetBox (for cable: {})".format(
                     dev_name, iface_name, cable_iface_name if cable_iface_name != iface_name else iface_name))
                 continue
 
@@ -437,11 +429,11 @@ def main():
 
             provider_obj, prov_msg = get_or_create_provider(nb, provider_name)
             if not provider_obj:
-                errors.append("{} {}: провайдер {}: {}".format(dev_name, iface_name, provider_name, prov_msg))
+                errors.append("{} {}: provider {}: {}".format(dev_name, iface_name, provider_name, prov_msg))
                 continue
             if prov_msg:
                 report["created_providers"].append(provider_name)
-                print("Провайдер {}: {}".format(provider_name, prov_msg))
+                print("Provider {}: {}".format(provider_name, prov_msg))
 
             circuit_obj, circ_msg = get_or_create_circuit(
                 nb, circuit_id, provider_obj, circuit_type_obj, commit_rate_kbps, clear_null_commit=args.clear_null_commit
@@ -450,9 +442,9 @@ def main():
                 errors.append("{} {}: circuit {}: {}".format(dev_name, iface_name, circuit_id, circ_msg))
                 continue
             if circ_msg:
-                if circ_msg == "commit_rate обновлён":
+                if circ_msg == "commit_rate updated":
                     report["updated_commit_rate"].append(circuit_id)
-                elif circ_msg == "commit_rate очищен":
+                elif circ_msg == "commit_rate cleared":
                     report["cleared_commit_rate"].append(circuit_id)
                 else:
                     report["created_circuits"].append(circuit_id)
@@ -468,9 +460,9 @@ def main():
     if errors:
         for e in errors:
             print(e, file=sys.stderr)
-    print("Готово: {} успешно, {} ошибок.".format(ok, len(errors)))
+    print("Done: {} success, {} errors.".format(ok, len(errors)))
 
-    # Отчёт: что создано, удалено, отключено, где была не физика
+    # Report: what was created, deleted, disabled, where there was no physics
     def _report_section(title, items, fmt):
         if not items:
             return
@@ -478,14 +470,14 @@ def main():
         for x in items:
             print(fmt(x))
 
-    _report_section("Создано провайдеров", report["created_providers"], lambda x: "  {}".format(x))
-    _report_section("Создано контуров (circuits)", report["created_circuits"], lambda x: "  {}".format(x))
-    _report_section("Обновлён commit_rate в NetBox (по файлу)", report["updated_commit_rate"], lambda x: "  {}".format(x))
-    _report_section("Очищен commit_rate в NetBox (commit_rate_gbps=null)", report["cleared_commit_rate"], lambda x: "  {}".format(x))
-    _report_section("Создано кабелей", report["created_cables"], lambda x: "  {} {}".format(x[0], x[1]))
-    _report_section("Удалено кабелей", report["deleted_cables"], lambda x: "  {} {} (cable id {})".format(x[0], x[1], x[2]))
-    _report_section("Отключено mark_connected", report["disabled_mark_connected"], lambda x: "  {} {}".format(x[0], x[1]))
-    _report_section("Вместо виртуального использован физический интерфейс", report["virtual_to_physical"], lambda x: "  {} {} -> {}".format(x[0], x[1], x[2]))
+    _report_section("Providers created", report["created_providers"], lambda x: "  {}".format(x))
+    _report_section("Created circuits", report["created_circuits"], lambda x: "  {}".format(x))
+    _report_section("Updated commit_rate in NetBox (by file)", report["updated_commit_rate"], lambda x: "  {}".format(x))
+    _report_section("Cleared commit_rate in NetBox (commit_rate_gbps=null)", report["cleared_commit_rate"], lambda x: "  {}".format(x))
+    _report_section("Created cables", report["created_cables"], lambda x: "  {} {}".format(x[0], x[1]))
+    _report_section("Removed cables", report["deleted_cables"], lambda x: "  {} {} (cable id {})".format(x[0], x[1], x[2]))
+    _report_section("Disabled mark_connected", report["disabled_mark_connected"], lambda x: "  {} {}".format(x[0], x[1]))
+    _report_section("A physical interface is used instead of a virtual one", report["virtual_to_physical"], lambda x: "  {} {} -> {}".format(x[0], x[1], x[2]))
 
     sys.exit(1 if errors else 0)
 

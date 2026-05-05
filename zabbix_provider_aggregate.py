@@ -45,18 +45,18 @@ CALCULATED_ITEM_KEY_IN = "aggregate.bits.in[]"
 CALCULATED_ITEM_KEY_OUT = "aggregate.bits.out[]"
 CALCULATED_ITEM_TYPE = 15
 VALUE_TYPE_NUMERIC = 3  # unsigned
-# Единицы для агрегатных item'ов: биты в секунду (bps), чтобы ось графиков и пороги были в Gbps.
+# Units for aggregate items: bits per second (bps), so that the graph axis and thresholds are in Gbps.
 UNITS_BPS = "bps"
 
 
 def _get_providers_from_netbox(tag, debug=False):
-    """Провайдеры из NetBox с тегом automatization. Возврат списка имён или [] при ошибке/нет доступа."""
+    """Providers from NetBox with the automatization tag. Return a list of names or [] on error/no access."""
     url = os.environ.get("NETBOX_URL", "").strip()
     token = os.environ.get("NETBOX_TOKEN", "").strip()
     if not url or not token:
         if debug:
             print(
-                "NetBox: NETBOX_URL/NETBOX_TOKEN не заданы — агрегаты только по провайдерам из данных",
+                "NetBox: NETBOX_URL/NETBOX_TOKEN are not set - aggregates only by providers from the data",
                 file=sys.stderr,
             )
         return []
@@ -66,21 +66,21 @@ def _get_providers_from_netbox(tag, debug=False):
         names = [p.name for p in providers if getattr(p, "name", None)]
         if debug and names:
             print(
-                "NetBox: провайдеры с тегом {}: {}".format(tag, ", ".join(names)),
+                "NetBox: providers with tag {}: {}".format(tag, ", ".join(names)),
                 file=sys.stderr,
             )
         return names
     except Exception as e:
         if debug:
             print(
-                "NetBox: не удалось получить провайдеров ({}): {}".format(tag, e),
+                "NetBox: failed to get providers ({}): {}".format(tag, e),
                 file=sys.stderr,
             )
         return []
 
 
 def _build_edges_with_keys(devices, host_id_by_name, items_by_host_iface, desc_to_name):
-    """Одно ребро на (host, ISP), с key_in/key_out для формул. Возврат [(hostname, isp, key_in, key_out), ...]."""
+    """One edge per (host, ISP), with key_in/key_out for formulas. Return [(hostname, isp, key_in, key_out), ...]."""
     edges_raw = []
     for hostname in sorted(devices.keys()):
         if not host_id_by_name.get(hostname):
@@ -114,7 +114,7 @@ def _sanitize_provider_name(name):
     """Return safe technical host name for provider (Zabbix host field)."""
     if not name:
         return ""
-    # В Zabbix в host запрещены некоторые символы (например, слэш). Заменяем всё, кроме букв, цифр, ._- на пробел.
+    # In Zabbix, some characters (for example, slash) are prohibited in host. We replace everything except letters, numbers, ._- with a space.
     import re
 
     cleaned = re.sub(r'[^A-Za-z0-9._-]+', ' ', name)
@@ -129,7 +129,7 @@ def _get_or_create_host(url, token, host_name, group_name, debug=False):
         "filter": {"name": [group_name]},
     }, debug=debug)
     if err or not grp:
-        return None, "группа не найдена: {}".format(group_name)
+        return None, "group not found: {}".format(group_name)
     groupid = grp[0]["groupid"]
 
     technical_host = _sanitize_provider_name(host_name)
@@ -143,7 +143,7 @@ def _get_or_create_host(url, token, host_name, group_name, debug=False):
     if res:
         return res[0]["hostid"], None
 
-    # Создать хост (interfaces обязательны — создаём dummy agent на 127.0.0.1)
+    # Create a host (interfaces are required - create a dummy agent on 127.0.0.1)
     result, err = zabbix_request(url, token, "host.create", {
         "host": technical_host,
         "name": host_name,
@@ -181,7 +181,7 @@ def _create_or_update_calculated_item(url, token, hostid, key, name, formula, de
             "params": formula,
             "name": name,
             "units": UNITS_BPS,
-            "preprocessing": [],  # без preprocessing (формула уже в bps)
+            "preprocessing": [], # without preprocessing (formula is already in bps)
         }, debug=debug)
         return itemid, err
     result, err = zabbix_request(url, token, "item.create", params, debug=debug)
@@ -192,8 +192,8 @@ def _create_or_update_calculated_item(url, token, hostid, key, name, formula, de
 
 def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, limit_bps, debug=False):
     """Create or update 90%/100% provider aggregate triggers for a host.
-    Если лимит в _provider_limits изменился (например 20G -> 10G), старые триггеры с другим лимитом
-    удаляются, чтобы не дублировать 90%/100% по разным порогам.
+    If the limit in _provider_limits has changed (for example 20G -> 10G), old triggers with a different limit
+    are removed so as not to duplicate 90%/100% across different thresholds.
     """
     warn_bps = int(limit_bps * THRESHOLD_PERCENT_WARN / 100)
     desc_warn = "Provider aggregate traffic >= {}% of limit ({} Gbps)".format(THRESHOLD_PERCENT_WARN, limit_bps / 1e9)
@@ -224,7 +224,7 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
     if err:
         return err
     all_triggers = res or []
-    # Разделяем по типу, чтобы корректно обновлять старые объекты при смене лимита/периода.
+    # We divide by type in order to correctly update old objects when the limit/period changes.
     warn_triggers = [
         t for t in all_triggers
         if t["description"].startswith("Provider aggregate traffic >=") and "90%" in t["description"]
@@ -239,8 +239,8 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
     ]
 
     def _update_or_create_and_cleanup(desc, expr, severity, same_type_list, trigger_tags):
-        """Обновить один триггер по точному описанию или создать; удалить остальные того же типа.
-        Возврат: (kept_triggerid, error_or_none)
+        """Update one trigger with the exact description or create; delete others of the same type.
+        Return: (kept_triggerid, error_or_none)
         """
         same_type_ids = [t["triggerid"] for t in same_type_list]
         by_desc = {t["description"]: t["triggerid"] for t in same_type_list}
@@ -265,7 +265,7 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
             if err:
                 return None, err
             kept_id = result["triggerids"][0]
-        # Удалить лишние триггеры того же типа (старый лимит)
+        # Remove unnecessary triggers of the same type (old limit)
         for tid in same_type_ids:
             if tid != kept_id:
                 _, err = zabbix_request(url, token, "trigger.delete", [tid], debug=debug)
@@ -283,18 +283,18 @@ def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, li
         }, debug=debug)
         return err
 
-    # Уровни важности: 90% — Information, 100% — Warning
+    # Severity levels: 90% - Information, 100% - Warning
     warn_id, err = _update_or_create_and_cleanup(desc_warn, expr_warn, 1, warn_triggers, tags)
     if err:
         return err
     high_id, err = _update_or_create_and_cleanup(desc_high, expr_high, 2, high_triggers, tags)
     if err:
         return err
-    # SLA учитываем только при устойчивом превышении 100% в течение SLA_TRIGGER_FUNCTION_PERIOD.
+    # SLA is taken into account only if it is consistently exceeded 100% during the SLA_TRIGGER_FUNCTION_PERIOD.
     _, err = _update_or_create_and_cleanup(desc_sla, expr_sla, 2, sla_triggers, tags_sla)
     if err:
         return err
-    # Чтобы не дублировать шум, 90% делаем зависимым от 100%.
+    # To avoid duplicating noise, we make 90% dependent on 100%.
     err = _set_dependency(warn_id, high_id)
     if err:
         return err
@@ -321,7 +321,7 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
     """Create/update provider aggregate hosts with calculated items and limit triggers."""
     ok, err = validate_zabbix_token(url, token, debug=debug)
     if not ok:
-        return None, "Ошибка авторизации в Zabbix (token): {}".format(err)
+        return None, "Authorization error in Zabbix (token): {}".format(err)
     with open(commit_rates_path, "r", encoding="utf-8") as f:
         cr = json.load(f)
     provider_limits = cr.get("_provider_limits") or {}
@@ -340,14 +340,14 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
     if cache_path and os.path.isfile(cache_path):
         cached_h, cached_i = load_zabbix_cache(cache_path)
         if cached_h and cached_i:
-            # Берём всё, что уже есть в кэше, даже если в Zabbix появился/исчез хост.
+            # We take everything that is already in the cache, even if a host appears/disappears in Zabbix.
             host_id_by_name = {k: cached_h[k] for k in hostnames if k in cached_h}
             items_by_host_iface = {(h, i): rec for (h, i), rec in cached_i.items() if h in host_id_by_name}
 
     missing_in_cache = sorted(hostnames - set(host_id_by_name.keys()))
     if missing_in_cache:
-        # Критично: если часть хостов не создана в Zabbix, не падаем целиком —
-        # считаем агрегаты по тем, что есть.
+        # Critical: if some of the hosts are not created in Zabbix, we don’t crash entirely -
+        # We count the aggregates based on what we have.
         res, host_err = zabbix_request(
             url,
             token,
@@ -370,15 +370,15 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
         still_missing = sorted(set(missing_in_cache) - found)
         if still_missing:
             print(
-                "Предупреждение: хосты не найдены в Zabbix, пропускаю: {}".format(", ".join(still_missing)),
+                "Warning: hosts not found in Zabbix, missing: {}".format(", ".join(still_missing)),
                 file=sys.stderr,
             )
 
     if not host_id_by_name:
-        return None, "Нет ни одного хоста из dry-ssh.json в Zabbix"
+        return None, "There are no hosts from dry-ssh.json in Zabbix"
 
-    # Догружаем items только для хостов, которые реально существуют в Zabbix.
-    # fetch_zabbix_hosts_and_items требует, чтобы все hostnames были найдены.
+    # We load items only for hosts that actually exist in Zabbix.
+    # fetch_zabbix_hosts_and_items requires that all hostnames be found.
     missing_items_hosts = set(host_id_by_name.keys()) - {h for (h, _iface) in items_by_host_iface.keys()}
     if missing_items_hosts:
         fetched_h, fetched_items, err = fetch_zabbix_hosts_and_items(
@@ -399,8 +399,8 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
             continue
         by_provider.setdefault(isp, []).append((hostname, key_in, key_out))
 
-    # Кандидаты провайдеров для агрегатов: в первую очередь из NetBox по тегу automatization,
-    # иначе — из данных по линкам (by_provider).
+    # Provider candidates for aggregates: primarily from NetBox under the automatization tag,
+    # otherwise - from data on links (by_provider).
     providers_from_nb = set(_get_providers_from_netbox(NETBOX_AUTOMATION_TAG, debug=debug))
 
     done = []
@@ -408,7 +408,7 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
     for provider in providers_iter:
         if not provider:
             continue
-        # Лимит для триггеров — только если задан в _provider_limits; иначе создаём только host+items.
+        # Limit for triggers - only if set in _provider_limits; otherwise we create only host+items.
         limit_entry = provider_limits.get(provider)
         limit_bps = None
         if limit_entry is not None:
@@ -419,7 +419,7 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
         links = by_provider.get(provider)
         if not links:
             if debug:
-                print("Провайдер {} в _provider_limits, но линков в данных нет — пропуск.".format(provider), file=sys.stderr)
+                print("Provider {} in _provider_limits, but there are no links in the data - skip.".format(provider), file=sys.stderr)
             continue
         refs_in = [(h, ki) for h, ki, ko in links if ki]
         refs_out = [(h, ko) for h, ki, ko in links if ko]
@@ -463,23 +463,23 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Создать хосты Uplinks {Provider} с суммарным трафиком и триггерами по _provider_limits.",
+        description="Create Uplinks {Provider} hosts with total traffic and triggers by _provider_limits.",
     )
-    parser.add_argument("-f", "--commit-rates", default=DEFAULT_COMMIT_RATES, help="Путь к commit_rates.json")
-    parser.add_argument("-d", "--dry-ssh", default=DEFAULT_INPUT, help="Путь к dry-ssh.json")
-    parser.add_argument("-m", "--description-map", default=DESCRIPTION_MAP_FILE, help="Файл description_to_name.json")
-    parser.add_argument("--no-cache", action="store_true", help="Не использовать кэш Zabbix")
+    parser.add_argument("-f", "--commit-rates", default=DEFAULT_COMMIT_RATES, help="Path to commit_rates.json")
+    parser.add_argument("-d", "--dry-ssh", default=DEFAULT_INPUT, help="Path to dry-ssh.json")
+    parser.add_argument("-m", "--description-map", default=DESCRIPTION_MAP_FILE, help="File description_to_name.json")
+    parser.add_argument("--no-cache", action="store_true", help="Do not use Zabbix cache")
     parser.add_argument(
         "--keep-triggers-without-limits",
         action="store_true",
-        help="Не удалять существующие aggregate-триггеры у провайдеров, которых нет в _provider_limits",
+        help="Do not delete existing aggregate triggers for providers that are not in _provider_limits",
     )
-    parser.add_argument("--debug", action="store_true", help="Отладочный вывод")
+    parser.add_argument("--debug", action="store_true", help="Debug output")
     args = parser.parse_args()
 
     url, token = _get_zabbix_url_token()
     if not url or not token:
-        print("Задайте ZABBIX_URL и ZABBIX_TOKEN", file=sys.stderr)
+        print("Set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
         sys.exit(1)
     cache_path = None if args.no_cache else os.path.join(
         os.path.dirname(os.path.abspath(args.dry_ssh)) if args.dry_ssh else ".",
@@ -493,13 +493,13 @@ def main():
         print(err, file=sys.stderr)
         sys.exit(1)
     if not done:
-        print("Нет провайдеров с линками — ничего не создано.")
+        print("No providers with links - nothing created.")
         sys.exit(0)
     for provider, host_name, has_triggers in done:
         if has_triggers:
-            print("OK: {} — хост «{}», calculated items и триггеры 90%/100%".format(provider, host_name))
+            print('OK: {} - host "{}", calculated items and triggers 90%/100%'.format(provider, host_name))
         else:
-            print("OK: {} — хост «{}», только calculated items (без триггеров: нет _provider_limits)".format(provider, host_name))
+            print('OK: {} - host "{}", calculated items only (no triggers: no _provider_limits)'.format(provider, host_name))
 
 
 if __name__ == "__main__":
