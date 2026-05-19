@@ -9,6 +9,8 @@ description_to_name.json
 commit_rates.json
 *-export.json
 *.log
+.coverage
+htmlcov/
 .env
 .env.*
 urls.env
