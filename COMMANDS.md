@@ -18,13 +18,29 @@ python run_uplinks_full.py --refresh
 python run_uplinks_full.py --no-fetch
 python run_uplinks_full.py --from-file
 
-python run_uplinks_full.py --grafana
-
 python run_uplinks_full.py --report uplinks_run_report.txt --no-stop-on-error
 
 python run_uplinks_full.py --no-fetch --location ALA
+
+# без Burst per-link триггеров (только макросы + util + агрегаты провайдера)
+python run_uplinks_full.py --no-burst-triggers
 ```
 
+**Шаги `run_uplinks_full.py` (по порядку):**
+
+1. `uplinks_stats.py --fetch --json` → `dry-ssh.json` (кэш 24 ч; `--refresh` / `--no-fetch`)
+2. `netbox_checks.py` — сверка и `--apply` в NetBox
+3. `generate_commit_rates.py` → `commit_rates.json`
+4. `netbox_create_circuits.py` — контуры и кабели в NetBox
+5. `zabbix_sync_commit_rate.py -d dry-ssh.json -f commit_rates.json --create-link-triggers` — макросы, util, Burst 90%/100%/SLA на линках
+6. `zabbix_provider_aggregate.py` — хосты `Uplinks {Provider}`, агрегатные триггеры
+7. `zabbix_map.py --zabbix --update-map` — карта с окраской линков (после aggregate)
+8. `zabbix_uplinks_dashboard.py` — дашборды
+9. `zabbix_provider_services.py` — сервисы и SLA в Zabbix
+
+**Не входит в full run** (отдельные команды ниже): `grafana_uplinks_graph.py`, `zabbix_provider_sla.py`, `netbox_interface_types.py`, cleanup-скрипты.
+
+Логи: `run_logs/YYYY-MM-DD_HH-MM-SS_run.log` и `*_debug.log`.
 
 |----------|----------|
 

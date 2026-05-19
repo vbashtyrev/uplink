@@ -1,0 +1,17 @@
+{
+  "chassis-inventory": {
+    "chassis": [{
+      "name": [{"data": "Chassis"}],
+      "chassis-module": [{
+        "name": [{"data": "FPC 0"}],
+        "pic": [{
+          "name": [{"data": "PIC 0"}],
+          "port": [{
+            "name": [{"data": "Port 1"}],
+            "sfp-type": [{"data": "10G-SR"}]
+          }]
+        }]
+      }]
+    }]
+  }
+}

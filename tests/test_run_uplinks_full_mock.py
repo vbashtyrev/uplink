@@ -75,7 +75,7 @@ def test_run_no_fetch_executes_steps(monkeypatch, tmp_path, minimal_dry_ssh, min
             dry_ssh="dry-ssh.json",
             commit_rates="commit_rates.json",
             no_netbox_apply=False,
-            grafana=False,
+            no_burst_triggers=False,
             location=None,
             stop_on_error=True,
             report=None,

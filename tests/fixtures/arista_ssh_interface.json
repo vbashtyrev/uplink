@@ -1,0 +1,23 @@
+{
+  "interfaces": {
+    "Ethernet51/1": {
+      "name": "Ethernet51/1",
+      "lineProtocolStatus": "up",
+      "interfaceStatus": "connected",
+      "bandwidth": 10000000000,
+      "duplex": "duplexFull",
+      "description": "Uplink: Cogent 10G",
+      "physicalAddress": "44:4c:a8:bf:2e:91",
+      "mtu": 9214,
+      "forwardingModel": "routed",
+      "interfaceAddress": [
+        {
+          "primaryIp": {
+            "address": "203.0.113.10",
+            "maskLen": 24
+          }
+        }
+      ]
+    }
+  }
+}

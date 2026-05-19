@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Run the full uplinks pipeline: devices → NetBox → Zabbix (and optional Grafana) with reporting."""
+"""Run the full uplinks pipeline: devices → NetBox → Zabbix with reporting."""
 
 import argparse
 import os
@@ -133,8 +133,8 @@ def _write_run_report(report_lines, run_log_path, report_file, log_func=None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Full uplinks chain: collection → commit_rates → NetBox → Zabbix (sync, map, dashboards) → optionally Grafana."
-        "Report on work and errors. Update only from corrected dry-ssh.json: --from-file (or --no-fetch).",
+        description="Full uplinks chain: collection → commit_rates → NetBox → Zabbix (sync, map, dashboards, services)."
+        " Report on work and errors. Update only from corrected dry-ssh.json: --from-file (or --no-fetch).",
     )
     parser.add_argument(
         "--no-fetch",
@@ -169,9 +169,9 @@ def main():
         help="Skip step 2 (netbox_checks --apply). Step is executed by default.",
     )
     parser.add_argument(
-        "--grafana",
+        "--no-burst-triggers",
         action="store_true",
-        help="At the end, create/update a dashboard in Grafana (grafana_uplinks_graph.py --grafana-api)",
+        help="Do not pass --create-link-triggers to zabbix_sync_commit_rate.py (Burst per-link 90%%/100%%/SLA)",
     )
     parser.add_argument(
         "--location",
@@ -369,13 +369,20 @@ def main():
         sys.exit(1)
     log("")
 
-    # 5. Zabbix sync commit rate
-    log("Step 5: Zabbix - macros and triggers (zabbix_sync_commit_rate.py -d {}) ...".format(dry_ssh_path))
-    ok, out, err = run_cmd(
-        [python, "zabbix_sync_commit_rate.py", "-d", dry_ssh_path],
-        cwd=SCRIPT_DIR,
-        timeout=timeout,
-    )
+    # 5. Zabbix sync: macros from NetBox, util triggers from dry-ssh, Burst link triggers from commit_rates
+    sync_argv = [
+        python,
+        "zabbix_sync_commit_rate.py",
+        "-d",
+        dry_ssh_path,
+        "-f",
+        commit_rates_path,
+    ]
+    if not args.no_burst_triggers:
+        sync_argv.append("--create-link-triggers")
+    sync_detail = " ".join(sync_argv[1:])
+    log("Step 5: Zabbix - macros and triggers ({}) ...".format(sync_detail))
+    ok, out, err = run_cmd(sync_argv, cwd=SCRIPT_DIR, timeout=timeout)
     _append_debug(debug_log_path, "Step 5: Zabbix sync commit rate", stdout=out or "", stderr=err or "", ok=ok)
     step("Step 5: Zabbix sync commit rate", ok, err or ("code != 0" if not ok else ""))
     if not ok and args.stop_on_error:
@@ -386,32 +393,19 @@ def main():
             log("  {}".format(line))
     log("")
 
-    # 6. Zabbix map
-    log("Step 6: Zabbix - map (zabbix_map.py -f {} --zabbix --update-map) ...".format(dry_ssh_path))
-    ok, out, err = run_cmd(
-        [python, "zabbix_map.py", "-f", dry_ssh_path, "--zabbix", "--update-map"],
-        cwd=SCRIPT_DIR,
-        timeout=timeout,
+    # 6. Zabbix - aggregate hosts Uplinks {Provider} (calculated items + 90%/100%/SLA triggers)
+    log(
+        "Step 6: Zabbix - aggregate by provider (zabbix_provider_aggregate.py -f {} -d {}) ...".format(
+            commit_rates_path, dry_ssh_path
+        )
     )
-    _append_debug(debug_log_path, "Step 6: Zabbix map", stdout=out or "", stderr=err or "", ok=ok)
-    step("Step 6: Zabbix map", ok, err or ("code != 0" if not ok else ""))
-    if not ok and args.stop_on_error:
-        _finish(report_lines, errors, args.report, run_log_path)
-        sys.exit(1)
-    if out:
-        for line in out.splitlines():
-            log("  {}".format(line))
-    log("")
-
-    # 7. Zabbix - aggregate by provider (hosts Uplinks {Provider}, calculated items, triggers by _provider_limits)
-    log("Step 7: Zabbix - aggregate by provider (zabbix_provider_aggregate.py -f {} -d {}) ...".format(commit_rates_path, dry_ssh_path))
     ok, out, err = run_cmd(
         [python, "zabbix_provider_aggregate.py", "-f", commit_rates_path, "-d", dry_ssh_path],
         cwd=SCRIPT_DIR,
         timeout=timeout,
     )
-    _append_debug(debug_log_path, "Step 7: Zabbix provider aggregate", stdout=out or "", stderr=err or "", ok=ok)
-    step("Step 7: Zabbix provider aggregate", ok, err or ("code != 0" if not ok else ""))
+    _append_debug(debug_log_path, "Step 6: Zabbix provider aggregate", stdout=out or "", stderr=err or "", ok=ok)
+    step("Step 6: Zabbix provider aggregate", ok, err or ("code != 0" if not ok else ""))
     if not ok and args.stop_on_error:
         _finish(report_lines, errors, args.report, run_log_path)
         sys.exit(1)
@@ -420,7 +414,24 @@ def main():
             log("  {}".format(line))
     log("")
 
-    # 8. Zabbix - dashboards (updated after the aggregate so that the provider dashboard has total traffic widgets)
+    # 7. Zabbix map (after aggregate: link colors use per-link and provider aggregate triggers)
+    log("Step 7: Zabbix - map (zabbix_map.py -f {} --zabbix --update-map) ...".format(dry_ssh_path))
+    ok, out, err = run_cmd(
+        [python, "zabbix_map.py", "-f", dry_ssh_path, "--zabbix", "--update-map"],
+        cwd=SCRIPT_DIR,
+        timeout=timeout,
+    )
+    _append_debug(debug_log_path, "Step 7: Zabbix map", stdout=out or "", stderr=err or "", ok=ok)
+    step("Step 7: Zabbix map", ok, err or ("code != 0" if not ok else ""))
+    if not ok and args.stop_on_error:
+        _finish(report_lines, errors, args.report, run_log_path)
+        sys.exit(1)
+    if out:
+        for line in out.splitlines():
+            log("  {}".format(line))
+    log("")
+
+    # 8. Zabbix dashboards (after aggregate: provider tabs can use aggregate calculated items)
     log("Step 8: Zabbix - dashboards (zabbix_uplinks_dashboard.py -f {}) ...".format(dry_ssh_path))
     ok, out, err = run_cmd(
         [python, "zabbix_uplinks_dashboard.py", "-f", dry_ssh_path],
@@ -450,25 +461,6 @@ def main():
         for line in out.splitlines():
             log("  {}".format(line))
     log("")
-
-    #10. Grafana (optional)
-    if args.grafana:
-        log("Step 10: Grafana - Node graph (grafana_uplinks_graph.py -f {} --grafana-api) ...".format(dry_ssh_path))
-        ok, out, err = run_cmd(
-            [python, "grafana_uplinks_graph.py", "-f", dry_ssh_path, "--grafana-api"],
-            cwd=SCRIPT_DIR,
-            timeout=timeout,
-        )
-        _append_debug(debug_log_path, "Step 10: Grafana", stdout=out or "", stderr=err or "", ok=ok)
-        step("Step 10: Grafana", ok, err or ("code != 0" if not ok else ""))
-        if not ok and args.stop_on_error:
-            _finish(report_lines, errors, args.report, run_log_path)
-            sys.exit(1)
-        log("")
-    else:
-        _append_debug(debug_log_path, "Step 10: Grafana", skip_reason="not specified --grafana")
-        log("[SKIP] Step 10: Grafana (run with --grafana if necessary)")
-        report_lines.append("")
 
     # Bottom line
     log("--- Total ---")

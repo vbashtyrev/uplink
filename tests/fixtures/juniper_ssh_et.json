@@ -1,0 +1,12 @@
+{
+  "interface-information": [{
+    "physical-interface": [{
+      "name": [{"data": "et-0/0/1"}],
+      "description": [{"data": "Uplink: Hurricane member"}],
+      "oper-status": [{"data": "up"}],
+      "admin-status": [{"data": "up"}],
+      "speed": [{"data": "10Gbps"}],
+      "current-physical-address": [{"data": "00:11:22:33:44:55"}]
+    }]
+  }]
+}

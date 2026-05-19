@@ -1,0 +1,7 @@
+{
+  "lacp-interface-information-list": [{
+    "lacp-interface-information": [{
+      "lag-lacp-state": [{"name": [{"data": "et-0/0/1"}]}]
+    }]
+  }]
+}

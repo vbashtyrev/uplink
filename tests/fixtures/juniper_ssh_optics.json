@@ -1,0 +1,11 @@
+{
+  "interface-information": [{
+    "physical-interface": [{
+      "optics-diagnostics": [{
+        "optics-diagnostics-lane-values": [{
+          "laser-output-power-dbm": [{"data": "-2.1"}]
+        }]
+      }]
+    }]
+  }]
+}

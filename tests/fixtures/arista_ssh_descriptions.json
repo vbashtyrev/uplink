@@ -1,0 +1,9 @@
+{
+  "interfaceDescriptions": {
+    "Ethernet51/1": {
+      "description": "Uplink: Cogent 10G",
+      "lineProtocolStatus": "up",
+      "interfaceStatus": "connected"
+    }
+  }
+}

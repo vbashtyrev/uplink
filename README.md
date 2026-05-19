@@ -40,11 +40,11 @@
 
    При необходимости: **`netbox_interface_types.py`** → `netbox_interface_types.json` для приведения типов (`--mt-ref`).
 
-3. **Визуализация (Zabbix / Grafana)**  
+3. **Визуализация (Zabbix)**  
    По **`dry-ssh.json`** + Zabbix API:  
-   - **`zabbix_map.py`** — карта uplinks (хосты, провайдеры, линки); после шагов 4–5 повторно **`--update-map`**, чтобы привязать агрегатные триггеры провайдеров к линкам;  
-   - **`zabbix_uplinks_dashboard.py`** — дашборд с графиками по uplink;  
-   - **`grafana_uplinks_graph.py`** — Node graph в Grafana (узлы и рёбра по тем же данным).
+   - **`zabbix_map.py`** — карта uplinks (хосты, провайдеры, линки);  
+   - **`zabbix_uplinks_dashboard.py`** — дашборды с графиками по uplink.  
+   Grafana (**`grafana_uplinks_graph.py`**) — отдельно, не входит в **`run_uplinks_full.py`**.
 
 4. **Commit rates и circuits в NetBox (обязательно до Zabbix)**  
    **`generate_commit_rates.py -f dry-ssh.json`** → **`commit_rates.json`** (провайдер, circuit_id, commit_rate_gbps по устройству/интерфейсу).
@@ -62,7 +62,7 @@
    **`zabbix_provider_services.py -f commit_rates.json`** — сервисы и SLA в UI Zabbix (провайдеры + Burst-контуры), цель — **`_provider_sla`**.  
    **`zabbix_map.py --update-map`** — привязка триггеров к линкам (per-link и агрегат) с приоритетом цвета, описанным в таблице скриптов.
 
-**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы; опционально Burst-link триггеры) → **zabbix_provider_aggregate.py** → **zabbix_provider_services.py** (опционально) → **zabbix_map.py --update-map**, дашборды. Offline‑отчёт SLA: **zabbix_provider_sla.py -f commit_rates.json**.
+**Итого:** SSH/устройства → `dry-ssh.json` → NetBox (интерфейсы; commit_rates → circuits) → **zabbix_sync_commit_rate.py** (макросы + util; Burst-link триггеры с `--create-link-triggers`) → **zabbix_provider_aggregate.py** → **zabbix_map.py --update-map** → дашборды → **zabbix_provider_services.py**. Всё это делает **`run_uplinks_full.py`** одной командой (см. COMMANDS.md). Offline‑отчёт SLA: **zabbix_provider_sla.py -f commit_rates.json**.
 
 **Откат в Zabbix:** **zabbix_uplinks_cleanup.py** — удаляет триггеры, карту uplinks и дашборды (по именам). Макросы не трогает. Перед удалением: `--dry-run`.
 

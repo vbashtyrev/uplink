@@ -1,0 +1,21 @@
+{
+  "interface-information": [{
+    "physical-interface": [{
+      "name": [{"data": "ae5"}],
+      "description": [{"data": "Uplink: Hurricane LAG"}],
+      "oper-status": [{"data": "up"}],
+      "admin-status": [{"data": "up"}],
+      "speed": [{"data": "10Gbps"}],
+      "logical-interface": [{
+        "name": [{"data": "ae5.0"}],
+        "description": [{"data": "Uplink: Hurricane"}],
+        "oper-status": [{"data": "up"}],
+        "address-family": [{
+          "address-family-name": [{"data": "inet"}],
+          "mtu": [{"data": "9192"}],
+          "interface-address": [{"ifa-local": [{"data": "203.0.113.5/24"}]}]
+        }]
+      }]
+    }]
+  }]
+}

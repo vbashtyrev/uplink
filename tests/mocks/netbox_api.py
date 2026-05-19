@@ -6,6 +6,10 @@ class _Record:
         for key, val in fields.items():
             setattr(self, key, val)
 
+    def update(self, data):
+        for key, val in (data or {}).items():
+            setattr(self, key, val)
+
 
 class _Filterable:
     def __init__(self, items):

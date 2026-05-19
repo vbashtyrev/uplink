@@ -1,0 +1,7 @@
+{
+  "vrfs": {
+    "internet": {
+      "interfaces": ["Ethernet51/1"]
+    }
+  }
+}

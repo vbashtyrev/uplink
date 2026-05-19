@@ -3,6 +3,20 @@
 from tests.mocks.netbox_api import _Record
 
 
+def _record_has_tag(rec, tag_slug):
+    tags = getattr(rec, "tags", None)
+    if tags:
+        for t in tags:
+            slug = getattr(t, "slug", None) or (t if isinstance(t, str) else None)
+            if slug == tag_slug:
+                return True
+    if getattr(rec, "tag", None) == tag_slug:
+        return True
+    if getattr(rec, "tag_slug", None) == tag_slug:
+        return True
+    return False
+
+
 class _MutableEndpoint:
     def __init__(self, items=None):
         self._items = list(items or [])
@@ -12,7 +26,9 @@ class _MutableEndpoint:
         for key, val in kwargs.items():
             if val is None:
                 continue
-            if key.endswith("_id"):
+            if key == "tag":
+                out = [x for x in out if _record_has_tag(x, val)]
+            elif key.endswith("_id"):
                 base = key[:-3]
                 out = [
                     x for x in out
@@ -23,6 +39,10 @@ class _MutableEndpoint:
             else:
                 out = [x for x in out if getattr(x, key, None) == val]
         return out
+
+    def delete(self, ids):
+        id_set = {int(i) for i in (ids if isinstance(ids, (list, tuple)) else [ids])}
+        self._items = [x for x in self._items if getattr(x, "id", None) not in id_set]
 
     def get(self, pk):
         for item in self._items:
