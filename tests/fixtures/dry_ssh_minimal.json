@@ -1,0 +1,35 @@
+{
+  "devices": {
+    "ALA-KZT-7280TR-1": [
+      {
+        "name": "Ethernet51/1",
+        "description": "Uplink: Cogent 10G",
+        "bandwidth": 10000000000
+      },
+      {
+        "name": "Ethernet52/1",
+        "description": "Management link",
+        "bandwidth": 1000000000
+      }
+    ],
+    "FRN-MX-1": [
+      {
+        "name": "ae5.0",
+        "description": "Uplink: Hurricane",
+        "isLogical": true,
+        "bandwidth": 10000000000
+      },
+      {
+        "name": "et-0/0/1",
+        "description": "Uplink: Hurricane member",
+        "bandwidth": 10000000000
+      },
+      {
+        "name": "ae5",
+        "description": "Uplink: Hurricane LAG",
+        "isLag": true,
+        "bandwidth": 10000000000
+      }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "interfaceDescriptions": {
+    "Ethernet51/1": {
+      "description": "Uplink: Cogent"
+    },
+    "Ethernet52/1": {
+      "description": "server port"
+    }
+  }
+}

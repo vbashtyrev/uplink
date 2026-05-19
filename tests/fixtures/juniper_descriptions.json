@@ -1,0 +1,30 @@
+{
+  "interface-information": [
+    {
+      "physical-interface": [
+        {
+          "name": [{"data": "et-0/0/1"}],
+          "description": [{"data": "Uplink: ProviderA"}],
+          "oper-status": [{"data": "up"}]
+        },
+        {
+          "name": [{"data": "et-0/0/2"}],
+          "description": [{"data": "downlink"}],
+          "oper-status": [{"data": "up"}]
+        }
+      ],
+      "logical-interface": [
+        {
+          "name": [{"data": "ae5.0"}],
+          "description": [{"data": "Uplink: ProviderB"}],
+          "oper-status": [{"data": "up"}]
+        },
+        {
+          "name": [{"data": "ae5.100"}],
+          "description": [{"data": "Uplink: VLAN should skip"}],
+          "oper-status": [{"data": "up"}]
+        }
+      ]
+    }
+  ]
+}

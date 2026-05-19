@@ -123,9 +123,9 @@ def _grafana_push_dashboard(grafana_url, api_key, graph, dashboard_uid, dashboar
     try:
         import requests
     except ImportError:
-        return "message"
+        return "requests module required for --grafana-api (pip install requests)"
     if not grafana_url or not api_key:
-        return "message"
+        return "Set GRAFANA_URL and GRAFANA_API_KEY (or GRAFANA_TOKEN)"
     headers = {
         "Content-Type": "application/json",
         "Authorization": "Bearer {}".format(api_key),
@@ -144,7 +144,7 @@ def _grafana_push_dashboard(grafana_url, api_key, graph, dashboard_uid, dashboar
             dash_id = dash.get("id")
             version = (dash.get("version") or 0) + 1
             if debug:
-                print("message".format(dash_id, version), file=sys.stderr)
+                print("Grafana: found dashboard id={} version->{}".format(dash_id, version), file=sys.stderr)
     except requests.RequestException:
         pass
 
@@ -256,7 +256,7 @@ def main():
         help="Infinity datasource UID (default: GRAFANA_INFINITY_UID or 'infinity')",
     )
     parser.add_argument("--no-cache", action="store_true", help="Do not use local Zabbix cache file")
-    parser.add_argument("--debug", action="store_true", help="message")
+    parser.add_argument("--debug", action="store_true", help="Debug output")
     args = parser.parse_args()
 
     data, err = load_devices_json(args.file)
@@ -273,7 +273,7 @@ def main():
     if args.zabbix:
         url, token = _get_zabbix_url_token()
         if not url:
-            print("message", file=sys.stderr)
+            print("Set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
             sys.exit(1)
         hostnames = set(devices.keys())
         cache_path = os.path.join(
@@ -297,10 +297,9 @@ def main():
 
     edges = build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name)
     if not edges:
-        print("message", file=sys.stderr)
+        print("No graph edges (empty devices or no Zabbix hosts/items)", file=sys.stderr)
         sys.exit(1)
 
-    #
     node_ids = set()
     nodes = []
     for hostname, hostid, _if, isp, _in, _out, _ki, _ko, _desc in edges:
@@ -336,7 +335,7 @@ def main():
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(json_str)
         if args.debug:
-            print("message".format(args.output, len(nodes), len(edges_out)), file=sys.stderr)
+            print("Wrote {} (nodes: {}, edges: {})".format(args.output, len(nodes), len(edges_out)), file=sys.stderr)
     else:
         print(json_str)
 
@@ -356,7 +355,7 @@ def main():
             print(err, file=sys.stderr)
             sys.exit(1)
         if not args.output:
-            print("message".format(args.dashboard_title, args.dashboard_uid), file=sys.stderr)
+            print("Dashboard created/updated: {} (uid={})".format(args.dashboard_title, args.dashboard_uid), file=sys.stderr)
 
 
 if __name__ == "__main__":

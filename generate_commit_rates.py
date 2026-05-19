@@ -12,7 +12,7 @@ DEFAULT_OUTPUT = "commit_rates.json"
 
 
 def load_json(path, default=None):
-    """Documentation."""
+    """Load JSON file or return default / (None, error) on decode failure."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -23,19 +23,19 @@ def load_json(path, default=None):
 
 
 def is_uplink(iface):
-    """Documentation."""
+    """True if interface description contains 'Uplink:'."""
     desc = (iface.get("description") or "").strip()
     return "Uplink:" in desc
 
 
 def location_from_hostname(hostname):
-    """Documentation."""
+    """First hostname segment before '-' (site/location code)."""
     parts = (hostname or "").split("-")
     return parts[0] if parts and parts[0] else (hostname or "other")
 
 
 def build_circuit_id_map(data, desc_to_provider, existing):
-    """Documentation."""
+    """Assign circuit_id per (device, interface); preserve existing ids when set."""
     rows = []
     for dev_name in sorted(data["devices"].keys()):
         ifaces = data["devices"].get(dev_name)
@@ -70,28 +70,28 @@ def build_circuit_id_map(data, desc_to_provider, existing):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="message",
+        description="Generate or merge commit_rates.json from dry-ssh.json and description_to_name mapping.",
     )
-    parser.add_argument("-f", "--file", default=DEFAULT_DRY_SSH, help="message")
-    parser.add_argument("-m", "--description-map", default=DEFAULT_DESC_MAP, help="message")
-    parser.add_argument("-o", "--output", default=DEFAULT_OUTPUT, help="message")
-    parser.add_argument("--no-merge", action="store_true", help="message")
+    parser.add_argument("-f", "--file", default=DEFAULT_DRY_SSH, help="Path to dry-ssh.json")
+    parser.add_argument("-m", "--description-map", default=DEFAULT_DESC_MAP, help="Description to provider name map (JSON)")
+    parser.add_argument("-o", "--output", default=DEFAULT_OUTPUT, help="Output commit_rates.json path")
+    parser.add_argument("--no-merge", action="store_true", help="Do not merge existing commit_rates.json (overwrite)")
     args = parser.parse_args()
 
     data = load_json(args.file)
     if isinstance(data, tuple):
-        print("message".format(args.file, data[1]), file=sys.stderr)
+        print("JSON error in {}: {}".format(args.file, data[1]), file=sys.stderr)
         sys.exit(1)
     if data is None:
-        print("message".format(args.file), file=sys.stderr)
+        print("File not found: {}".format(args.file), file=sys.stderr)
         sys.exit(1)
     if "devices" not in data:
-        print("message", file=sys.stderr)
+        print("Missing 'devices' key in {}".format(args.file), file=sys.stderr)
         sys.exit(1)
 
     desc_to_provider = load_json(args.description_map) if os.path.isfile(args.description_map) else {}
     if isinstance(desc_to_provider, tuple):
-        print("message".format(args.description_map, desc_to_provider[1]), file=sys.stderr)
+        print("JSON error in {}: {}".format(args.description_map, desc_to_provider[1]), file=sys.stderr)
         sys.exit(1)
 
     existing = {}
@@ -101,7 +101,7 @@ def main():
     if not args.no_merge and os.path.isfile(args.output):
         existing_raw = load_json(args.output)
         if isinstance(existing_raw, tuple):
-            print("message".format(args.output, existing_raw[1]), file=sys.stderr)
+            print("JSON error in {}: {}".format(args.output, existing_raw[1]), file=sys.stderr)
             sys.exit(1)
         if isinstance(existing_raw, dict):
             provider_limits = existing_raw.get("_provider_limits")
@@ -118,7 +118,12 @@ def main():
         existing = {k: v for k, v in (existing_raw or {}).items() if not k.startswith("_")}
 
     cid_map = build_circuit_id_map(data, desc_to_provider, existing)
-    out = {"_comment": "message"}
+    out = {
+        "_comment": (
+            "Paid commit rate (commit_rate_gbps, Gbit/s), provider and circuit_id. "
+            "NetBox circuit commit rate is stored in Kbps (multiply Gbit/s by 1_000_000)."
+        ),
+    }
 
     for dev_name in sorted(data["devices"].keys()):
         ifaces = data["devices"][dev_name]
@@ -173,7 +178,7 @@ def main():
 
     n_dev = sum(1 for k in out if not k.startswith("_"))
     n_links = sum(len(v) for k, v in out.items() if not k.startswith("_") and isinstance(v, dict))
-    print("message".format(args.output, n_dev, n_links))
+    print("Written {}: {} devices, {} links.".format(args.output, n_dev, n_links))
 
 
 if __name__ == "__main__":
