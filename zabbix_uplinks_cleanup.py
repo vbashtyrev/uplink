@@ -30,6 +30,8 @@ from uplinks_config import (
     TRIGGER_DESC_90_SUFFIX,
     TRIGGER_DESC_100_SUFFIX,
     TRIGGER_DESC_SLA_BREACH_SUFFIX,
+    TRIGGER_DESC_UTIL_CRIT_SUFFIX,
+    TRIGGER_DESC_UTIL_WARN_SUFFIX,
     TRIGGER_TAG_NAME,
     TRIGGER_TAG_VALUE,
 )
@@ -111,6 +113,8 @@ def cleanup_triggers(url, token, dry_run=False, debug=False):
             desc.endswith(TRIGGER_DESC_90_SUFFIX)
             or desc.endswith(TRIGGER_DESC_100_SUFFIX)
             or desc.endswith(TRIGGER_DESC_SLA_BREACH_SUFFIX)
+            or desc.endswith(TRIGGER_DESC_UTIL_WARN_SUFFIX)
+            or desc.endswith(TRIGGER_DESC_UTIL_CRIT_SUFFIX)
             or desc.endswith(LEGACY_TRIGGER_DESC_90_SUFFIX)
             or desc.endswith(LEGACY_TRIGGER_DESC_100_SUFFIX)
         ):

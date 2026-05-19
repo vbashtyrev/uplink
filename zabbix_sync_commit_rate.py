@@ -24,6 +24,8 @@ from uplinks_config import (
     TRIGGER_DESC_90_SUFFIX,
     TRIGGER_DESC_100_SUFFIX,
     TRIGGER_DESC_SLA_BREACH_SUFFIX,
+    TRIGGER_DESC_UTIL_CRIT_SUFFIX,
+    TRIGGER_DESC_UTIL_WARN_SUFFIX,
     TRIGGER_FUNCTION_PERIOD,
     TRIGGER_TAG_NAME,
     TRIGGER_TAG_VALUE,
@@ -31,6 +33,10 @@ from uplinks_config import (
     SLA_TRIGGER_FUNCTION_PERIOD,
     SLA_TRIGGER_TAG_NAME,
     SLA_TRIGGER_TAG_VALUE,
+    UPLINK_UTIL_CRIT_PERCENT,
+    UPLINK_UTIL_CRIT_PERIOD,
+    UPLINK_UTIL_WARN_PERCENT,
+    UPLINK_UTIL_WARN_PERIOD,
 )
 
 load_env_file_if_present()
@@ -39,6 +45,8 @@ load_env_file_if_present()
 # (they expect interest). These macros store the absolute bps threshold for our simple triggers.
 UPLINK_MACRO_PREFIX_MAX = "{$UPLINK.BPS.MAX"
 UPLINK_MACRO_PREFIX_WARN = "{$UPLINK.BPS.WARN"
+UPLINK_UTIL_MACRO_PREFIX_WARN = "{$UPLINK.UTIL.WARN"
+UPLINK_UTIL_MACRO_PREFIX_CRIT = "{$UPLINK.UTIL.CRIT"
 # NetBox commit_rate in Kbps → in bps for Zabbix
 KBPS_TO_BPS = 1000
 DEFAULT_DRY_SSH = "dry-ssh.json"
@@ -59,6 +67,18 @@ def _macro_name_warn_for_interface(iface_name):
     return UPLINK_MACRO_PREFIX_WARN + ':"' + iface_name.strip() + '"}'
 
 
+def _macro_name_util_warn_for_interface(iface_name):
+    if not iface_name:
+        iface_name = ""
+    return UPLINK_UTIL_MACRO_PREFIX_WARN + ':"' + iface_name.strip() + '"}'
+
+
+def _macro_name_util_crit_for_interface(iface_name):
+    if not iface_name:
+        iface_name = ""
+    return UPLINK_UTIL_MACRO_PREFIX_CRIT + ':"' + iface_name.strip() + '"}'
+
+
 def load_dry_ssh(path):
     """Load dry-ssh.json. Return devices dict or None."""
     if not path or not os.path.isfile(path):
@@ -69,6 +89,32 @@ def load_dry_ssh(path):
     except (OSError, json.JSONDecodeError):
         return None
     return data.get("devices") or None
+
+
+def interfaces_by_host_from_dry_ssh(dry_ssh_devices):
+    """
+    All interface names per device from dry-ssh.json (uplink list from SSH collection).
+    Return: dict device_name -> [iface_name, ...] (unique, stable order).
+    """
+    result = {}
+    if not dry_ssh_devices:
+        return result
+    for dev_name, ifaces in dry_ssh_devices.items():
+        if not isinstance(ifaces, list):
+            continue
+        seen = set()
+        names = []
+        for entry in ifaces:
+            if not isinstance(entry, dict):
+                continue
+            name = (entry.get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+        if names:
+            result[dev_name] = names
+    return result
 
 
 def load_burst_pairs(path):
@@ -387,15 +433,14 @@ def get_zabbix_host_macros(url, token, hostids, debug=False):
     return out
 
 
-def set_zabbix_host_if_util_macros(url, token, hostid, new_if_util_list, debug=False):
+def set_zabbix_host_macros_for_prefixes(url, token, hostid, new_macro_list, macro_prefixes, debug=False):
     """
-    Set commit rate macros for interfaces. Macro names with context:
-    {$UPLINK.BPS.MAX:"Ethernet51/1"} and {$UPLINK.BPS.WARN:"Ethernet51/1"}.
-    new_if_util_list: list {"macro", "value", "type"}.
+    Replace host macros whose names start with any of macro_prefixes, then create new_macro_list.
+    new_macro_list: list {"macro", "value", "type"}.
     Return (True, None) or (False, error_message).
     """
     to_delete = []
-    for prefix in (UPLINK_MACRO_PREFIX_MAX, UPLINK_MACRO_PREFIX_WARN):
+    for prefix in macro_prefixes:
         result, err = zabbix_request(
             url, token, "usermacro.get",
             {"hostids": [hostid], "output": ["hostmacroid", "macro"], "search": {"macro": prefix}},
@@ -408,11 +453,11 @@ def set_zabbix_host_if_util_macros(url, token, hostid, new_if_util_list, debug=F
         result_del, err_del = zabbix_request(url, token, "usermacro.delete", to_delete, debug=debug)
         if err_del:
             return False, err_del
-    if not new_if_util_list:
+    if not new_macro_list:
         return True, None
     create_list = [
         {"hostid": str(hostid), "macro": entry["macro"], "value": entry["value"], "type": int(entry.get("type") or 0)}
-        for entry in new_if_util_list
+        for entry in new_macro_list
     ]
     result_c, err_c = zabbix_request(url, token, "usermacro.create", create_list, debug=debug)
     if err_c:
@@ -420,9 +465,79 @@ def set_zabbix_host_if_util_macros(url, token, hostid, new_if_util_list, debug=F
     return True, None
 
 
+def set_zabbix_host_if_util_macros(url, token, hostid, new_if_util_list, debug=False):
+    """
+    Set commit rate macros for interfaces. Macro names with context:
+    {$UPLINK.BPS.MAX:"Ethernet51/1"} and {$UPLINK.BPS.WARN:"Ethernet51/1"}.
+    """
+    return set_zabbix_host_macros_for_prefixes(
+        url,
+        token,
+        hostid,
+        new_if_util_list,
+        (UPLINK_MACRO_PREFIX_MAX, UPLINK_MACRO_PREFIX_WARN),
+        debug=debug,
+    )
+
+
+def set_zabbix_host_uplink_util_macros(url, token, hostid, new_util_macro_list, debug=False):
+    """Set {$UPLINK.UTIL.WARN} and {$UPLINK.UTIL.CRIT} per interface (percent values)."""
+    return set_zabbix_host_macros_for_prefixes(
+        url,
+        token,
+        hostid,
+        new_util_macro_list,
+        (UPLINK_UTIL_MACRO_PREFIX_WARN, UPLINK_UTIL_MACRO_PREFIX_CRIT),
+        debug=debug,
+    )
+
+
 TRIGGER_TAG_SCRIPTS = {"tag": TRIGGER_TAG_NAME, "value": TRIGGER_TAG_VALUE}
 LEGACY_TRIGGER_DESC_90_SUFFIX = "High bandwidth ({}%)".format(THRESHOLD_PERCENT_WARN)
 LEGACY_TRIGGER_DESC_100_SUFFIX = "High bandwidth (threshold line)"
+
+
+def delete_util_triggers(url, token, debug=False):
+    """Remove uplink utilization warn/crit triggers (scripts:automatization)."""
+    res, err = zabbix_request(
+        url,
+        token,
+        "trigger.get",
+        {
+            "output": ["triggerid", "description"],
+            "search": {"description": "Interface "},
+            "selectTags": "extend",
+        },
+        debug=debug,
+    )
+    if err or not res:
+        return 0
+    to_delete = []
+    for t in res:
+        desc = (t.get("description") or "").strip()
+        if not (
+            desc.endswith(TRIGGER_DESC_UTIL_WARN_SUFFIX)
+            or desc.endswith(TRIGGER_DESC_UTIL_CRIT_SUFFIX)
+        ):
+            continue
+        tags = t.get("tags") or []
+        if tags:
+            has_tag = any(
+                tg.get("tag") == TRIGGER_TAG_NAME and tg.get("value") == TRIGGER_TAG_VALUE
+                for tg in tags
+            )
+            if not has_tag:
+                continue
+        tid = t.get("triggerid")
+        if tid:
+            to_delete.append(str(tid))
+    if not to_delete:
+        return 0
+    _, del_err = zabbix_request(url, token, "trigger.delete", to_delete, debug=debug)
+    if del_err:
+        print("trigger.delete error: {}".format(del_err), file=sys.stderr)
+        return 0
+    return len(to_delete)
 
 
 def delete_link_triggers(url, token, debug=False):
@@ -506,10 +621,225 @@ def get_bits_received_item_key(url, token, hostid, iface_name, debug=False):
     return None
 
 
+def get_net_if_bandwidth_item_keys(url, token, hostid, iface_name, debug=False):
+    """
+    Find net.if.in, net.if.out and net.if.speed item keys for an interface (SNMP index in key).
+    Match by item name prefix 'Interface {iface_name}(...'.
+    Return {"in": key, "out": key, "speed": key} or None if any key is missing.
+    """
+    search_name = "Interface {}".format((iface_name or "").strip())
+    res, err = zabbix_request(
+        url,
+        token,
+        "item.get",
+        {
+            "hostids": [hostid],
+            "output": ["key_", "name"],
+            "search": {"name": search_name},
+            "searchByAny": True,
+        },
+        debug=debug,
+    )
+    if err or not res:
+        return None
+    iface_norm = _normalize_interface_name((iface_name or "").strip())
+    keys = {}
+    for it in res:
+        key_str = it.get("key_") or ""
+        name_str = it.get("name") or ""
+        if _normalize_interface_name(_interface_from_item_name(name_str)) != iface_norm:
+            continue
+        if key_str.startswith("net.if.in[") and "discards" not in key_str and "errors" not in key_str:
+            keys["in"] = key_str
+        elif key_str.startswith("net.if.out[") and "discards" not in key_str and "errors" not in key_str:
+            keys["out"] = key_str
+        elif key_str.startswith("net.if.speed["):
+            keys["speed"] = key_str
+    if keys.get("in") and keys.get("out") and keys.get("speed"):
+        return keys
+    return None
+
+
+def build_bandwidth_util_expression(host_technical, item_keys, macro_ref, period):
+    """
+    Template-style utilization: avg(in) or avg(out) vs (macro%/100)*speed, speed must be > 0.
+    item_keys: dict from get_net_if_bandwidth_item_keys.
+    """
+    in_k = item_keys["in"]
+    out_k = item_keys["out"]
+    speed_k = item_keys["speed"]
+    threshold = "({}/100)*last(/{}/{})".format(macro_ref, host_technical, speed_k)
+    return (
+        "(avg(/{}/{},{})>{} "
+        "or avg(/{}/{},{})>{}) "
+        "and last(/{}/{})>0"
+    ).format(
+        host_technical,
+        in_k,
+        period,
+        threshold,
+        host_technical,
+        out_k,
+        period,
+        threshold,
+        host_technical,
+        speed_k,
+    )
+
+
 # Priorities for display on the map: 2 = Warning (yellow), 4 = High (red)
 TRIGGER_PRIORITY_WARN = 2 # 90% - yellow link
 TRIGGER_PRIORITY_HIGH = 4 # 100% - red link
 TRIGGER_PRIORITY_SLA_BREACH = 2 # as an aggregate SLA breach (not a red card - 100% gives it)
+
+
+def _get_trigger_id_for_description_suffix(url, token, hostid, iface_name, suffix, debug=False):
+    """Find triggerid on host for Interface {iface}: *suffix*."""
+    prefix = "Interface {}:".format((iface_name or "").strip())
+    existing, err = zabbix_request(
+        url,
+        token,
+        "trigger.get",
+        {
+            "hostids": [hostid],
+            "output": ["triggerid", "description"],
+            "search": {"description": prefix},
+        },
+        debug=debug,
+    )
+    if err or not existing:
+        return None
+    for t in existing:
+        desc = t.get("description") or ""
+        if desc == prefix + " " + suffix or desc.endswith(suffix):
+            return t.get("triggerid")
+    return None
+
+
+def ensure_util_crit_trigger(url, token, host_technical, hostid, iface_name, debug=False):
+    """Critical uplink utilization (avg over UPLINK_UTIL_CRIT_PERIOD > {$UPLINK.UTIL.CRIT})."""
+    item_keys = get_net_if_bandwidth_item_keys(url, token, hostid, iface_name, debug=debug)
+    if not item_keys:
+        return False, "net.if.in/out/speed not found for interface {}".format(iface_name)
+    macro_ref = _macro_name_util_crit_for_interface(iface_name)
+    expression = build_bandwidth_util_expression(
+        host_technical, item_keys, macro_ref, UPLINK_UTIL_CRIT_PERIOD
+    )
+    description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_UTIL_CRIT_SUFFIX)
+    existing_id = _get_trigger_id_for_description_suffix(
+        url, token, hostid, iface_name, TRIGGER_DESC_UTIL_CRIT_SUFFIX, debug=debug
+    )
+    if existing_id:
+        zabbix_request(
+            url,
+            token,
+            "trigger.update",
+            {
+                "triggerid": existing_id,
+                "description": description,
+                "expression": expression,
+                "priority": TRIGGER_PRIORITY_HIGH,
+                "status": 0,
+                "tags": [TRIGGER_TAG_SCRIPTS],
+            },
+            debug=debug,
+        )
+        return True, None
+    create_res, create_err = zabbix_request(
+        url,
+        token,
+        "trigger.create",
+        {
+            "description": description,
+            "expression": expression,
+            "priority": TRIGGER_PRIORITY_HIGH,
+            "tags": [TRIGGER_TAG_SCRIPTS],
+        },
+        debug=debug,
+    )
+    if create_err or not create_res or not create_res.get("triggerids"):
+        return False, create_err or "trigger.create did not return triggerid"
+    return True, None
+
+
+def ensure_util_warn_trigger(url, token, host_technical, hostid, iface_name, debug=False):
+    """Warning uplink utilization; depends on critical trigger (no duplicate PROBLEM)."""
+    item_keys = get_net_if_bandwidth_item_keys(url, token, hostid, iface_name, debug=debug)
+    if not item_keys:
+        return False, "net.if.in/out/speed not found for interface {}".format(iface_name)
+    macro_ref = _macro_name_util_warn_for_interface(iface_name)
+    expression = build_bandwidth_util_expression(
+        host_technical, item_keys, macro_ref, UPLINK_UTIL_WARN_PERIOD
+    )
+    description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_UTIL_WARN_SUFFIX)
+    crit_id = _get_trigger_id_for_description_suffix(
+        url, token, hostid, iface_name, TRIGGER_DESC_UTIL_CRIT_SUFFIX, debug=debug
+    )
+    existing_id = _get_trigger_id_for_description_suffix(
+        url, token, hostid, iface_name, TRIGGER_DESC_UTIL_WARN_SUFFIX, debug=debug
+    )
+    payload = {
+        "description": description,
+        "expression": expression,
+        "priority": TRIGGER_PRIORITY_WARN,
+        "status": 0,
+        "tags": [TRIGGER_TAG_SCRIPTS],
+    }
+    if crit_id:
+        payload["dependencies"] = [{"triggerid": str(crit_id)}]
+    if existing_id:
+        payload["triggerid"] = existing_id
+        zabbix_request(url, token, "trigger.update", payload, debug=debug)
+        return True, None
+    create_res, create_err = zabbix_request(
+        url, token, "trigger.create", payload, debug=debug
+    )
+    if create_err or not create_res or not create_res.get("triggerids"):
+        return False, create_err or "trigger.create did not return triggerid"
+    return True, None
+
+
+def sync_uplink_utilization_for_host(
+    url, token, host_technical, hostid, iface_names, dry_run=False, debug=False
+):
+    """
+    Set {$UPLINK.UTIL.*} macros and warn/crit triggers for all iface_names on one host.
+    Return (macros_count, triggers_ok_count, errors_list).
+    """
+    util_macros = []
+    for iface_name in iface_names:
+        util_macros.append({
+            "macro": _macro_name_util_warn_for_interface(iface_name),
+            "value": str(UPLINK_UTIL_WARN_PERCENT),
+            "type": "0",
+        })
+        util_macros.append({
+            "macro": _macro_name_util_crit_for_interface(iface_name),
+            "value": str(UPLINK_UTIL_CRIT_PERCENT),
+            "type": "0",
+        })
+    if dry_run:
+        return len(util_macros), len(iface_names), []
+    ok, err = set_zabbix_host_uplink_util_macros(url, token, hostid, util_macros, debug=debug)
+    if not ok:
+        return 0, 0, [err or "usermacro"]
+    triggers_ok = 0
+    errors = []
+    for iface_name in iface_names:
+        ok_c, err_c = ensure_util_crit_trigger(
+            url, token, host_technical, hostid, iface_name, debug=debug
+        )
+        if not ok_c:
+            errors.append("{} crit: {}".format(iface_name, err_c))
+            continue
+        ok_w, err_w = ensure_util_warn_trigger(
+            url, token, host_technical, hostid, iface_name, debug=debug
+        )
+        if not ok_w:
+            errors.append("{} warn: {}".format(iface_name, err_w))
+            continue
+        triggers_ok += 1
+    return len(util_macros), triggers_ok, errors
 
 
 def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_name, debug=False, link_tags=None):
@@ -780,7 +1110,10 @@ def remove_threshold_items(url, token, hostid, debug=False):
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Synchronize {$UPLINK.BPS.MAX}/{$UPLINK.BPS.WARN} to Zabbix from NetBox (commit rate via cable to interface).",
+        description=(
+            "Sync Zabbix: {$UPLINK.BPS.*} from NetBox; {$UPLINK.UTIL.*} + utilization triggers "
+            "from dry-ssh.json (all uplinks in file)."
+        ),
     )
     parser.add_argument("-d", "--dry-ssh", default=None, metavar="FILE", help="dry-ssh.json: for a physics cable (e.g. et-0/0/3) set the macro context by logical name (ae5.0) for Zabbix")
     parser.add_argument("--dry-run", action="store_true", help="Do not change macros in Zabbix, just display what would have been installed")
@@ -794,6 +1127,11 @@ def main():
         ),
     )
     parser.add_argument(
+        "--no-util-triggers",
+        action="store_true",
+        help="Do not create {$UPLINK.UTIL.*} macros or utilization triggers (default: enabled when dry-ssh is loaded)",
+    )
+    parser.add_argument(
         "-f", "--commit-rates", default=DEFAULT_COMMIT_RATES,
         help="Path to commit_rates.json (for trigger filter by billing_model=Burst)",
     )
@@ -801,6 +1139,11 @@ def main():
         "--delete-link-triggers",
         action="store_true",
         help="Remove simple triggers 90%%/100%%/SLA breach (scripts:automatization) for uplink interfaces and exit",
+    )
+    parser.add_argument(
+        "--delete-util-triggers",
+        action="store_true",
+        help="Remove uplink utilization warn/crit triggers (scripts:automatization) and exit",
     )
     args = parser.parse_args()
 
@@ -823,35 +1166,47 @@ def main():
     if args.delete_link_triggers:
         deleted = delete_link_triggers(zabbix_url, zabbix_token, debug=args.debug)
         print("Deleted triggers uplinks 90%/100%/SLA breach: {}".format(deleted))
-        if not args.create_link_triggers and not args.dry_run:
-            # Delete-only mode: exit without touching NetBox/macros.
+        if not args.create_link_triggers and not args.dry_run and not args.delete_util_triggers:
             return
+
+    if args.delete_util_triggers:
+        deleted_util = delete_util_triggers(zabbix_url, zabbix_token, debug=args.debug)
+        print("Deleted uplink utilization triggers: {}".format(deleted_util))
+        if not args.create_link_triggers and not args.dry_run and not args.delete_link_triggers:
+            return
+
+    dry_ssh_path = getattr(args, "dry_ssh", None) or (DEFAULT_DRY_SSH if os.path.isfile(DEFAULT_DRY_SSH) else None)
+    dry_ssh_devices = load_dry_ssh(dry_ssh_path) if dry_ssh_path else None
+    host_to_util_ifaces = interfaces_by_host_from_dry_ssh(dry_ssh_devices)
+    sync_util = bool(host_to_util_ifaces) and not args.no_util_triggers
+    if dry_ssh_path and not dry_ssh_devices and not args.no_util_triggers:
+        print(
+            "dry-ssh not loaded (file empty or missing); utilization triggers skipped.",
+            file=sys.stderr,
+        )
 
     nb = pynetbox.api(nb_url, token=nb_token)
     commit_rates = get_commit_rates_from_netbox(nb, tag, debug=args.debug)
-    if not commit_rates:
+    if dry_ssh_devices and commit_rates:
+        commit_rates = apply_logical_context(commit_rates, dry_ssh_devices, debug=args.debug)
+    elif dry_ssh_path and dry_ssh_devices and args.debug:
+        print("dry-ssh loaded; NetBox commit_rates empty", file=sys.stderr)
+
+    if not commit_rates and not sync_util:
         print(
-            "No interfaces with circuit (termination A + cable to dcim.interface) were found in NetBox."
-            "Check NETBOX_TAG and run with --debug.",
+            "Nothing to sync: no NetBox circuits with cable and no uplinks in dry-ssh "
+            "(or use --no-util-triggers). Check NETBOX_TAG / dry-ssh.json.",
             file=sys.stderr,
         )
         sys.exit(0)
 
-    dry_ssh_path = getattr(args, "dry_ssh", None) or (DEFAULT_DRY_SSH if os.path.isfile(DEFAULT_DRY_SSH) else None)
-    dry_ssh_devices = load_dry_ssh(dry_ssh_path) if dry_ssh_path else None
-    if dry_ssh_path and dry_ssh_devices:
-        commit_rates = apply_logical_context(commit_rates, dry_ssh_devices, debug=args.debug)
-    elif dry_ssh_path and not dry_ssh_devices:
-        if args.debug:
-            print("dry-ssh not loaded (file empty or inaccessible), context by name from NetBox", file=sys.stderr)
-
-    # Group by host for Zabbix
+    # Group by host for Zabbix (commit macros)
     host_to_iface_bps = {}
     for (dev_name, iface_name), bps in commit_rates.items():
         host_to_iface_bps.setdefault(dev_name, []).append((iface_name, bps))
 
-    # Hosts in Zabbix by name (host or name); technical hostname for history.push
-    hostnames = list(host_to_iface_bps.keys())
+    # Hosts in Zabbix by name (host or name); technical hostname for triggers
+    hostnames = sorted(set(host_to_iface_bps.keys()) | set(host_to_util_ifaces.keys()))
     result, err = zabbix_request(
         zabbix_url, zabbix_token, "host.get",
         {"output": ["hostid", "host", "name"], "filter": {"host": hostnames}},
@@ -886,40 +1241,66 @@ def main():
         if dev_name not in hostid_by_host:
             continue
         hostid = hostid_by_host[dev_name]
-        iface_bps_list = host_to_iface_bps[dev_name]
-        new_if_util = []
-        for iface_name, bps in iface_bps_list:
-            # MAX - HIGH threshold (default 100% of commit rate)
-            new_if_util.append({
-                "macro": _macro_name_for_interface(iface_name),
-                "value": str(int(bps * THRESHOLD_PERCENT_HIGH / 100)),
-                "type": "0",
-            })
-            # WARN threshold (default 90%) - for the “yellow link” trigger on the map
-            new_if_util.append({
-                "macro": _macro_name_warn_for_interface(iface_name),
-                "value": str(int(bps * THRESHOLD_PERCENT_WARN / 100)),
-                "type": "0",
-            })
+        zabbix_host = host_technical_by_hostid.get(hostid) or dev_name
+        iface_bps_list = host_to_iface_bps.get(dev_name, [])
+        util_ifaces = host_to_util_ifaces.get(dev_name, [])
 
         if args.dry_run:
-            print(
-                "[dry-run] {} (hostid {}): macros {} bps".format(
-                    dev_name, hostid,
-                    ", ".join("{}={}".format(c["macro"], c["value"]) for c in new_if_util),
-                ),
-                file=sys.stderr,
-            )
+            parts = []
+            if iface_bps_list:
+                bps_macros = []
+                for iface_name, bps in iface_bps_list:
+                    bps_macros.append("{}={}".format(_macro_name_for_interface(iface_name), int(bps * THRESHOLD_PERCENT_HIGH / 100)))
+                parts.append("BPS: " + ", ".join(bps_macros))
+            if sync_util and util_ifaces:
+                parts.append(
+                    "UTIL: {} ifaces ({}%/{}%)".format(
+                        len(util_ifaces), UPLINK_UTIL_WARN_PERCENT, UPLINK_UTIL_CRIT_PERCENT
+                    )
+                )
+            print("[dry-run] {} (hostid {}): {}".format(dev_name, hostid, "; ".join(parts)), file=sys.stderr)
             updated += 1
             continue
-        ok, err = set_zabbix_host_if_util_macros(zabbix_url, zabbix_token, hostid, new_if_util, debug=args.debug)
-        if not ok:
-            print("Error updating macros for {}: {}".format(dev_name, err or "usermacro"), file=sys.stderr)
-            continue
-        # Triggers 90%/100% for the card - using a separate key, not created by default
+
+        if iface_bps_list:
+            new_bps_macros = []
+            for iface_name, bps in iface_bps_list:
+                new_bps_macros.append({
+                    "macro": _macro_name_for_interface(iface_name),
+                    "value": str(int(bps * THRESHOLD_PERCENT_HIGH / 100)),
+                    "type": "0",
+                })
+                new_bps_macros.append({
+                    "macro": _macro_name_warn_for_interface(iface_name),
+                    "value": str(int(bps * THRESHOLD_PERCENT_WARN / 100)),
+                    "type": "0",
+                })
+            ok, err = set_zabbix_host_if_util_macros(
+                zabbix_url, zabbix_token, hostid, new_bps_macros, debug=args.debug
+            )
+            if not ok:
+                print(
+                    "Error updating BPS macros for {}: {}".format(dev_name, err or "usermacro"),
+                    file=sys.stderr,
+                )
+
+        util_macros_n = 0
+        util_triggers_n = 0
+        if sync_util and util_ifaces:
+            util_macros_n, util_triggers_n, util_errors = sync_uplink_utilization_for_host(
+                zabbix_url,
+                zabbix_token,
+                zabbix_host,
+                hostid,
+                util_ifaces,
+                dry_run=False,
+                debug=args.debug,
+            )
+            for line in util_errors:
+                print(" {}: {}".format(dev_name, line), file=sys.stderr)
+
         created_triggers_for = 0
-        if args.create_link_triggers:
-            zabbix_host = host_technical_by_hostid.get(hostid) or dev_name
+        if args.create_link_triggers and iface_bps_list:
             for iface_name, _bps in iface_bps_list:
                 if (dev_name, iface_name) not in burst_pairs:
                     continue
@@ -951,20 +1332,32 @@ def main():
                     print(" {}: SLA breach trigger - {}".format(iface_name, err_sla or "error"), file=sys.stderr)
                 if ok_tr and ok_w and ok_sla:
                     created_triggers_for += 1
-        # Remove old threshold items net.if.threshold[...] (the line is now from a simple trigger)
+
         removed, rem_err = remove_threshold_items(zabbix_url, zabbix_token, hostid, debug=args.debug)
         if rem_err:
             print(" {}: deleting threshold items - {}".format(dev_name, rem_err), file=sys.stderr)
-        msg = "OK: {} - {} macros installed (MAX+WARN 90%)". format(dev_name, len(new_if_util))
+
+        msg_parts = []
+        if iface_bps_list:
+            msg_parts.append("{} BPS macros".format(len(iface_bps_list) * 2))
+        if sync_util and util_ifaces:
+            msg_parts.append(
+                "util {} macros, triggers {}/{}".format(
+                    util_macros_n, util_triggers_n, len(util_ifaces)
+                )
+            )
         if args.create_link_triggers:
-            msg += ", 90%/100%/SLA breach triggers for Burst interfaces: {}".format(created_triggers_for)
+            msg_parts.append("Burst link triggers: {}".format(created_triggers_for))
         if removed:
-            msg += ", removed {} threshold items".format(removed)
-        print(msg)
+            msg_parts.append("removed {} threshold items".format(removed))
+        print("OK: {} - {}".format(dev_name, ", ".join(msg_parts) if msg_parts else "no changes"))
         updated += 1
 
-    print("Done: {} hosts updated, {} steam (interface, commit rate) from NetBox.".format(
-        updated, len(commit_rates)))
+    print(
+        "Done: {} hosts updated, {} commit pairs from NetBox, {} hosts with util from dry-ssh.".format(
+            updated, len(commit_rates), len(host_to_util_ifaces)
+        )
+    )
 
 
 if __name__ == "__main__":

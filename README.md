@@ -21,7 +21,7 @@
 | `grafana_uplinks_graph.py` | Генерация JSON для панели Node graph в Grafana (узлы — хосты и провайдеры, рёбра — линки); опционально создание дашборда через Grafana API. |
 | `generate_commit_rates.py` | Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). При мерже сохраняет дополнительные поля линков (например `billing_model`), служебные ключи **`_provider_limits`**, **`_provider_sla`** и другие `_…`. |
 | `netbox_create_circuits.py` | Создание circuits в NetBox по `commit_rates.json`: провайдер, тип «Internet», контур, Termination A на site, кабель до интерфейса. Флаг **`--clear-null-commit`** сбрасывает у контура в NetBox пустой commit rate, если в JSON `commit_rate_gbps: null`. |
-| `zabbix_sync_commit_rate.py` | Макросы **{$UPLINK.BPS.MAX}** / **{$UPLINK.BPS.WARN}** из NetBox (абсолют в bps, не проценты). По **`--create-link-triggers`** и **`commit_rates.json`**: для линков с **`billing_model: Burst`** создаются три простых триггера на интерфейс: **90%**, **100%** и **SLA breach** (`min` за период из `SLA_TRIGGER_FUNCTION_PERIOD`), с разделением тегов: у **SLA breach** — `sla=true` (для сервисов Zabbix), у 90/100 — без `sla`. **`--delete-link-triggers`** удаляет все три типа. |
+| `zabbix_sync_commit_rate.py` | Макросы **{$UPLINK.BPS.MAX}** / **{$UPLINK.BPS.WARN}** из NetBox (bps). По **`dry-ssh.json`** (по умолчанию при полном прогоне): **{$UPLINK.UTIL.WARN/CRIT}** и триггеры перегрузки порта (**70%** avg 10m, **85%** avg 5m, формула как в шаблоне Arista in/out vs speed) на **все** uplink из файла, без требования кабеля в NetBox. Burst: **`--create-link-triggers`** — 90%/100%/SLA breach по commit. **`--no-util-triggers`** отключает util. |
 | `zabbix_provider_aggregate.py` | Хосты `Uplinks {Provider}`: calculated items суммарного трафика и триггеры **90%**, **100%** и **SLA breach** по `_provider_limits`. Тег **`sla=true`** только на триггере **SLA breach**; на 90%/100% — `scripts:automatization` и `provider`. Зависимость 90% от 100% (как в Zabbix: дочерний не в PROBLEM без родителя). |
 | `zabbix_uplinks_cleanup.py` | Очистка артефактов автоматизации в Zabbix: триггеры 90%/100%, старые item'ы порога, карта uplinks, дашборды uplinks (тег `scripts:automatization`). |
 | `zabbix_provider_services.py` | Сервисы и встроенные SLA в Zabbix: **`Uplinks {Provider}`** для каждого имени из **`_provider_limits`** (`problem_tags`: `provider`, `sla=true`) и **`Uplinks Burst {circuit_id}`** для линков с **`billing_model: Burst`** (`circuit`, `sla=true`, `billing=burst`). Целевое значение SLA для обоих типов — **`_provider_sla`** в `commit_rates.json`. Опционально общий родитель **`--parent-service`**. |
@@ -473,12 +473,14 @@ python netbox_create_circuits.py -f commit_rates.json --clear-null-commit
 2. **100%** — `max(…) > {$UPLINK.BPS.MAX:"iface"}`; те же теги, без `sla=true`.
 3. **SLA breach** — `min(…) > {$UPLINK.BPS.MAX:"iface"}` с периодом **`SLA_TRIGGER_FUNCTION_PERIOD`** (например 1h); дополнительно **`sla=true`** (как у агрегатов) — к этому триггеру привязывается сервис **`Uplinks Burst {circuit_id}`** в **zabbix_provider_services.py**.
 
-Описания концов строк задаются в **`uplinks_config.py`**: `TRIGGER_DESC_90_SUFFIX`, `TRIGGER_DESC_100_SUFFIX`, `TRIGGER_DESC_SLA_BREACH_SUFFIX`.
+Описания концов строк задаются в **`uplinks_config.py`**: `TRIGGER_DESC_90_SUFFIX`, `TRIGGER_DESC_100_SUFFIX`, `TRIGGER_DESC_SLA_BREACH_SUFFIX`, `TRIGGER_DESC_UTIL_*_SUFFIX`.
+
+**Утилизация порта (по умолчанию с `-d dry-ssh.json`).** Для каждого интерфейса из **`dry-ssh.json`** на хосте Zabbix: макросы **{$UPLINK.UTIL.WARN:"iface"}** = 70, **{$UPLINK.UTIL.CRIT:"iface"}** = 85 (проценты; пороги в `uplinks_config.py`). Два триггера с тегом `scripts:automatization`, формула как у шаблона **Arista by SNMP** (`avg(net.if.in)` или `avg(net.if.out)` vs `(macro/100)*net.if.speed`, `speed>0`). Warning зависит от Critical. Кабель/circuit в NetBox **не** требуется; если items `net.if.in/out/speed` на хосте нет — интерфейс пропускается.
 
 Старые item'ы **net.if.threshold["..."]**, если остались, удаляются.
 
 **Важно про совместимость с шаблонами Zabbix.**
-Ранее использовались макросы `{$IF.UTIL.MAX/WARN}` со значениями в bps, что конфликтует со стандартными шаблонными триггерами, где `{$IF.UTIL.*}` ожидаются в процентах. Актуальная схема: скрипт трогает только `{$UPLINK.BPS.*}`, а `{$IF.UTIL.*}` остаются под шаблоны.
+Ранее использовались макросы `{$IF.UTIL.MAX/WARN}` со значениями в bps, что конфликтует со стандартными шаблонными триггерами, где `{$IF.UTIL.*}` ожидаются в процентах. Актуальная схема: скрипт трогает **{$UPLINK.BPS.*}** и **{$UPLINK.UTIL.*}**, а **{$IF.UTIL.*}** остаются под шаблоны (100% на всех LLD-портах).
 
 Если ранее уже были записаны host-level `{$IF.UTIL.*}` в bps, миграция:
 1. Удалить host-level `{$IF.UTIL.*}` на uplink-хостах (чтобы шаблон взял свои значения);
@@ -494,15 +496,18 @@ python netbox_create_circuits.py -f commit_rates.json --clear-null-commit
 | `--dry-run` | Не менять макросы в Zabbix, только вывести что бы установили |
 | `--debug` | Отладочный вывод |
 | `--create-link-triggers` | Создавать/обновлять триггеры 90%/100%/SLA breach только для Burst-линков |
-| `--delete-link-triggers` | Удалить простые триггеры (90%, 100%, SLA breach) с тегом `scripts:automatization` и префиксом описания `Interface ` |
+| `--no-util-triggers` | Не создавать макросы/триггеры **{$UPLINK.UTIL.*}** (по умолчанию util включён при наличии dry-ssh) |
+| `--delete-link-triggers` | Удалить триггеры commit 90%/100%/SLA breach |
+| `--delete-util-triggers` | Удалить триггеры uplink utilization warn/crit |
 
-Учитываются только пары с **кабелем** от circuit termination (A) к интерфейсу; **обязателен** фильтр по тегу `NETBOX_TAG`. Для логических имён интерфейсов укажите `-d dry-ssh.json`.
+**BPS-макросы:** только пары с **кабелем** circuit termination (A) → интерфейс, тег **`NETBOX_TAG`**. **Util:** все интерфейсы из **`dry-ssh.json`**. Для логических имён (Juniper) укажите `-d dry-ssh.json` и для BPS (контекст макроса).
 
 ```bash
 python zabbix_sync_commit_rate.py
 python zabbix_sync_commit_rate.py -d dry-ssh.json --dry-run
 python zabbix_sync_commit_rate.py -d dry-ssh.json -f commit_rates.json --create-link-triggers
 python zabbix_sync_commit_rate.py -d dry-ssh.json --delete-link-triggers
+python zabbix_sync_commit_rate.py -d dry-ssh.json --delete-util-triggers
 ```
 
 ---

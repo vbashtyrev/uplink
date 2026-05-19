@@ -20,6 +20,18 @@ UPLINKS_AGGREGATE_GROUP = "Uplinks"
 THRESHOLD_PERCENT_WARN = 90
 THRESHOLD_PERCENT_HIGH = 100
 
+# Uplink port utilization (percent of interface speed, in or out — template-style formula)
+UPLINK_UTIL_WARN_PERCENT = 70
+UPLINK_UTIL_CRIT_PERCENT = 85
+UPLINK_UTIL_WARN_PERIOD = "10m"
+UPLINK_UTIL_CRIT_PERIOD = "5m"
+TRIGGER_DESC_UTIL_WARN_SUFFIX = "Uplink utilization high ({}%, avg {})".format(
+    UPLINK_UTIL_WARN_PERCENT, UPLINK_UTIL_WARN_PERIOD
+)
+TRIGGER_DESC_UTIL_CRIT_SUFFIX = "Uplink utilization critical ({}%, avg {})".format(
+    UPLINK_UTIL_CRIT_PERCENT, UPLINK_UTIL_CRIT_PERIOD
+)
+
 # Trigger tags and descriptions
 TRIGGER_TAG_NAME = "scripts"
 TRIGGER_TAG_VALUE = "automatization"
