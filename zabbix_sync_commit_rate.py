@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import sys
 
 import pynetbox
@@ -91,9 +92,27 @@ def load_dry_ssh(path):
     return data.get("devices") or None
 
 
-def interfaces_by_host_from_dry_ssh(dry_ssh_devices):
+def is_physical_uplink_iface(iface_entry):
     """
-    All interface names per device from dry-ssh.json (uplink list from SSH collection).
+    Physical uplink port for utilization monitoring (not LAG aeN nor logical unit aeN.0).
+    Arista entries without Juniper flags are treated as physical.
+    """
+    if not isinstance(iface_entry, dict):
+        return True
+    name = (iface_entry.get("name") or "").strip()
+    if iface_entry.get("isLag"):
+        return False
+    if iface_entry.get("isLogical"):
+        return False
+    if name.startswith("ae"):
+        return False
+    return True
+
+
+def interfaces_by_host_from_dry_ssh(dry_ssh_devices, physical_only=False):
+    """
+    Interface names per device from dry-ssh.json (uplink list from SSH collection).
+    physical_only: skip LAG (aeN) and logical units (aeN.0); keep physical members (et-*, Ethernet*).
     Return: dict device_name -> [iface_name, ...] (unique, stable order).
     """
     result = {}
@@ -106,6 +125,8 @@ def interfaces_by_host_from_dry_ssh(dry_ssh_devices):
         names = []
         for entry in ifaces:
             if not isinstance(entry, dict):
+                continue
+            if physical_only and not is_physical_uplink_iface(entry):
                 continue
             name = (entry.get("name") or "").strip()
             if not name or name in seen:
@@ -540,6 +561,58 @@ def delete_util_triggers(url, token, debug=False):
     return len(to_delete)
 
 
+def prune_util_triggers_on_host(url, token, hostid, allowed_iface_names, debug=False):
+    """
+    Remove utilization warn/crit triggers on this host for interfaces not in allowed_iface_names
+    (e.g. after switching from LAG names to physical-only).
+    """
+    allowed = {(n or "").strip() for n in (allowed_iface_names or [])}
+    res, err = zabbix_request(
+        url,
+        token,
+        "trigger.get",
+        {
+            "hostids": [hostid],
+            "output": ["triggerid", "description"],
+            "search": {"description": "Uplink utilization"},
+            "selectTags": "extend",
+        },
+        debug=debug,
+    )
+    if err or not res:
+        return 0
+    to_delete = []
+    for t in res:
+        desc = (t.get("description") or "").strip()
+        if not (
+            desc.endswith(TRIGGER_DESC_UTIL_WARN_SUFFIX)
+            or desc.endswith(TRIGGER_DESC_UTIL_CRIT_SUFFIX)
+        ):
+            continue
+        tags = t.get("tags") or []
+        if tags and not any(
+            tg.get("tag") == TRIGGER_TAG_NAME and tg.get("value") == TRIGGER_TAG_VALUE
+            for tg in tags
+        ):
+            continue
+        m = re.match(r"Interface\s+([^:]+):", desc)
+        if not m:
+            continue
+        iface = m.group(1).strip()
+        if iface in allowed:
+            continue
+        tid = t.get("triggerid")
+        if tid:
+            to_delete.append(str(tid))
+    if not to_delete:
+        return 0
+    _, del_err = zabbix_request(url, token, "trigger.delete", to_delete, debug=debug)
+    if del_err:
+        print("trigger.delete error: {}".format(del_err), file=sys.stderr)
+        return 0
+    return len(to_delete)
+
+
 def delete_link_triggers(url, token, debug=False):
     """
     Remove simple 90%/100% triggers on interfaces created by uplinks scripts
@@ -820,6 +893,9 @@ def sync_uplink_utilization_for_host(
         })
     if dry_run:
         return len(util_macros), len(iface_names), []
+    pruned = prune_util_triggers_on_host(url, token, hostid, iface_names, debug=debug)
+    if pruned and debug:
+        print("Pruned {} stale util triggers on hostid {}".format(pruned, hostid), file=sys.stderr)
     ok, err = set_zabbix_host_uplink_util_macros(url, token, hostid, util_macros, debug=debug)
     if not ok:
         return 0, 0, [err or "usermacro"]
@@ -1177,7 +1253,7 @@ def main():
 
     dry_ssh_path = getattr(args, "dry_ssh", None) or (DEFAULT_DRY_SSH if os.path.isfile(DEFAULT_DRY_SSH) else None)
     dry_ssh_devices = load_dry_ssh(dry_ssh_path) if dry_ssh_path else None
-    host_to_util_ifaces = interfaces_by_host_from_dry_ssh(dry_ssh_devices)
+    host_to_util_ifaces = interfaces_by_host_from_dry_ssh(dry_ssh_devices, physical_only=True)
     sync_util = bool(host_to_util_ifaces) and not args.no_util_triggers
     if dry_ssh_path and not dry_ssh_devices and not args.no_util_triggers:
         print(

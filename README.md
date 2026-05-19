@@ -475,7 +475,7 @@ python netbox_create_circuits.py -f commit_rates.json --clear-null-commit
 
 Описания концов строк задаются в **`uplinks_config.py`**: `TRIGGER_DESC_90_SUFFIX`, `TRIGGER_DESC_100_SUFFIX`, `TRIGGER_DESC_SLA_BREACH_SUFFIX`, `TRIGGER_DESC_UTIL_*_SUFFIX`.
 
-**Утилизация порта (по умолчанию с `-d dry-ssh.json`).** Для каждого интерфейса из **`dry-ssh.json`** на хосте Zabbix: макросы **{$UPLINK.UTIL.WARN:"iface"}** = 70, **{$UPLINK.UTIL.CRIT:"iface"}** = 85 (проценты; пороги в `uplinks_config.py`). Два триггера с тегом `scripts:automatization`, формула как у шаблона **Arista by SNMP** (`avg(net.if.in)` или `avg(net.if.out)` vs `(macro/100)*net.if.speed`, `speed>0`). Warning зависит от Critical. Кабель/circuit в NetBox **не** требуется; если items `net.if.in/out/speed` на хосте нет — интерфейс пропускается.
+**Утилизация порта (по умолчанию с `-d dry-ssh.json`).** Для **физических** uplink из **`dry-ssh.json`** (на Juniper — `et-*`, без `ae` / `aeN.0` / `isLag` / `isLogical`; на Arista — `Ethernet*`) на хосте Zabbix: макросы **{$UPLINK.UTIL.WARN:"iface"}** = 70, **{$UPLINK.UTIL.CRIT:"iface"}** = 85 (проценты; пороги в `uplinks_config.py`). Два триггера с тегом `scripts:automatization`, формула как у шаблона **Arista by SNMP** (`avg(net.if.in)` или `avg(net.if.out)` vs `(macro/100)*net.if.speed`, `speed>0`). Warning зависит от Critical. Кабель/circuit в NetBox **не** требуется; если items `net.if.in/out/speed` на хосте нет — интерфейс пропускается.
 
 Старые item'ы **net.if.threshold["..."]**, если остались, удаляются.
 
