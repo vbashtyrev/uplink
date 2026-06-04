@@ -46,12 +46,12 @@
    - **`zabbix_uplinks_dashboard.py`** — дашборды с графиками по uplink.  
    Grafana (**`grafana_uplinks_graph.py`**) — отдельно, не входит в **`run_uplinks_full.py`**.
 
-4. **Commit rates и circuits в NetBox (обязательно до Zabbix)**  
-   **`generate_commit_rates.py -f dry-ssh.json`** → **`commit_rates.json`** (провайдер, circuit_id, commit_rate_gbps по устройству/интерфейсу).
+4. **Commit rates и circuits в NetBox (обязательно до Zabbix)**
 
-   **`netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json`** → в NetBox: провайдеры, контуры (cid, commit rate), Termination A на site, кабель до интерфейса.
+   - **`generate_commit_rates.py -f dry-ssh.json`** → **`commit_rates.json`** (провайдер, circuit_id, commit_rate_gbps по устройству/интерфейсу).
+   - **`netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json`** → в NetBox: провайдеры, контуры (cid, commit rate), Termination A на site, кабель до интерфейса.
 
-   Circuits нужны до настройки Zabbix: в Zabbix commit rate будет браться из NetBox circuits.
+   Circuits нужны до настройки Zabbix: commit rate для макросов берётся из NetBox circuits.
 
 5. **Синхронизация макросов commit rate в Zabbix**  
    **`zabbix_sync_commit_rate.py`** по NetBox (интерфейсы с circuit по кабелю) получает commit rate в Kbps, переводит в bps и создаёт макросы **{$UPLINK.BPS.MAX:"<интерфейс>"}** и **{$UPLINK.BPS.WARN:"<интерфейс>"}**.
@@ -669,10 +669,41 @@ python netbox_uplinks_cleanup.py
 
 Другие **`_…`** ключи (`_billing_models` и т.п.) при merge сохраняются. Файл обычно не коммитится; пример — **`commit_rates.json.example`**.
 
-**Генерация по dry-ssh**  
-Скрипт `generate_commit_rates.py` по всем линкам из `dry-ssh.json` собирает записи в `commit_rates.json`. Провайдер из `description_to_name.json`; `circuit_id` в формате провайдер-локация-N; для новых пар `commit_rate_gbps` — null (заполнить вручную, в Гбит/с). При merge старый ключ `commit_rate_kbps` конвертируется в `commit_rate_gbps` (значения &lt; 1000 считаются уже Гбит/с), дополнительные поля линков (например `billing_model`) и служебные `_...` ключи сохраняются. Пример: `cp commit_rates.json.example commit_rates.json` затем `python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json`.
+### Генерация `commit_rates.json` по dry-ssh
 
-**Создание circuits в NetBox**  
-Скрипт `netbox_create_circuits.py` по `commit_rates.json` создаёт в NetBox провайдеров (при отсутствии), тип контура «Internet», контуры (cid, commit rate в Kbps), **Termination A** на site устройства и кабель до интерфейса. Тег из `uplinks_config.NETBOX_AUTOMATION_TAG` (по умолчанию `automatization`) создаётся при отсутствии и проставляется новым и существующим объектам. **Termination Z** не создаётся.
+Скрипт **`generate_commit_rates.py`** по всем линкам из **`dry-ssh.json`** собирает записи в **`commit_rates.json`**.
 
-По умолчанию обрабатываются все площадки; ограничить одной: `--location ALA`. Если у интерфейса уже есть кабель или «mark connected» — скрипт удаляет кабель и сбрасывает mark_connected (через REST PATCH), затем подключает кабель по нашим данным. Для виртуальных интерфейсов (ae5.0 и т.п.) кабель вешается на **физический** интерфейс: при указании `-d dry-ssh.json` из dry-ssh берётся `physicalInterface` для логического. В конце выводится отчёт: что создано, что удалено, где использована физика вместо виртуального. Переменные: `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`. Пример: `python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json` (проверка: `--dry-run`).
+- **Провайдер** — из `description_to_name.json` (по `description` интерфейса).
+- **`circuit_id`** — формат `провайдер-локация-N`.
+- **`commit_rate_gbps`** — для новых пар `null` (заполнить вручную, в Гбит/с).
+- **Merge** — сохраняет поля линков (`billing_model` и др.) и служебные ключи `_…`; старый `commit_rate_kbps` конвертируется в `commit_rate_gbps` (значения &lt; 1000 считаются уже в Гбит/с).
+
+```bash
+cp commit_rates.json.example commit_rates.json
+python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json
+```
+
+### Создание circuits в NetBox
+
+Скрипт **`netbox_create_circuits.py`** по **`commit_rates.json`** создаёт в NetBox:
+
+- провайдеров (при отсутствии);
+- тип контура «Internet»;
+- контуры (cid, commit rate в Kbps);
+- **Termination A** на site устройства и кабель до интерфейса.
+
+Тег **`NETBOX_AUTOMATION_TAG`** (по умолчанию `automatization`) создаётся при отсутствии и проставляется новым и существующим объектам. **Termination Z** не создаётся.
+
+- **Все площадки** — по умолчанию; одна площадка: `--location ALA`.
+- **Существующий кабель / mark connected** — кабель удаляется, mark_connected сбрасывается (REST PATCH), затем подключается кабель по нашим данным.
+- **Виртуальные интерфейсы** (ae5.0 и т.п.) — кабель на **физический** интерфейс; при `-d dry-ssh.json` берётся `physicalInterface` для логического.
+- В конце — отчёт: создано / удалено / физика вместо виртуального.
+
+**Переменные:** `NETBOX_URL`, `NETBOX_TOKEN`, `NETBOX_TAG`.
+
+```bash
+python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json
+python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json --dry-run
+```
+
+См. также **### 6. `netbox_create_circuits.py`** в разделе «Скрипты и ключи».
