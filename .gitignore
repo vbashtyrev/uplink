@@ -15,3 +15,4 @@ htmlcov/
 .env.*
 urls.env
 uplinks_config.py
+.DS_Store
