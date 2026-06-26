@@ -25,3 +25,14 @@ def test_load_env_file(tmp_path, monkeypatch):
 def test_load_env_missing_file(monkeypatch):
     with patch.object(env_urls.os.path, "isfile", return_value=False):
         assert env_urls.load_env_file_if_present("missing.env") == 0
+
+
+def test_load_env_file_skips_without_overwrite(tmp_path, monkeypatch):
+    env_path = tmp_path / "test.env"
+    env_path.write_text("KEEP=from_file\nNEW=1\n", encoding="utf-8")
+    monkeypatch.setenv("KEEP", "already_set")
+    monkeypatch.delenv("NEW", raising=False)
+    loaded = env_urls.load_env_file(str(env_path), overwrite=False)
+    assert loaded == 1
+    assert os.environ["KEEP"] == "already_set"
+    assert os.environ["NEW"] == "1"

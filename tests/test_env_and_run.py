@@ -3,7 +3,7 @@
 import os
 
 import env_urls
-from run_uplinks_full import _strip_quotes, load_env_file
+from env_urls import _strip_quotes, load_env_file
 
 
 def test_strip_quotes():
@@ -17,7 +17,7 @@ def test_load_env_file_overwrites(tmp_path, monkeypatch):
     env_path.write_text('export FOO="from_file"\nBAR=baz\n', encoding="utf-8")
     monkeypatch.delenv("FOO", raising=False)
     monkeypatch.setenv("BAR", "existing")
-    n = load_env_file(str(env_path))
+    n = load_env_file(str(env_path), overwrite=True)
     assert n == 2
     assert os.environ["FOO"] == "from_file"
     assert os.environ["BAR"] == "baz"
