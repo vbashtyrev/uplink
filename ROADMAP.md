@@ -4,7 +4,7 @@
 
 ## Ближайшее
 
-- [x] CI: GitHub Actions + pytest на push/PR
+- [ ] CI: GitHub Actions + pytest на push/PR (файл `.github/workflows/ci.yml` — добавить через GitHub UI или токен с scope `workflow`)
 - [x] Единый env-loader (`env_urls.load_env_file` с `overwrite=`)
 - [x] Исправить/актуализировать runbook (`MANUAL.md`) — порядок Zabbix-шагов
 
@@ -15,7 +15,7 @@
 
 ## Zabbix
 
-- [ ] Вынести JSON-RPC клиент и кэш из `zabbix_map.py` в `uplinks/zabbix/client.py`
+- [x] Вынести JSON-RPC клиент и кэш из `zabbix_map.py` в `uplinks/zabbix/client.py`
 - [ ] Опционально: единый CLI (`uplinks run`, `uplinks sync`, …) с сохранением текущих скриптов как thin wrappers
 
 ## Качество
