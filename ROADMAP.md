@@ -10,8 +10,8 @@
 
 ## NetBox
 
-- [ ] **Tenancy для circuits** — привязка контуров к tenant/site group там, где это требуется политикой NetBox
-- [ ] Пакетная структура: вынести `netbox_checks`, `netbox_create_circuits` в модуль `uplinks/netbox/`
+- [ ] ~~**Tenancy для circuits**~~ — отложено (по необходимости)
+- [x] Пакетная структура: `netbox_checks`, `netbox_create_circuits` → `uplinks/netbox/`
 
 ## Общие данные
 
@@ -30,4 +30,4 @@
 ## Grafana
 
 - [ ] Решить судьбу экспериментов MapGL / business charts (были в ветке `feature/grafana-uplinks`, не влиты в main)
-- [ ] Интеграция `grafana_uplinks_graph.py` в документацию полного прогона (сейчас вне `run_uplinks_full.py` — осознанно)
+- [x] `grafana_uplinks_graph.py` вне `run_uplinks_full.py` — осознанно; см. COMMANDS.md / README
