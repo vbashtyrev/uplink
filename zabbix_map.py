@@ -10,6 +10,12 @@ import sys
 
 from env_urls import load_env_file_if_present
 from generate_commit_rates import is_uplink
+from uplinks.data import (
+    DEFAULT_INPUT,
+    DESCRIPTION_MAP_FILE,
+    load_description_map,
+    load_devices_json,
+)
 from uplinks.zabbix.client import (
     BITS_RECEIVED_NAME,
     BITS_SENT_NAME,
@@ -27,9 +33,6 @@ from uplinks.zabbix.client import (
 
 load_env_file_if_present()
 
-
-DEFAULT_INPUT = "dry-ssh.json"
-DESCRIPTION_MAP_FILE = "description_to_name.json"
 
 from uplinks_config import (
     LINK_COLOR_HIGH,
@@ -57,35 +60,6 @@ def _api_map_id(value):
         return int(value)
     except (TypeError, ValueError):
         return value
-
-
-def load_devices_json(path):
-    """Load JSON with the key devices. Return (data, None) or (None, error_msg).
-    Format: devices[hostname] = [{"name": "...", "description": "...", ...}, ...].
-    The file may contain logical interfaces (Juniper: ae5, ae5.0, et-0/0/3); optional fields:
-    isLogical, isLag, physicalInterface, aggregateInterface, logicalInterface - used when selecting
-    one edge per (host, ISP) for the map."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return None, "file not found: {}".format(path)
-    except json.JSONDecodeError as e:
-        return None, "JSON error: {}".format(e)
-    if "devices" not in data:
-        return None, "the file does not contain the 'devices' key"
-    return data, None
-
-
-def load_description_map(path):
-    """Load mapping description -> display name. Empty dict if file does not exist."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-    except json.JSONDecodeError:
-        return {}
 
 
 # PERM_READ = 1, PERM_READ_WRITE = 2 (Zabbix constants for map sharing)

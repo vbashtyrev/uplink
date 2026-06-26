@@ -4,7 +4,7 @@
 
 ## Ближайшее
 
-- [ ] CI: GitHub Actions + pytest на push/PR (файл `.github/workflows/ci.yml` — добавить через GitHub UI или токен с scope `workflow`)
+- [x] CI: GitHub Actions + pytest на push/PR
 - [x] Единый env-loader (`env_urls.load_env_file` с `overwrite=`)
 - [x] Исправить/актуализировать runbook (`MANUAL.md`) — порядок Zabbix-шагов
 
@@ -12,6 +12,10 @@
 
 - [ ] **Tenancy для circuits** — привязка контуров к tenant/site group там, где это требуется политикой NetBox
 - [ ] Пакетная структура: вынести `netbox_checks`, `netbox_create_circuits` в модуль `uplinks/netbox/`
+
+## Общие данные
+
+- [x] `uplinks/data.py` — `load_devices_json`, `load_description_map`, константы путей
 
 ## Zabbix
 
