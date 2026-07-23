@@ -17,7 +17,7 @@ def test_load_env_file_and_strip_quotes(tmp_path, monkeypatch):
     env = tmp_path / "urls.env"
     env.write_text('export NETBOX_URL="https://nb.example"\n# comment\nFOO=bar\n', encoding="utf-8")
     monkeypatch.delenv("NETBOX_URL", raising=False)
-    n = full.load_env_file(str(env))
+    n = full.load_env_file(str(env), overwrite=True)
     assert n == 2
     assert os.environ.get("NETBOX_URL") == "https://nb.example"
     assert os.environ.get("FOO") == "bar"

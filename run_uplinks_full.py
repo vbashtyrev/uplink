@@ -9,6 +9,8 @@ import sys
 import time
 from datetime import datetime
 
+from env_urls import load_env_file
+
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DRY_SSH = "dry-ssh.json"
@@ -16,39 +18,6 @@ DEFAULT_COMMIT_RATES = "commit_rates.json"
 DEFAULT_DESC_MAP = "description_to_name.json"
 RUN_LOGS_DIR = "run_logs" # log folder: date_time_run.log and date_time_debug.log
 CACHE_AGE_SECONDS = 24 * 3600 # dry-ssh.json cache for 24 hours for step 1
-
-
-def _strip_quotes(value):
-    if len(value) >= 2 and ((value[0] == '"' and value[-1] == '"') or (value[0] == "'" and value[-1] == "'")):
-        return value[1:-1]
-    return value
-
-
-def load_env_file(path):
-    """
-    A simple KEY=VALUE loader from an env file.
-    Supports lines like `export KEY=VALUE`, comments and empty lines.
-    """
-    loaded = 0
-    if not path or not os.path.isfile(path):
-        return loaded
-    with open(path, "r", encoding="utf-8") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export "):].strip()
-            if "=" not in line:
-                continue
-            key, val = line.split("=", 1)
-            key = key.strip()
-            if not key:
-                continue
-            val = _strip_quotes(val.strip())
-            os.environ[key] = val
-            loaded += 1
-    return loaded
 
 
 def run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
@@ -221,7 +190,7 @@ def main():
     env_file_path = os.path.join(SCRIPT_DIR, args.env_file)
     loaded_env_count = 0
     if not args.no_env_file:
-        loaded_env_count = load_env_file(env_file_path)
+        loaded_env_count = load_env_file(env_file_path, overwrite=True)
     python = sys.executable
     timeout = args.timeout
     dry_ssh_path = args.dry_ssh
