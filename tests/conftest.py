@@ -10,6 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# uplinks_config.py is gitignored (local copy of the example). CI / fresh clones need a fallback.
+_config = ROOT / "uplinks_config.py"
+_example = ROOT / "uplinks_config.example.py"
+if not _config.exists() and _example.exists():
+    _config.write_text(_example.read_text(encoding="utf-8"), encoding="utf-8")
+
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
