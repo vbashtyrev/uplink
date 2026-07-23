@@ -59,7 +59,7 @@ def _nb_mock():
     return nb, nb_iface
 
 
-def test_checks_duplex_mtu_tx(monkeypatch, tmp_path, capsys):
+def test_checks_duplex_mtu_tx(monkeypatch, tmp_path, capsys, netbox_env):
     nb, _ = _nb_mock()
     mt = tmp_path / "types.json"
     mt.write_text('{"interface_types": [{"value": "10gbase-x-sfpp", "label": "SFP+"}]}', encoding="utf-8")
@@ -85,7 +85,7 @@ def test_checks_duplex_mtu_tx(monkeypatch, tmp_path, capsys):
                     assert nc.main() == 0
 
 
-def test_apply_description(monkeypatch, tmp_path, capsys):
+def test_apply_description(monkeypatch, tmp_path, capsys, netbox_env):
     nb, nb_iface = _nb_mock()
     updates = []
     nb_iface.update = lambda data: updates.append(data)

@@ -5,7 +5,7 @@ import sys
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 
 
-def test_main_delete_util_triggers_only(monkeypatch, zabbix_env, capsys):
+def test_main_delete_util_triggers_only(monkeypatch, zabbix_env, netbox_env, capsys):
     import zabbix_sync_commit_rate as mod
 
     build_standard_zabbix_mocker().on(
