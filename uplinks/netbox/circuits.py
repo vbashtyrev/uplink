@@ -286,18 +286,50 @@ def create_termination_and_cable(nb, circuit, device, nb_iface, term_side="A", r
     dev_name = getattr(device, "name", "")
     iface_name = getattr(nb_iface, "name", "")
 
-    # Cable: circuit termination <-> interface. First we disconnect the existing cable and mark_connected
-    if getattr(ct, "cable", None) is not None:
-        tag_obj = _get_or_create_automation_tag(nb)
-        if tag_obj:
-            try:
-                cable_id = ct.cable.id if hasattr(ct.cable, "id") else ct.cable
-                if cable_id:
+    # Cable: circuit termination <-> interface.
+    # If termination already has a cable to this interface — keep it (optionally tag).
+    # If the cable points at another interface — delete and recreate below.
+    existing_ct_cable = getattr(ct, "cable", None)
+    if existing_ct_cable is not None:
+        cable_id = existing_ct_cable.id if hasattr(existing_ct_cable, "id") else existing_ct_cable
+        same_iface = False
+        try:
+            cable_rec = nb.dcim.cables.get(cable_id) if cable_id else None
+            for terms in (
+                getattr(cable_rec, "a_terminations", None) or [],
+                getattr(cable_rec, "b_terminations", None) or [],
+            ):
+                for term in terms:
+                    obj = term.get("object") if isinstance(term, dict) else getattr(term, "object", term)
+                    obj_id = getattr(obj, "id", None)
+                    if obj_id is None and isinstance(term, dict):
+                        obj_id = term.get("object_id")
+                    if obj_id is not None and int(obj_id) == int(nb_iface.id):
+                        same_iface = True
+                        break
+                if same_iface:
+                    break
+        except Exception:
+            same_iface = False
+        if same_iface:
+            tag_obj = _get_or_create_automation_tag(nb)
+            if tag_obj and cable_id:
+                try:
                     cable_rec = nb.dcim.cables.get(cable_id)
                     _ensure_record_tag(nb, cable_rec, tag_obj, nb.dcim.cables)
-            except Exception:
-                pass
-        return ct, None
+                except Exception:
+                    pass
+            return ct, None
+        try:
+            if cable_id:
+                nb.dcim.cables.delete([cable_id])
+                if report is not None:
+                    report["deleted_cables"].append((dev_name, iface_name, cable_id))
+            # Refresh termination so we recreate the cable below
+            ct = nb.circuits.circuit_terminations.get(ct.id)
+        except Exception as e:
+            return ct, "moving cable from old interface: {}".format(e)
+
     # The interface already has a cable or mark_connected - disable it to connect as in the file
     try:
         existing_cable = getattr(nb_iface, "cable", None)
