@@ -178,9 +178,11 @@ def fetch_zabbix_hosts_and_items(url, token, hostnames, debug=False):
     all_items = []
     for search_name in (BITS_RECEIVED_NAME, BITS_SENT_NAME):
         result, err = zabbix_request(url, token, "item.get", {
-            "output": ["itemid", "hostid", "name", "key_"],
+            "output": ["itemid", "hostid", "name", "key_", "status"],
             "hostids": hostids,
             "search": {"name": search_name},
+            # Default Zabbix API limit can truncate multi-host fetches and drop new ifaces (e.g. Ethernet30/1).
+            "limit": 100000,
         }, debug=debug)
         if err:
             return None, None, err
@@ -224,15 +226,25 @@ def fetch_zabbix_hosts_and_items(url, token, hostnames, debug=False):
             items_by_host_iface[(hostname, key_norm)] = {
                 "bits_in": "", "bits_out": "", "itemid_in": "", "itemid_out": "",
             }
+        # Prefer enabled items (status 0); keep disabled only if nothing else filled the slot.
+        item_status = item.get("status")
+        try:
+            item_disabled = int(item_status) == 1
+        except (TypeError, ValueError):
+            item_disabled = False
         itemid = item.get("itemid")
         if BITS_RECEIVED_NAME in name or name == BITS_RECEIVED_NAME:
-            items_by_host_iface[(hostname, key_norm)]["bits_in"] = key_str
-            if itemid is not None:
-                items_by_host_iface[(hostname, key_norm)]["itemid_in"] = str(itemid)
+            cur_in = items_by_host_iface[(hostname, key_norm)].get("itemid_in") or ""
+            if not cur_in or not item_disabled:
+                items_by_host_iface[(hostname, key_norm)]["bits_in"] = key_str
+                if itemid is not None:
+                    items_by_host_iface[(hostname, key_norm)]["itemid_in"] = str(itemid)
         if BITS_SENT_NAME in name or name == BITS_SENT_NAME:
-            items_by_host_iface[(hostname, key_norm)]["bits_out"] = key_str
-            if itemid is not None:
-                items_by_host_iface[(hostname, key_norm)]["itemid_out"] = str(itemid)
+            cur_out = items_by_host_iface[(hostname, key_norm)].get("itemid_out") or ""
+            if not cur_out or not item_disabled:
+                items_by_host_iface[(hostname, key_norm)]["bits_out"] = key_str
+                if itemid is not None:
+                    items_by_host_iface[(hostname, key_norm)]["itemid_out"] = str(itemid)
 
     if debug:
         if all_items:
