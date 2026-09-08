@@ -13,6 +13,31 @@ export SSH_USERNAME="..."
 export SSH_PASSWORD="..."
 ```
 
+## Рабочий режим
+
+Провайдер, контур, терминация и кабель создаются человеком в NetBox.
+Обычный полный запуск только читает эту цепочку, получает данные с
+оборудования и обновляет существующие поля интерфейса.
+
+Проверка NetBox без изменений:
+
+```bash
+python netbox_uplinks_inventory.py --dry-run
+python netbox_uplinks_inventory.py --json --dry-run
+```
+
+Обычный запуск не создаёт и не удаляет провайдеров, контуров, терминаций и
+кабелей. Для интерфейсов используется безопасный режим `--existing-only`:
+отсутствующие интерфейсы, MAC и IP не создаются, а перепривязки не выполняются.
+
+Старый автоматический путь доступен только явно:
+
+```bash
+python run_uplinks_full.py --auto
+```
+
+Не запускайте `--auto` на рабочем NetBox: старый код может заменить кабель.
+
 
 ---
 
@@ -24,6 +49,18 @@ python run_uplinks_full.py
 python run_uplinks_full.py --refresh
 
 python run_uplinks_full.py --no-fetch
+```
+
+Полный запуск в рабочем режиме:
+
+```bash
+python run_uplinks_full.py
+```
+
+Он использует:
+
+```text
+NetBox inventory → SSH → existing-only checks → Zabbix
 ```
 
 

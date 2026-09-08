@@ -26,17 +26,33 @@ python run_uplinks_full.py --no-fetch --location ALA
 python run_uplinks_full.py --no-burst-triggers
 ```
 
+Обычный запуск работает в режиме NetBox-first: провайдеры, контуры,
+терминации и кабели заранее заводятся человеком в NetBox. Создание контуров
+не вызывается, а проверка интерфейсов выполняется в режиме
+`--existing-only`.
+
+Переходный старый путь доступен только явно:
+
+```bash
+python run_uplinks_full.py --auto
+```
+
+Не запускайте `--auto` на рабочем NetBox: старый код может заменить
+существующий кабель.
+
 **Шаги `run_uplinks_full.py` (по порядку):**
 
-1. `uplinks_stats.py --fetch --json` → `dry-ssh.json` (кэш 24 ч; `--refresh` / `--no-fetch`)
-2. `netbox_checks.py` — сверка и `--apply` в NetBox
-3. `generate_commit_rates.py` → `commit_rates.json`
-4. `netbox_create_circuits.py` — контуры и кабели в NetBox
-5. `zabbix_sync_commit_rate.py -d dry-ssh.json -f commit_rates.json --create-link-triggers` — макросы, util, Burst 90%/100%/SLA на линках
-6. `zabbix_provider_aggregate.py` — хосты `Uplinks {Provider}`, агрегатные триггеры
-7. `zabbix_map.py --zabbix --update-map` — карта с окраской линков (после aggregate)
-8. `zabbix_uplinks_dashboard.py` — дашборды
-9. `zabbix_provider_services.py` — сервисы и SLA в Zabbix
+1. `netbox_uplinks_inventory.py --dry-run` — чтение цепочек NetBox
+2. `uplinks_stats.py --fetch --json` → `dry-ssh.json`
+3. `netbox_checks.py` — сверка существующих интерфейсов с `--existing-only`
+4. `zabbix_sync_commit_rate.py` — макросы и триггеры по готовым подключениям
+5. `zabbix_provider_aggregate.py` — агрегаты провайдеров
+6. `zabbix_map.py --zabbix --update-map` — карта
+7. `zabbix_uplinks_dashboard.py` — дашборды
+8. `zabbix_provider_services.py` — сервисы и SLA
+
+В режиме `--auto` дополнительно выполняются старые шаги
+`generate_commit_rates.py` и `netbox_create_circuits.py`.
 
 **Не входит в full run** (отдельные команды ниже): `grafana_uplinks_graph.py`, `zabbix_provider_sla.py`, `netbox_interface_types.py`, cleanup-скрипты.
 

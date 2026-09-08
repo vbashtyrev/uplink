@@ -357,9 +357,9 @@ run_uplinks_full.py
 
 Обновить:
 
-- [ ] `README.md`.
-- [ ] `COMMANDS.md`.
-- [ ] `MANUAL.md`.
+- [x] `README.md`.
+- [x] `COMMANDS.md`.
+- [x] `MANUAL.md`.
 - [ ] `ROADMAP.md`.
 - [ ] `uplinks_config.example.py`.
 - [ ] `commit_rates.json.example`.
@@ -378,6 +378,10 @@ run_uplinks_full.py
 - [ ] Как добавить новый Circuit.
 - [ ] Как отключить старое подключение вручную.
 - [ ] Как выполнить безопасную проверку.
+
+Обновлены описания рабочего NetBox-first запуска, безопасного
+`--existing-only` и переходного `--auto`. Описание старого создания явно
+помечено как legacy и предупреждает о возможной замене кабеля.
 
 ## Этап 12. Финальная проверка
 
