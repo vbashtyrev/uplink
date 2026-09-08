@@ -25,11 +25,13 @@ from zabbix_map import (
     validate_zabbix_token,
 )
 from uplinks.netbox.inventory import (
-    ERROR_AUTH_DENIED,
-    ERROR_PROVIDERS_UNAVAILABLE,
-    collect_uplink_inventory,
+    device_iface_provider_map_from_inventory,
+    expand_provider_map_for_zabbix,
+    is_uplink_iface,
+    load_uplink_provider_context,
+    providers_from_complete_inventory,
+    resolve_provider_name_for_iface,
 )
-from zabbix_sync_commit_rate import _pick_one_logical, build_physical_to_logical
 from uplinks_config import (
     THRESHOLD_PERCENT_WARN,
     THRESHOLD_PERCENT_HIGH,
@@ -52,10 +54,6 @@ CALCULATED_ITEM_TYPE = 15
 VALUE_TYPE_NUMERIC = 3  # unsigned
 # Units for aggregate items: bits per second (bps), so that the graph axis and thresholds are in Gbps.
 UNITS_BPS = "bps"
-
-
-def _netbox_border_tag():
-    return (os.environ.get("NETBOX_TAG") or "border").strip() or "border"
 
 
 def _get_netbox_client(debug=False):
@@ -114,50 +112,10 @@ def _collect_provider_limits_gbps(nb, debug=False):
     return limits
 
 
-def _providers_from_inventory_report(report):
-    names = set()
-    for row in report.get("complete") or []:
-        provider = (row.get("provider") or "").strip()
-        if provider:
-            names.add(provider)
-    return names
-
-
-def _expand_provider_map_for_zabbix(inventory_map, dry_ssh_devices, debug=False):
-    """Map physical inventory interfaces to logical Zabbix interface names when needed."""
-    result = dict(inventory_map)
-    phys_to_logical = build_physical_to_logical(dry_ssh_devices)
-    substituted = []
-    for (dev_name, phys_iface), logicals in phys_to_logical.items():
-        provider = inventory_map.get((dev_name, phys_iface))
-        if not provider:
-            continue
-        logical = _pick_one_logical(logicals)
-        if logical:
-            result[(dev_name, logical)] = provider
-            if logical != phys_iface:
-                substituted.append((dev_name, phys_iface, logical, provider))
-    if debug and substituted:
-        for dev_name, phys_iface, logical, provider in substituted:
-            print(
-                "NetBox provider map: {} {} -> {} ({})".format(
-                    dev_name, phys_iface, logical, provider
-                ),
-                file=sys.stderr,
-            )
-    return result
-
-
-def _device_iface_provider_map_from_inventory(report, dry_ssh_devices, debug=False):
-    """Build (device, interface) -> provider from complete inventory rows."""
-    inventory_map = {}
-    for row in report.get("complete") or []:
-        device_name = row.get("device") or ""
-        iface_name = row.get("interface") or ""
-        provider = (row.get("provider") or "").strip()
-        if device_name and iface_name and provider:
-            inventory_map[(device_name, iface_name)] = provider
-    return _expand_provider_map_for_zabbix(inventory_map, dry_ssh_devices, debug=debug)
+_providers_from_inventory_report = providers_from_complete_inventory
+_expand_provider_map_for_zabbix = expand_provider_map_for_zabbix
+_device_iface_provider_map_from_inventory = device_iface_provider_map_from_inventory
+_provider_name_for_iface = resolve_provider_name_for_iface
 
 
 def _load_netbox_aggregate_context(dry_ssh_devices, debug=False):
@@ -165,35 +123,19 @@ def _load_netbox_aggregate_context(dry_ssh_devices, debug=False):
     Read-only NetBox inventory for provider aggregates.
     Return dict with device_iface_to_provider, providers, provider_limits_gbps, stats; or None.
     """
+    ctx = load_uplink_provider_context(dry_ssh_devices, debug=debug)
+    if ctx is None:
+        return None
+
     nb = _get_netbox_client(debug=debug)
     if nb is None:
         return None
 
-    tag = _netbox_border_tag()
-    report = collect_uplink_inventory(nb, tag=tag, debug=debug, active_only=True)
-    stats = report.get("stats") or {}
-    error = stats.get("error")
-    if error == ERROR_AUTH_DENIED:
-        print(
-            "Warning: NetBox authentication failed; falling back to local provider data",
-            file=sys.stderr,
-        )
-        if debug:
-            print("collect_uplink_inventory: {}".format(error), file=sys.stderr)
-        return None
-    if error == ERROR_PROVIDERS_UNAVAILABLE:
-        if debug:
-            print("NetBox: providers unavailable; falling back to local provider data", file=sys.stderr)
-        return None
-
-    device_iface_to_provider = _device_iface_provider_map_from_inventory(
-        report, dry_ssh_devices, debug=debug
-    )
     return {
-        "device_iface_to_provider": device_iface_to_provider,
-        "providers": _providers_from_inventory_report(report),
+        "device_iface_to_provider": ctx["device_iface_to_provider"],
+        "providers": ctx["providers"],
         "provider_limits_gbps": _collect_provider_limits_gbps(nb, debug=debug),
-        "stats": stats,
+        "stats": ctx["stats"],
     }
 
 
@@ -256,23 +198,9 @@ def _get_providers_from_netbox(tag, debug=False):
 
 def _provider_name_for_iface(hostname, iface, desc_to_name, device_iface_to_provider=None):
     """Resolve provider name: NetBox inventory first, description map as fallback."""
-    device_iface_to_provider = device_iface_to_provider or {}
-    iface_name = iface.get("name", "") or ""
-    key_norm = _normalize_interface_name(iface_name)
-    for lookup in (
-        (hostname, iface_name),
-        (hostname, key_norm),
-    ):
-        provider = device_iface_to_provider.get(lookup)
-        if provider:
-            return provider
-    phys = (iface.get("physicalInterface") or "").strip()
-    if phys:
-        provider = device_iface_to_provider.get((hostname, phys))
-        if provider:
-            return provider
-    description = iface.get("description", "")
-    return desc_to_name.get(description, description)
+    return resolve_provider_name_for_iface(
+        hostname, iface, desc_to_name, device_iface_to_provider=device_iface_to_provider
+    )
 
 
 def _build_edges_with_keys(
@@ -284,6 +212,10 @@ def _build_edges_with_keys(
         if not host_id_by_name.get(hostname):
             continue
         for iface in devices[hostname]:
+            if not is_uplink_iface(
+                iface, hostname=hostname, device_iface_to_provider=device_iface_to_provider
+            ):
+                continue
             iface_name = iface.get("name", "")
             isp = _provider_name_for_iface(
                 hostname, iface, desc_to_name, device_iface_to_provider=device_iface_to_provider

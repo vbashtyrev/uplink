@@ -9,7 +9,6 @@ import sys
 import pynetbox
 
 from env_urls import load_env_file_if_present
-from generate_commit_rates import is_uplink
 from zabbix_map import (
     DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
@@ -23,11 +22,15 @@ from zabbix_map import (
     _normalize_interface_name,
     _get_zabbix_url_token,
 )
+from uplinks.netbox.inventory import (
+    is_uplink_iface,
+    load_uplink_provider_context,
+    resolve_provider_name_for_iface,
+)
 from uplinks_config import (
     DASHBOARD_NAME,
     DASHBOARD_NAME_BY_LOCATION,
     DASHBOARD_NAME_BY_PROVIDER,
-    NETBOX_AUTOMATION_TAG,
     PROVIDERS_FOR_SUMMARY,
     UPLINKS_AGGREGATE_HOST_PREFIX,
 )
@@ -37,6 +40,20 @@ load_env_file_if_present()
 # Calculated item keys on aggregate hosts `Uplinks {Provider}` (must match zabbix_provider_aggregate)
 AGGREGATE_ITEM_KEY_IN = "aggregate.bits.in[]"
 AGGREGATE_ITEM_KEY_OUT = "aggregate.bits.out[]"
+
+
+def _get_providers_from_inventory(dry_ssh_devices, debug=False):
+    """Return provider names from complete NetBox inventory or [] on error."""
+    ctx = load_uplink_provider_context(dry_ssh_devices, debug=debug)
+    if not ctx:
+        return []
+    providers = sorted(ctx.get("providers") or [])
+    if debug and providers:
+        print(
+            "NetBox: providers from complete inventory: {}".format(", ".join(providers)),
+            file=sys.stderr,
+        )
+    return providers
 
 
 def _get_providers_from_netbox(tag, debug=False):
@@ -60,7 +77,7 @@ def _get_providers_from_netbox(tag, debug=False):
         return []
 
 
-def _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name):
+def _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name, device_iface_to_provider=None):
     """Build per-(host, provider) edge list similar to zabbix_map."""
     edges_raw = []
     for hostname in sorted(devices.keys()):
@@ -68,11 +85,17 @@ def _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name):
         if not hostid:
             continue
         for iface in devices[hostname]:
-            if not is_uplink(iface):
+            if not is_uplink_iface(
+                iface, hostname=hostname, device_iface_to_provider=device_iface_to_provider
+            ):
                 continue
             iface_name = iface.get("name", "")
-            description = iface.get("description", "")
-            isp = desc_to_name.get(description, description)
+            isp = resolve_provider_name_for_iface(
+                hostname,
+                iface,
+                desc_to_name,
+                device_iface_to_provider=device_iface_to_provider,
+            )
             key_norm = _normalize_interface_name(iface_name)
             rec = items_by_host_iface.get((hostname, key_norm), {})
             itemid_in = rec.get("itemid_in") or ""
@@ -603,6 +626,11 @@ def main():
     devices = data["devices"]
     desc_to_name = load_description_map(args.description_map)
 
+    device_iface_to_provider = {}
+    inv_ctx = load_uplink_provider_context(devices, debug=args.debug)
+    if inv_ctx:
+        device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
+
     url, token = _get_zabbix_url_token()
     if not url:
         print("Set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
@@ -630,7 +658,13 @@ def main():
         if not args.no_cache:
             save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
 
-    edges = _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name)
+    edges = _build_edges(
+        devices,
+        host_id_by_name,
+        items_by_host_iface,
+        desc_to_name,
+        device_iface_to_provider=device_iface_to_provider,
+    )
     if not edges:
         print("No data for dashboard (no hosts in Zabbix or uplink without items)", file=sys.stderr)
         sys.exit(1)
@@ -656,11 +690,11 @@ def main():
         if args.providers is not None:
             providers_filter = args.providers
         else:
-            # Config + providers from NetBox with the automatization tag (no duplicates, order: config, then NetBox)
-            from_netbox = _get_providers_from_netbox(NETBOX_AUTOMATION_TAG, debug=args.debug)
+            # Config + providers from complete NetBox inventory (no duplicates, order: config, then inventory)
+            from_inventory = _get_providers_from_inventory(devices, debug=args.debug)
             seen = set()
             providers_filter = []
-            for p in list(PROVIDERS_FOR_SUMMARY) + from_netbox:
+            for p in list(PROVIDERS_FOR_SUMMARY) + from_inventory:
                 name = (p or "").strip()
                 if name and name not in seen:
                     seen.add(name)

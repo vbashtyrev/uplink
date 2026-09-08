@@ -9,12 +9,16 @@ import re
 import sys
 
 from env_urls import load_env_file_if_present
-from generate_commit_rates import is_uplink
 from uplinks.data import (
     DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
     load_description_map,
     load_devices_json,
+)
+from uplinks.netbox.inventory import (
+    is_uplink_iface,
+    load_uplink_provider_context,
+    resolve_provider_name_for_iface,
 )
 from uplinks.zabbix.client import (
     BITS_RECEIVED_NAME,
@@ -460,7 +464,15 @@ def ensure_map_exists(url, token, debug=False, width=None, height=None):
 
 
 def update_uplinks_map(
-    url, token, devices, host_id_by_name, items_by_host_iface, desc_to_name, debug=False, prune_obsolete=True
+    url,
+    token,
+    devices,
+    host_id_by_name,
+    items_by_host_iface,
+    desc_to_name,
+    debug=False,
+    prune_obsolete=True,
+    device_iface_to_provider=None,
 ):
     """
     Update the map: hosts, providers (image), links.
@@ -479,11 +491,18 @@ def update_uplinks_map(
         if not hostid:
             continue
         for iface in devices[hostname]:
-            if not is_uplink(iface):
+            if not is_uplink_iface(
+                iface, hostname=hostname, device_iface_to_provider=device_iface_to_provider
+            ):
                 continue
             iface_name = iface.get("name", "")
             description = iface.get("description", "")
-            isp = desc_to_name.get(description, description)
+            isp = resolve_provider_name_for_iface(
+                hostname,
+                iface,
+                desc_to_name,
+                device_iface_to_provider=device_iface_to_provider,
+            )
             key_norm = _normalize_interface_name(iface_name)
             rec = items_by_host_iface.get((hostname, key_norm), {})
             itemid_in = rec.get("itemid_in") or ""
@@ -967,6 +986,12 @@ def main():
     default_create_map = not args.update_map and not args.print_table
 
     use_zabbix = args.zabbix or args.create_map or args.update_map or default_create_map
+    device_iface_to_provider = {}
+    if use_zabbix:
+        inv_ctx = load_uplink_provider_context(devices, debug=args.debug)
+        if inv_ctx:
+            device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
+
     items_by_host_iface = {}
     if use_zabbix:
         url, token = _get_zabbix_url_token()
@@ -1011,7 +1036,12 @@ def main():
             for iface in interfaces:
                 iface_name = iface.get("name", "")
                 description = iface.get("description", "")
-                isp = desc_to_name.get(description, description)
+                isp = resolve_provider_name_for_iface(
+                    hostname,
+                    iface,
+                    desc_to_name,
+                    device_iface_to_provider=device_iface_to_provider,
+                )
                 row = (hostname, iface_name, description, isp)
                 if use_zabbix:
                     hostid = str(host_id_by_name.get(hostname, ""))
@@ -1037,6 +1067,7 @@ def main():
             desc_to_name,
             debug=args.debug,
             prune_obsolete=prune_map,
+            device_iface_to_provider=device_iface_to_provider,
         )
         if err_msg:
             print(err_msg, file=sys.stderr)
@@ -1067,6 +1098,7 @@ def main():
                 desc_to_name,
                 debug=args.debug,
                 prune_obsolete=True,
+                device_iface_to_provider=device_iface_to_provider,
             )
             if err_msg:
                 print(err_msg, file=sys.stderr)

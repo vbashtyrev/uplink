@@ -474,6 +474,236 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
         )
 
 
+def netbox_client_from_env(debug=False):
+    """Return pynetbox API client or None when NetBox is not configured."""
+    url = os.environ.get("NETBOX_URL", "").strip()
+    token = os.environ.get("NETBOX_TOKEN", "").strip()
+    if not url or not token:
+        if debug:
+            print(
+                "NetBox: NETBOX_URL/NETBOX_TOKEN are not set - providers only from local data",
+                file=sys.stderr,
+            )
+        return None
+    try:
+        return pynetbox.api(url, token=token)
+    except Exception as e:
+        if debug:
+            print("NetBox: failed to connect: {}".format(e), file=sys.stderr)
+        return None
+
+
+def netbox_border_tag():
+    return (os.environ.get("NETBOX_TAG") or "border").strip() or "border"
+
+
+def providers_from_complete_inventory(report):
+    """Unique Provider.name values from structurally complete inventory rows."""
+    names = set()
+    for row in report.get("complete") or []:
+        provider = (row.get("provider") or "").strip()
+        if provider:
+            names.add(provider)
+    return names
+
+
+def _normalize_iface_name(iface_name):
+    """Lowercase interface name for case-insensitive inventory/dry-ssh joins."""
+    from uplinks.zabbix.client import normalize_interface_name
+
+    return normalize_interface_name(iface_name)
+
+
+def _normalize_map_key(hostname, iface_name):
+    """Case-insensitive (device, interface) key for inventory provider map."""
+    return (hostname, _normalize_iface_name(iface_name))
+
+
+def _provider_map_get(device_iface_to_provider, hostname, iface_name):
+    """Lookup provider by interface name with case normalization."""
+    if not hostname or not iface_name:
+        return None
+    return device_iface_to_provider.get(_normalize_map_key(hostname, iface_name))
+
+
+def _build_physical_to_logical_normalized(dry_ssh_devices):
+    """Like build_physical_to_logical, with case-normalized physical interface keys."""
+    out = {}
+    if not dry_ssh_devices:
+        return out
+    for dev_name, ifaces in dry_ssh_devices.items():
+        if not isinstance(ifaces, list):
+            continue
+        for entry in ifaces:
+            if not isinstance(entry, dict):
+                continue
+            name = (entry.get("name") or "").strip()
+            phys = _normalize_iface_name((entry.get("physicalInterface") or "").strip())
+            if not name or not phys:
+                continue
+            key = (dev_name, phys)
+            out.setdefault(key, []).append(name)
+    return out
+
+
+def _build_member_to_aggregate(dry_ssh_devices):
+    """Map (device, member iface) -> aggregate name (aeN) from dry-ssh aggregateInterface."""
+    out = {}
+    if not dry_ssh_devices:
+        return out
+    for dev_name, ifaces in dry_ssh_devices.items():
+        if not isinstance(ifaces, list):
+            continue
+        for entry in ifaces:
+            if not isinstance(entry, dict):
+                continue
+            name = _normalize_iface_name((entry.get("name") or "").strip())
+            aggregate = _normalize_iface_name((entry.get("aggregateInterface") or "").strip())
+            if name and aggregate:
+                out[(dev_name, name)] = aggregate
+    return out
+
+
+def _inventory_alias_ifaces(dev_name, inv_iface, phys_to_logical, member_to_aggregate):
+    """
+    Inventory cable may terminate on member, aggregate, or logical iface.
+    Return related interface names that should inherit the same provider.
+    """
+    inv_norm = _normalize_iface_name(inv_iface)
+    aliases = {inv_norm}
+    aggregate = member_to_aggregate.get((dev_name, inv_norm))
+    if aggregate:
+        aliases.add(aggregate)
+    for anchor in list(aliases):
+        anchor_norm = _normalize_iface_name(anchor)
+        for logical in phys_to_logical.get((dev_name, anchor_norm), []):
+            aliases.add(_normalize_iface_name(logical))
+    return aliases
+
+
+def expand_provider_map_for_zabbix(inventory_map, dry_ssh_devices, debug=False):
+    """Map inventory interfaces to Zabbix names (logical aeN.0, case-normalized keys)."""
+    phys_to_logical = _build_physical_to_logical_normalized(dry_ssh_devices)
+    member_to_aggregate = _build_member_to_aggregate(dry_ssh_devices)
+    result = {}
+    substituted = []
+
+    for (dev_name, inv_iface), provider in inventory_map.items():
+        if not dev_name or not inv_iface or not provider:
+            continue
+        inv_iface_norm = _normalize_iface_name(inv_iface)
+        alias_ifaces = _inventory_alias_ifaces(
+            dev_name, inv_iface_norm, phys_to_logical, member_to_aggregate
+        )
+        for alias in alias_ifaces:
+            key = _normalize_map_key(dev_name, alias)
+            if key not in result:
+                result[key] = provider
+            if debug and alias != inv_iface_norm:
+                substituted.append((dev_name, inv_iface_norm, alias, provider))
+
+    if debug and substituted:
+        for dev_name, inv_iface, logical, provider in substituted:
+            print(
+                "NetBox provider map: {} {} -> {} ({})".format(
+                    dev_name, inv_iface, logical, provider
+                ),
+                file=sys.stderr,
+            )
+    return result
+
+
+def device_iface_provider_map_from_inventory(report, dry_ssh_devices=None, debug=False):
+    """Build (device, interface) -> provider from complete inventory rows."""
+    inventory_map = {}
+    for row in report.get("complete") or []:
+        device_name = row.get("device") or ""
+        iface_name = row.get("interface") or ""
+        provider = (row.get("provider") or "").strip()
+        if device_name and iface_name and provider:
+            inventory_map[_normalize_map_key(device_name, iface_name)] = provider
+    if dry_ssh_devices is not None:
+        return expand_provider_map_for_zabbix(inventory_map, dry_ssh_devices, debug=debug)
+    return inventory_map
+
+
+def iface_has_inventory_entry(hostname, iface, device_iface_to_provider=None):
+    """True when expanded inventory contains a provider for this interface."""
+    device_iface_to_provider = device_iface_to_provider or {}
+    iface_name = (iface.get("name") or "").strip()
+    if _provider_map_get(device_iface_to_provider, hostname, iface_name):
+        return True
+    phys = (iface.get("physicalInterface") or "").strip()
+    if _provider_map_get(device_iface_to_provider, hostname, phys):
+        return True
+    aggregate = (iface.get("aggregateInterface") or "").strip()
+    if _provider_map_get(device_iface_to_provider, hostname, aggregate):
+        return True
+    return False
+
+
+def is_uplink_iface(iface, hostname=None, device_iface_to_provider=None):
+    """Uplink by description, or by complete inventory when hostname is known."""
+    from generate_commit_rates import is_uplink
+
+    if is_uplink(iface):
+        return True
+    if not hostname:
+        return False
+    return iface_has_inventory_entry(hostname, iface, device_iface_to_provider)
+
+
+def resolve_provider_name_for_iface(hostname, iface, desc_to_name, device_iface_to_provider=None):
+    """Resolve provider name: NetBox inventory first, description map as fallback."""
+    device_iface_to_provider = device_iface_to_provider or {}
+    iface_name = (iface.get("name") or "").strip()
+    for candidate in (
+        iface_name,
+        (iface.get("physicalInterface") or "").strip(),
+        (iface.get("aggregateInterface") or "").strip(),
+    ):
+        provider = _provider_map_get(device_iface_to_provider, hostname, candidate)
+        if provider:
+            return provider
+    description = iface.get("description", "")
+    return desc_to_name.get(description, description)
+
+
+def load_uplink_provider_context(dry_ssh_devices, debug=False, border_tag=None):
+    """
+    Read-only NetBox uplink provider context for map/dashboard/aggregate.
+    Return dict with device_iface_to_provider, providers (set), stats; or None.
+    """
+    nb = netbox_client_from_env(debug=debug)
+    if nb is None:
+        return None
+
+    tag = border_tag if border_tag is not None else netbox_border_tag()
+    report = collect_uplink_inventory(nb, tag=tag, debug=debug, active_only=True)
+    stats = report.get("stats") or {}
+    error = stats.get("error")
+    if error == ERROR_AUTH_DENIED:
+        print(
+            "Warning: NetBox authentication failed; falling back to local provider data",
+            file=sys.stderr,
+        )
+        if debug:
+            print("collect_uplink_inventory: {}".format(error), file=sys.stderr)
+        return None
+    if error == ERROR_PROVIDERS_UNAVAILABLE:
+        if debug:
+            print("NetBox: providers unavailable; falling back to local provider data", file=sys.stderr)
+        return None
+
+    return {
+        "device_iface_to_provider": device_iface_provider_map_from_inventory(
+            report, dry_ssh_devices, debug=debug
+        ),
+        "providers": providers_from_complete_inventory(report),
+        "stats": stats,
+    }
+
+
 def format_inventory_text(report, dry_run=False):
     """Human-readable inventory report."""
     lines = []
