@@ -1,6 +1,6 @@
 """get_commit_rates_from_netbox: device_id lookup, circuit_id, object term attrs."""
 
-from tests.mocks.netbox_api import MockNetBox, _Record
+from tests.mocks.netbox_api import MockNetBox, _Record, wire_inventory_collector
 from zabbix_sync_commit_rate import KBPS_TO_BPS, get_commit_rates_from_netbox
 
 
@@ -30,5 +30,6 @@ def test_commit_rates_via_device_id_and_circuit_id():
         terminations=[ct],
         circuits=[circuit],
     )
+    wire_inventory_collector(nb)
     result = get_commit_rates_from_netbox(nb, tag="border", debug=True)
     assert result == {("R1", "Eth1"): 8000 * KBPS_TO_BPS}

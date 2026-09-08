@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.mocks.netbox_api import MockNetBox, _Record, build_netbox_for_commit_rates
+from tests.mocks.netbox_api import MockNetBox, _Record, build_netbox_for_commit_rates, wire_inventory_collector
 from zabbix_sync_commit_rate import (
     _is_netbox_auth_error,
     _macro_name_for_interface,
@@ -19,6 +19,7 @@ from zabbix_sync_commit_rate import (
 
 def test_is_netbox_auth_error():
     assert _is_netbox_auth_error(Exception("403 Forbidden")) is True
+    assert _is_netbox_auth_error(Exception("401 Unauthorized")) is True
     assert _is_netbox_auth_error(Exception("other")) is False
 
 
@@ -59,19 +60,30 @@ def test_load_burst_pairs(tmp_path):
 
 def test_get_commit_rates_auth_exit(monkeypatch):
     nb = MagicMock()
-    nb.circuits.circuit_terminations.filter.side_effect = Exception("403 token expired")
+    nb.circuits.providers.all.side_effect = Exception("403 token expired")
     monkeypatch.setattr(sys, "exit", lambda code=0: (_ for _ in ()).throw(SystemExit(code)))
     with pytest.raises(SystemExit) as exc:
         get_commit_rates_from_netbox(nb, tag="t", debug=True)
     assert exc.value.code == 1
 
 
+def test_get_commit_rates_auth_on_devices_filter_exit(monkeypatch):
+    nb = build_netbox_for_commit_rates()
+    nb.dcim.devices.filter = lambda **kw: (_ for _ in ()).throw(Exception("403 forbidden"))
+    monkeypatch.setattr(sys, "exit", lambda code=0: (_ for _ in ()).throw(SystemExit(code)))
+    with pytest.raises(SystemExit) as exc:
+        get_commit_rates_from_netbox(nb, tag="uplinks", debug=True)
+    assert exc.value.code == 1
+
+
 def test_get_commit_rates_no_cable_debug(capsys):
     ct = _Record(id=1, term_side="A", cable=None, circuit=_Record(id=2, commit_rate=1000))
-    nb = MockNetBox(devices=[], interfaces=[], cables=[], terminations=[ct], circuits=[])
+    nb = MockNetBox(devices=[], interfaces=[], cables=[], terminations=[ct], circuits=[ct.circuit])
+    wire_inventory_collector(nb)
     result = get_commit_rates_from_netbox(nb, tag=None, debug=True)
     assert result == {}
-    assert "circuit terminations" in capsys.readouterr().err.lower() or result == {}
+    err = capsys.readouterr().err.lower()
+    assert "incomplete" in err or "no_cable" in err or result == {}
 
 
 def test_get_commit_rates_cable_get_fails():

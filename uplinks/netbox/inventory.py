@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 
 import pynetbox
@@ -20,6 +21,9 @@ REASON_NO_DEVICE = "no_device"
 REASON_NOT_BORDER_DEVICE = "not_border_device"
 REASON_MISSING_COMMIT_RATE = "missing_commit_rate"
 
+ERROR_AUTH_DENIED = "auth_denied"
+ERROR_PROVIDERS_UNAVAILABLE = "providers_unavailable"
+
 REASON_LABELS = {
     REASON_NO_TERMINATION_A: "no side-A circuit termination",
     REASON_NO_CABLE: "termination has no cable",
@@ -29,6 +33,54 @@ REASON_LABELS = {
     REASON_NOT_BORDER_DEVICE: "device does not have required tag",
     REASON_MISSING_COMMIT_RATE: "circuit commit_rate is not set",
 }
+
+
+class NetBoxAuthError(Exception):
+    """NetBox API returned 401/403 / expired or invalid token."""
+
+
+_AUTH_HTTP_STATUS_CODES = {401, 403}
+
+
+def _exc_http_status(exc):
+    """Return HTTP status from pynetbox/requests exception, or None."""
+    for attr in ("req", "response"):
+        obj = getattr(exc, attr, None)
+        if obj is not None:
+            code = getattr(obj, "status_code", None)
+            if code is not None:
+                try:
+                    return int(code)
+                except (TypeError, ValueError):
+                    pass
+    return None
+
+
+def is_netbox_auth_error(exc):
+    """True when NetBox error looks like expired/invalid token or HTTP 401/403."""
+    status = _exc_http_status(exc)
+    if status is not None:
+        return status in _AUTH_HTTP_STATUS_CODES
+
+    msg = str(exc).lower()
+    if "token expired" in msg or ("token" in msg and "invalid" in msg):
+        return True
+    if "unauthorized" in msg or "authentication failed" in msg:
+        return True
+    if re.search(r"(?:code|status|http)\s+401\b", msg):
+        return True
+    if re.search(r"(?:code|status|http)\s+403\b", msg):
+        return True
+    if re.search(r"\b401\s+unauthorized\b", msg):
+        return True
+    if re.search(r"\b403\s+forbidden\b", msg):
+        return True
+    return False
+
+
+def _raise_if_netbox_auth(exc):
+    if is_netbox_auth_error(exc):
+        raise NetBoxAuthError(str(exc)) from exc
 
 
 def _record_has_tag(record, tag_slug):
@@ -65,6 +117,14 @@ def _circuit_status_value(circuit):
     return _normalize_choice(getattr(circuit, "status", None))
 
 
+def _circuit_passes_active_filter(circuit, active_only):
+    """When active_only, only explicit status=active passes (fail-closed)."""
+    if not active_only:
+        return True
+    status = _circuit_status_value(circuit)
+    return bool(status) and str(status).lower() == "active"
+
+
 def _provider_name(provider):
     if provider is None:
         return ""
@@ -80,12 +140,14 @@ def _resolve_provider(nb, circuit):
         if provider_id is not None:
             try:
                 provider = nb.circuits.providers.get(provider_id)
-            except Exception:
+            except Exception as e:
+                _raise_if_netbox_auth(e)
                 provider = None
     elif not isinstance(provider, str) and getattr(provider, "name", None) is None:
         try:
             provider = nb.circuits.providers.get(provider.id if hasattr(provider, "id") else provider)
-        except Exception:
+        except Exception as e:
+            _raise_if_netbox_auth(e)
             pass
     return provider
 
@@ -145,6 +207,7 @@ def _interface_from_cable(nb, cable_obj, debug=False):
     try:
         return nb.dcim.interfaces.get(interface_oid)
     except Exception as e:
+        _raise_if_netbox_auth(e)
         if debug:
             print("dcim.interfaces.get({}): {}".format(interface_oid, e), file=sys.stderr)
         return None
@@ -157,12 +220,14 @@ def _resolve_device(nb, iface):
         if dev_id is not None:
             try:
                 device = nb.dcim.devices.get(dev_id)
-            except Exception:
+            except Exception as e:
+                _raise_if_netbox_auth(e)
                 device = None
     elif not isinstance(device, str) and getattr(device, "name", None) is None:
         try:
             device = nb.dcim.devices.get(device.id if hasattr(device, "id") else device)
-        except Exception:
+        except Exception as e:
+            _raise_if_netbox_auth(e)
             device = None
     return device
 
@@ -223,9 +288,23 @@ def collect_uplink_inventory(nb, tag="border", debug=False, active_only=True):
     Return dict with keys:
       complete: structurally valid border uplinks (may include warnings)
       incomplete: broken chains with reason codes
-      stats: counters for reporting
+      stats: counters for reporting (error=auth_denied|providers_unavailable on fatal read errors)
     """
     result = {"complete": [], "incomplete": [], "stats": {}}
+    try:
+        _collect_uplink_inventory_body(nb, tag, debug, active_only, result)
+    except NetBoxAuthError as e:
+        if debug:
+            print("NetBox auth error: {}".format(e), file=sys.stderr)
+        return {
+            "complete": [],
+            "incomplete": [],
+            "stats": {"error": ERROR_AUTH_DENIED},
+        }
+    return result
+
+
+def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
     device_ids_by_tag = set()
     if tag:
         try:
@@ -234,19 +313,22 @@ def collect_uplink_inventory(nb, tag="border", debug=False, active_only=True):
             if debug:
                 print("Devices with tag {!r}: {}".format(tag, len(device_ids_by_tag)), file=sys.stderr)
         except Exception as e:
+            _raise_if_netbox_auth(e)
             if debug:
                 print("dcim.devices.filter(tag={}): {}".format(tag, e), file=sys.stderr)
 
     try:
         providers = list(nb.circuits.providers.all())
-    except Exception:
+    except Exception as e:
+        _raise_if_netbox_auth(e)
         try:
             providers = list(nb.circuits.providers.filter())
-        except Exception as e:
+        except Exception as e2:
+            _raise_if_netbox_auth(e2)
             if debug:
-                print("circuits.providers: {}".format(e), file=sys.stderr)
-            result["stats"]["error"] = "providers_unavailable"
-            return result
+                print("circuits.providers: {}".format(e2), file=sys.stderr)
+            result["stats"]["error"] = ERROR_PROVIDERS_UNAVAILABLE
+            return
 
     stats = {
         "providers": len(providers),
@@ -263,6 +345,7 @@ def collect_uplink_inventory(nb, tag="border", debug=False, active_only=True):
         try:
             circuits = list(nb.circuits.circuits.filter(provider_id=provider_id))
         except Exception as e:
+            _raise_if_netbox_auth(e)
             if debug:
                 print("circuits.filter(provider_id={}): {}".format(provider_id, e), file=sys.stderr)
             continue
@@ -270,8 +353,7 @@ def collect_uplink_inventory(nb, tag="border", debug=False, active_only=True):
         for circuit in circuits:
             stats["circuits_seen"] += 1
             base = _base_entry(provider, circuit)
-            status = _circuit_status_value(circuit)
-            if active_only and status and str(status).lower() != "active":
+            if not _circuit_passes_active_filter(circuit, active_only):
                 continue
             stats["circuits_active"] += 1
 
@@ -284,6 +366,7 @@ def collect_uplink_inventory(nb, tag="border", debug=False, active_only=True):
             try:
                 terminations = list(nb.circuits.circuit_terminations.filter(circuit_id=circuit_pk))
             except Exception as e:
+                _raise_if_netbox_auth(e)
                 if debug:
                     print("circuit_terminations.filter(circuit_id={}): {}".format(circuit_pk, e), file=sys.stderr)
                 result["incomplete"].append(_incomplete_entry(base, REASON_NO_TERMINATION_A))
@@ -306,6 +389,7 @@ def collect_uplink_inventory(nb, tag="border", debug=False, active_only=True):
             try:
                 cable_obj = nb.dcim.cables.get(cable_id)
             except Exception as e:
+                _raise_if_netbox_auth(e)
                 if debug:
                     print("dcim.cables.get({}): {}".format(cable_id, e), file=sys.stderr)
                 cable_obj = None
@@ -388,7 +472,6 @@ def collect_uplink_inventory(nb, tag="border", debug=False, active_only=True):
             ),
             file=sys.stderr,
         )
-    return result
 
 
 def format_inventory_text(report, dry_run=False):
@@ -470,7 +553,8 @@ def main(argv=None):
     nb = _get_nb()
     report = collect_uplink_inventory(nb, tag=args.tag, debug=args.debug)
     stats = report.get("stats") or {}
-    providers_error = stats.get("error") == "providers_unavailable"
+    auth_error = stats.get("error") == ERROR_AUTH_DENIED
+    providers_error = stats.get("error") == ERROR_PROVIDERS_UNAVAILABLE
 
     if args.json:
         payload = dict(report)
@@ -478,11 +562,16 @@ def main(argv=None):
         payload["read_only"] = True
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
-        if providers_error:
+        if auth_error:
+            print(
+                "Error: NetBox authentication failed (403 or invalid/expired token). Check NETBOX_TOKEN.",
+                file=sys.stderr,
+            )
+        elif providers_error:
             print("Error: NetBox providers unavailable", file=sys.stderr)
         print(format_inventory_text(report, dry_run=args.dry_run))
 
-    if providers_error:
+    if auth_error or providers_error:
         return 1
     incomplete = len(report.get("incomplete") or [])
     return 1 if incomplete else 0

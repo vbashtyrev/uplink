@@ -2,12 +2,30 @@
 
 import json
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pynetbox.core.query import RequestError
 
 from tests.mocks.netbox_api import MockNetBox, _Record
 from uplinks.netbox import inventory as inv
+
+
+def _netbox_request_error(status, url_path):
+    req = SimpleNamespace(
+        status_code=status,
+        url="https://netbox.example{}".format(url_path),
+        reason={
+            401: "Unauthorized",
+            403: "Forbidden",
+            404: "Not Found",
+        }.get(status, "Error"),
+        request=SimpleNamespace(body=None),
+        json=lambda: {},
+        text="",
+    )
+    return RequestError(req)
 
 
 def _provider(name="Cogent", provider_id=1):
@@ -223,7 +241,7 @@ def test_providers_unavailable_exit_code(monkeypatch, netbox_env, capsys):
     nb = _build_inventory_nb()
     nb.circuits.providers = _BrokenProviders()
     report = inv.collect_uplink_inventory(nb, tag="border", debug=True)
-    assert report["stats"]["error"] == "providers_unavailable"
+    assert report["stats"]["error"] == inv.ERROR_PROVIDERS_UNAVAILABLE
     assert report["complete"] == []
 
     with patch.object(inv.pynetbox, "api", lambda url, token: nb):
@@ -236,7 +254,7 @@ def test_providers_unavailable_exit_code(monkeypatch, netbox_env, capsys):
         monkeypatch.setattr(sys, "argv", ["netbox_uplinks_inventory.py", "--json"])
         assert inv.main() == 1
     payload = json.loads(capsys.readouterr().out)
-    assert payload["stats"]["error"] == "providers_unavailable"
+    assert payload["stats"]["error"] == inv.ERROR_PROVIDERS_UNAVAILABLE
 
 
 def test_main_text_output_incomplete_exit_code(monkeypatch, netbox_env, capsys):
@@ -336,3 +354,167 @@ def test_inactive_planned_circuits_skipped():
     assert report["incomplete"] == []
     assert report["stats"]["circuits_seen"] == 3
     assert report["stats"]["circuits_active"] == 1
+
+
+def test_active_only_excludes_empty_and_unknown_status():
+    active = _circuit(cid="CKT-ACTIVE", circuit_id=100, status="active")
+    no_status = _circuit(cid="CKT-NO-STATUS", circuit_id=101, status=None)
+    empty_status = _circuit(cid="CKT-EMPTY", circuit_id=102, status="")
+    unknown = _circuit(cid="CKT-UNK", circuit_id=103, status="provisioned")
+
+    device = _Record(id=1, name="R1", tag="border")
+    iface = _Record(id=10, name="Eth1", device=device, device_id=1)
+
+    def _ct_for(circ, ct_id):
+        return _Record(
+            id=ct_id,
+            term_side="A",
+            cable=_Record(id=50 + ct_id),
+            circuit=circ,
+            circuit_id=circ.id,
+        )
+
+    ct_active = _ct_for(active, 1)
+    terminations = [ct_active]
+    cables = [
+        _Record(
+            id=51,
+            a_terminations=[{"object_type": "circuits.circuittermination", "object_id": ct_active.id}],
+            b_terminations=[{"object_type": "dcim.interface", "object_id": iface.id}],
+        ),
+    ]
+
+    nb = _build_inventory_nb(
+        circuit=active,
+        device=device,
+        iface=iface,
+        ct=ct_active,
+        cable=cables[0],
+        circuits=[active, no_status, empty_status, unknown],
+    )
+    nb.circuits.circuit_terminations = type(
+        "Terms",
+        (),
+        {
+            "filter": lambda self, **kw: [
+                t for t in terminations if getattr(t, "circuit_id", None) == kw.get("circuit_id")
+            ],
+        },
+    )()
+
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert len(report["complete"]) == 1
+    assert report["complete"][0]["circuit_id"] == "CKT-ACTIVE"
+    assert report["stats"]["circuits_seen"] == 4
+    assert report["stats"]["circuits_active"] == 1
+
+
+def test_auth_denied_on_providers():
+    nb = _build_inventory_nb()
+    nb.circuits.providers = type(
+        "P",
+        (),
+        {
+            "all": lambda self: (_ for _ in ()).throw(Exception("403 Forbidden")),
+            "filter": lambda self, **kw: (_ for _ in ()).throw(Exception("403 Forbidden")),
+        },
+    )()
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["stats"]["error"] == inv.ERROR_AUTH_DENIED
+    assert report["complete"] == []
+
+
+def test_auth_denied_on_devices_filter():
+    nb = _build_inventory_nb()
+    nb.dcim.devices.filter = lambda **kw: (_ for _ in ()).throw(Exception("token expired"))
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["stats"]["error"] == inv.ERROR_AUTH_DENIED
+
+
+def test_auth_denied_on_cables_get():
+    nb = _build_inventory_nb()
+    nb.dcim.cables.get = lambda pk: (_ for _ in ()).throw(Exception("403 forbidden"))
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["stats"]["error"] == inv.ERROR_AUTH_DENIED
+
+
+def test_main_auth_exit_code(monkeypatch, netbox_env, capsys):
+    nb = _build_inventory_nb()
+    nb.circuits.providers = type(
+        "P",
+        (),
+        {
+            "all": lambda self: (_ for _ in ()).throw(Exception("403 Forbidden")),
+            "filter": lambda self, **kw: [],
+        },
+    )()
+    with patch.object(inv.pynetbox, "api", lambda url, token: nb):
+        monkeypatch.setattr(sys, "argv", ["netbox_uplinks_inventory.py", "--json"])
+        assert inv.main() == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stats"]["error"] == inv.ERROR_AUTH_DENIED
+
+
+def test_is_netbox_auth_error_404_object_id_403_not_auth():
+    exc = _netbox_request_error(404, "/api/dcim/cables/403/")
+    assert inv.is_netbox_auth_error(exc) is False
+    assert inv.is_netbox_auth_error(Exception(str(exc))) is False
+
+
+def test_is_netbox_auth_error_401_is_auth():
+    exc = _netbox_request_error(401, "/api/circuits/providers/")
+    assert inv.is_netbox_auth_error(exc) is True
+    assert inv.is_netbox_auth_error(Exception("The request failed with code 401 Unauthorized: {}")) is True
+
+
+def test_auth_mid_walk_clears_partial_results():
+    circuit1 = _circuit(cid="CKT-1", circuit_id=100)
+    circuit2 = _circuit(cid="CKT-2", circuit_id=101)
+    device = _Record(id=1, name="R1", tag="border")
+    iface = _Record(id=10, name="Eth1", device=device, device_id=1)
+
+    ct1 = _Record(id=1, term_side="A", cable=_Record(id=50), circuit=circuit1, circuit_id=100)
+    ct2 = _Record(id=2, term_side="A", cable=_Record(id=52), circuit=circuit2, circuit_id=101)
+    cable1 = _Record(
+        id=50,
+        a_terminations=[{"object_type": "circuits.circuittermination", "object_id": ct1.id}],
+        b_terminations=[{"object_type": "dcim.interface", "object_id": iface.id}],
+    )
+    cable2 = _Record(
+        id=52,
+        a_terminations=[{"object_type": "circuits.circuittermination", "object_id": ct2.id}],
+        b_terminations=[{"object_type": "dcim.interface", "object_id": iface.id}],
+    )
+    terminations = [ct1, ct2]
+
+    nb = _build_inventory_nb(
+        circuit=circuit1,
+        device=device,
+        iface=iface,
+        ct=ct1,
+        cable=cable1,
+        circuits=[circuit1, circuit2],
+    )
+    nb.circuits.circuit_terminations = type(
+        "Terms",
+        (),
+        {
+            "filter": lambda self, **kw: [
+                t for t in terminations if getattr(t, "circuit_id", None) == kw.get("circuit_id")
+            ],
+        },
+    )()
+
+    def cable_get(pk):
+        if pk == 50:
+            return cable1
+        if pk == 52:
+            raise _netbox_request_error(403, "/api/dcim/cables/52/")
+        return None
+
+    nb.dcim.cables.get = cable_get
+
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["stats"] == {"error": inv.ERROR_AUTH_DENIED}
+    assert report["complete"] == []
+    assert report["incomplete"] == []

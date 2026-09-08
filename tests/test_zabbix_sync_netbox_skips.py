@@ -1,6 +1,6 @@
 """get_commit_rates_from_netbox skip paths (no interface on cable, untagged device)."""
 
-from tests.mocks.netbox_api import MockNetBox, _Record
+from tests.mocks.netbox_api import MockNetBox, _Record, wire_inventory_collector
 from zabbix_sync_commit_rate import get_commit_rates_from_netbox
 
 
@@ -12,6 +12,7 @@ def test_skips_termination_without_interface_on_cable():
         b_terminations=[{"object_type": "circuits.circuittermination", "object_id": 2}],
     )
     nb = MockNetBox(devices=[], interfaces=[], cables=[cable], terminations=[ct], circuits=[ct.circuit])
+    wire_inventory_collector(nb)
     assert get_commit_rates_from_netbox(nb, tag=None, debug=True) == {}
 
 
@@ -26,4 +27,5 @@ def test_skips_untagged_when_tag_filter():
         b_terminations=[{"object_type": "dcim.interface", "object_id": 10}],
     )
     nb = MockNetBox(devices=[device], interfaces=[iface], cables=[cable], terminations=[ct], circuits=[circuit])
+    wire_inventory_collector(nb)
     assert get_commit_rates_from_netbox(nb, tag="border", debug=False) == {}

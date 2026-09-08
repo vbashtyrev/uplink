@@ -18,6 +18,12 @@ from zabbix_map import (
     validate_zabbix_token,
     zabbix_request,
 )
+from uplinks.netbox.inventory import (
+    ERROR_AUTH_DENIED,
+    ERROR_PROVIDERS_UNAVAILABLE,
+    collect_uplink_inventory,
+    is_netbox_auth_error,
+)
 from uplinks_config import (
     THRESHOLD_ITEM_KEY,
     THRESHOLD_PERCENT_HIGH,
@@ -274,158 +280,85 @@ def apply_logical_context(commit_rates, dry_ssh_devices, debug=False):
     return result
 
 
-def _is_netbox_auth_error(exc):
-    """Checking if the NetBox error is similar to an expired/invalid token (403, etc.)."""
-    msg = str(exc).lower()
-    return (
-        "403" in msg
-        or "forbidden" in msg
-        or "token expired" in msg
-        or ("token" in msg and "invalid" in msg)
-    )
+_NETBOX_AUTH_MESSAGE = (
+    "NetBox error: token has expired or access is denied (403). "
+    "Check NETBOX_TOKEN and update the token if necessary."
+)
+
+
+# Backward-compatible alias for tests and callers.
+_is_netbox_auth_error = is_netbox_auth_error
 
 
 def get_commit_rates_from_netbox(nb, tag, debug=False):
     """
-    By NetBox: interfaces connected by cable to circuit termination (A), and commit_rate of the circuit.
+    By NetBox: active circuits on border devices (via shared inventory collector).
     Return: dict (device_name, interface_name) -> commit_rate_bps (int).
-    Only devices with the tag tag are taken into account (a filter by tag is required).
+    Only devices with the tag tag are taken into account when tag is set.
     """
-    result = {}
-    try:
-        cts = list(nb.circuits.circuit_terminations.filter(term_side="A"))
-    except Exception as e:
-        if _is_netbox_auth_error(e):
-            print(
-                "NetBox error: token has expired or access is denied (403). Check NETBOX_TOKEN and update the token if necessary.",
-                file=sys.stderr,
-            )
-            if debug:
-                print("circuit_terminations.filter: {}".format(e), file=sys.stderr)
-            sys.exit(1)
+    report = collect_uplink_inventory(nb, tag=tag, debug=debug, active_only=True)
+    stats = report.get("stats") or {}
+    error = stats.get("error")
+    if error == ERROR_AUTH_DENIED:
+        print(_NETBOX_AUTH_MESSAGE, file=sys.stderr)
         if debug:
-            print("circuit_terminations.filter: {}".format(e), file=sys.stderr)
-        return result
+            print("collect_uplink_inventory: {}".format(error), file=sys.stderr)
+        sys.exit(1)
+    if error == ERROR_PROVIDERS_UNAVAILABLE:
+        if debug:
+            print("NetBox: providers unavailable", file=sys.stderr)
+        return {}
 
-    if debug:
-        print("NetBox: circuit terminations (A): {}, with cable to dcim.interface, filter by tag {!r}". format(len(cts), tag or "(none)"), file=sys.stderr)
+    result = {}
+    skipped_missing_commit_rate = 0
 
-    device_ids_by_tag = set()
-    if tag:
-        try:
-            devices_tagged = list(nb.dcim.devices.filter(tag=tag))
-            device_ids_by_tag = {d.id for d in devices_tagged}
+    for row in report.get("complete") or []:
+        commit_rate_kbps = row.get("commit_rate_kbps")
+        if commit_rate_kbps is None:
+            skipped_missing_commit_rate += 1
             if debug:
-                print("Devices with tag {!r}: {} pcs.".format(tag, len(device_ids_by_tag)), file=sys.stderr)
-        except Exception as e:
-            if _is_netbox_auth_error(e):
                 print(
-                    "NetBox error: token has expired or access is denied (403). Check NETBOX_TOKEN and update the token if necessary.",
+                    "Skip missing commit_rate: device={} interface={} circuit={}".format(
+                        row.get("device") or "?",
+                        row.get("interface") or "?",
+                        row.get("circuit_id") or "?",
+                    ),
                     file=sys.stderr,
                 )
-                if debug:
-                    print("dcim.devices.filter: {}".format(e), file=sys.stderr)
-                sys.exit(1)
-            if debug:
-                print("filter(tag=): {}".format(e), file=sys.stderr)
-
-    skipped_no_cable = 0
-    skipped_no_interface = 0
-    skipped_tag = 0
-
-    for ct in cts:
-        cable = getattr(ct, "cable", None)
-        if cable is None:
-            skipped_no_cable += 1
-            continue
-        cable_id = cable.id if hasattr(cable, "id") else cable
-        if not cable_id:
-            skipped_no_cable += 1
-            continue
-        try:
-            cable_obj = nb.dcim.cables.get(cable_id)
-        except Exception:
-            if debug:
-                print("cables.get({}) failed".format(cable_id), file=sys.stderr)
-            continue
-        if not cable_obj:
-            continue
-
-        a_terms = getattr(cable_obj, "a_terminations", None) or []
-        b_terms = getattr(cable_obj, "b_terminations", None) or []
-        if not isinstance(a_terms, list):
-            a_terms = [a_terms] if a_terms else []
-        if not isinstance(b_terms, list):
-            b_terms = [b_terms] if b_terms else []
-
-        # One end is circuit termination, the other is interface
-        interface_oid = None
-        for term in a_terms + b_terms:
-            if isinstance(term, dict):
-                ot = term.get("object_type") or term.get("object_type_id")
-                oid = term.get("object_id")
-            else:
-                ot = getattr(term, "object_type", None) or getattr(term, "object_type_id", None)
-                oid = getattr(term, "object_id", None)
-            if not oid:
-                continue
-            ot = (ot or "").lower()
-            if "interface" in ot and "circuit" not in ot:
-                interface_oid = oid
-                break
-        if not interface_oid:
-            skipped_no_interface += 1
-            continue
-
-        try:
-            iface = nb.dcim.interfaces.get(interface_oid)
-        except Exception:
-            continue
-        if not iface:
-            continue
-
-        device = getattr(iface, "device", None)
-        if device is None:
-            try:
-                dev_id = getattr(iface, "device_id", None) or iface.device
-                if dev_id is not None:
-                    device = nb.dcim.devices.get(dev_id)
-            except Exception:
-                pass
-        if not device:
-            continue
-        dev_id = device.id if hasattr(device, "id") else device
-        if tag and dev_id not in device_ids_by_tag:
-            skipped_tag += 1
-            continue
-        device_name = getattr(device, "name", None) or ""
-        iface_name = getattr(iface, "name", None) or ""
-        if not device_name or not iface_name:
-            continue
-
-        circuit = getattr(ct, "circuit", None)
-        if circuit is None:
-            try:
-                cid = getattr(ct, "circuit_id", None) or ct.circuit
-                if cid is not None:
-                    circuit = nb.circuits.circuits.get(cid)
-            except Exception:
-                pass
-        if not circuit:
-            continue
-        commit_rate_kbps = getattr(circuit, "commit_rate", None)
-        if commit_rate_kbps is None:
             continue
         try:
             commit_rate_kbps = int(commit_rate_kbps)
         except (TypeError, ValueError):
+            skipped_missing_commit_rate += 1
             continue
-        commit_rate_bps = commit_rate_kbps * KBPS_TO_BPS
-        result[(device_name, iface_name)] = commit_rate_bps
+
+        device_name = row.get("device") or ""
+        iface_name = row.get("interface") or ""
+        if not device_name or not iface_name:
+            continue
+        result[(device_name, iface_name)] = commit_rate_kbps * KBPS_TO_BPS
 
     if debug:
-        print("Missed: without cable {}, not interface {}, by tag {}; total pairs: {}".format(
-            skipped_no_cable, skipped_no_interface, skipped_tag, len(result)), file=sys.stderr)
+        incomplete = report.get("incomplete") or []
+        print(
+            "NetBox inventory: active={}, complete={}, incomplete={}, missing commit_rate={}, pairs with rate: {}".format(
+                stats.get("circuits_active", 0),
+                stats.get("complete", 0),
+                len(incomplete),
+                skipped_missing_commit_rate,
+                len(result),
+            ),
+            file=sys.stderr,
+        )
+        for row in incomplete:
+            print(
+                "INCOMPLETE circuit={} reason={} ({})".format(
+                    row.get("circuit_id") or "?",
+                    row.get("reason") or "?",
+                    row.get("reason_label") or row.get("reason") or "?",
+                ),
+                file=sys.stderr,
+            )
     return result
 
 
