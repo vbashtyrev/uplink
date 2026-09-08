@@ -55,7 +55,11 @@ def test_build_bandwidth_util_expression():
 
 def test_is_netbox_auth_error():
     assert _is_netbox_auth_error(Exception("HTTP 403 Forbidden")) is True
+    assert _is_netbox_auth_error(Exception("The request failed with code 401 Unauthorized: {}")) is True
     assert _is_netbox_auth_error(Exception("token expired")) is True
+    assert _is_netbox_auth_error(
+        Exception("The requested url: https://netbox.example/api/dcim/cables/403/ could not be found.")
+    ) is False
     assert _is_netbox_auth_error(Exception("timeout")) is False
 
 

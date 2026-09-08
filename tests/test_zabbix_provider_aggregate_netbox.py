@@ -71,7 +71,7 @@ def test_build_edges_prefers_inventory_over_description_map():
             "bits_out": "net.if.out[51]",
         },
     }
-    inventory_map = {("ALA-KZT-7280TR-1", "Ethernet51/1"): "Cogent NetBox"}
+    inventory_map = {("ALA-KZT-7280TR-1", "ethernet51/1"): "Cogent NetBox"}
     edges = _build_edges_with_keys(
         devices,
         {"ALA-KZT-7280TR-1": "101"},
@@ -80,6 +80,46 @@ def test_build_edges_prefers_inventory_over_description_map():
         device_iface_to_provider=inventory_map,
     )
     assert edges[0][1] == "Cogent NetBox"
+
+
+def test_build_edges_inventory_aware_uplink_filter():
+    devices = {
+        "R1": [
+            {"name": "Ethernet51/1", "description": "Transit handoff only"},
+            {"name": "Ethernet52/1", "description": "Management link"},
+        ],
+    }
+    items = {
+        ("R1", "ethernet51/1"): {"bits_in": "in", "bits_out": "out"},
+        ("R1", "ethernet52/1"): {"bits_in": "in2", "bits_out": "out2"},
+    }
+    inventory_map = {("R1", "ethernet51/1"): "ManualISP"}
+    edges = _build_edges_with_keys(
+        devices,
+        {"R1": "1"},
+        items,
+        {},
+        device_iface_to_provider=inventory_map,
+    )
+    assert len(edges) == 1
+    assert edges[0][1] == "ManualISP"
+
+
+def test_build_edges_fallback_skips_non_uplink_without_inventory():
+    devices = {
+        "R1": [
+            {"name": "Ethernet52/1", "description": "Management link"},
+        ],
+    }
+    items = {("R1", "ethernet52/1"): {"bits_in": "in", "bits_out": "out"}}
+    edges = _build_edges_with_keys(
+        devices,
+        {"R1": "1"},
+        items,
+        {},
+        device_iface_to_provider={},
+    )
+    assert edges == []
 
 
 def test_expand_provider_map_logical_context():
@@ -145,7 +185,7 @@ def test_load_netbox_aggregate_context_manual_provider(monkeypatch):
         ctx = _load_netbox_aggregate_context(dry_ssh, debug=False)
     assert ctx is not None
     assert "ManualISP" in ctx["providers"]
-    assert ctx["device_iface_to_provider"][("ALA-KZT-7280TR-1", "Ethernet51/1")] == "ManualISP"
+    assert ctx["device_iface_to_provider"][("ALA-KZT-7280TR-1", "ethernet51/1")] == "ManualISP"
     assert ctx["provider_limits_gbps"]["ManualISP"] == 7.0
 
 
@@ -160,7 +200,7 @@ def test_device_iface_provider_map_from_inventory():
         ],
     }
     mapping = _device_iface_provider_map_from_inventory(report, {})
-    assert mapping[("R1", "Ethernet51/1")] == "Cogent"
+    assert mapping[("R1", "ethernet51/1")] == "Cogent"
 
 
 def test_run_netbox_inventory_provider_and_limit(tmp_path, monkeypatch):

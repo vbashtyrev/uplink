@@ -130,6 +130,7 @@ def test_main_provider_errors_continue(tmp_path, monkeypatch, capsys, zabbix_env
         .on("service.create", lambda p: (_ for _ in ()).throw(RuntimeError("create fail")))
         .activate(monkeypatch)
     )
+    monkeypatch.setattr("zabbix_provider_services.netbox_client_from_env", lambda **k: None)
     monkeypatch.setattr(sys, "argv", ["zabbix_provider_services.py", "-f", str(cr)])
     svc.main()
     err = capsys.readouterr().err

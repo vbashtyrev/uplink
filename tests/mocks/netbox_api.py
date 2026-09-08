@@ -122,13 +122,19 @@ def build_netbox_for_commit_rates(
     circuit_id=100,
     provider_id=1,
     provider_name="TestProvider",
+    provider_custom_fields=None,
+    circuit_custom_fields=None,
     circuit_status="active",
 ):
     """
     Build NetBox mock wired for zabbix_sync_commit_rate.get_commit_rates_from_netbox:
     provider -> active circuit -> termination (A) -> cable -> interface on tagged device.
     """
-    provider = _Record(id=provider_id, name=provider_name)
+    provider = _Record(
+        id=provider_id,
+        name=provider_name,
+        custom_fields=provider_custom_fields or {},
+    )
     device = _Record(id=device_id, name=device_name, tag=device_tag if tag_device else None)
     iface = _Record(id=iface_id, name=iface_name, device=device, device_id=device_id)
     circuit = _Record(
@@ -138,6 +144,7 @@ def build_netbox_for_commit_rates(
         provider=provider_id,
         commit_rate=commit_rate_kbps,
         status=circuit_status,
+        custom_fields=circuit_custom_fields or {},
     )
     ct = _Record(
         id=ct_id,
