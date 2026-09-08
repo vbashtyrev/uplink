@@ -1,5 +1,6 @@
 """run_uplinks_full.py additional paths."""
 
+import json
 import os
 import subprocess
 import sys
@@ -68,8 +69,18 @@ def test_main_fetch_step_writes_dry_ssh(monkeypatch, tmp_path):
     monkeypatch.setattr(full, "DEFAULT_DESC_MAP", "description_to_name.json")
 
     payload = '{"devices": {"h1": []}}'
+    inventory_payload = json.dumps(
+        {
+            "complete": [{"device": "h1", "interface": "Eth1", "provider": "P"}],
+            "incomplete": [],
+            "stats": {"complete": 1, "incomplete": 0},
+        }
+    )
 
     def fake_run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
+        if "netbox_uplinks_inventory.py" in argv and capture_stdout_to_file:
+            Path(capture_stdout_to_file).write_text(inventory_payload, encoding="utf-8")
+            return True, "", ""
         return True, payload, ""
 
     monkeypatch.setattr(full, "run_cmd", fake_run_cmd)

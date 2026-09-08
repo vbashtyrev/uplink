@@ -16,6 +16,7 @@ import paramiko
 import pynetbox
 
 from env_urls import load_env_file_if_present
+from uplinks.netbox.inventory import device_names_from_complete_inventory
 from uplinks_config import UPLINK_VRF_NAME
 
 load_env_file_if_present()
@@ -1541,6 +1542,21 @@ def _run_report(netbox_tag, ssh_suffix):
 DEFAULT_STATS_FILE = "dry-ssh.json"
 
 
+def _load_inventory_device_names(path):
+    """Load netbox_uplinks_inventory.py JSON; return (device_names, None) or (None, error_msg)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+    except FileNotFoundError:
+        return None, "Inventory file not found: {}".format(path)
+    except json.JSONDecodeError as e:
+        return None, "Error parsing inventory JSON in file: {}".format(e)
+    names = device_names_from_complete_inventory(report)
+    if not names:
+        return None, "Inventory file has no complete device entries."
+    return names, None
+
+
 def _load_stats_file(path):
     """Load JSON with the key devices. Return (data, None) or (None, error_msg)."""
     try:
@@ -1583,6 +1599,12 @@ def main():
         const=DEFAULT_STATS_FILE,
         default=None,
         help="When --fetch: load FILE, substitute the data for the polled hosts and save back (%s by default). The remaining hosts in the file are not affected." %DEFAULT_STATS_FILE,
+    )
+    parser.add_argument(
+        "--inventory-file",
+        metavar="FILE",
+        default=None,
+        help="When --fetch: limit SSH polling to devices from complete entries in NetBox inventory JSON (netbox_uplinks_inventory.py --json)",
     )
     args = parser.parse_args()
 
@@ -1673,6 +1695,29 @@ def main():
     if not devices_to_fetch:
         print("No devices found by filter (platform={}, host={})".format(args.platform, args.host or "all"), file=sys.stderr)
         return 0
+
+    if args.inventory_file:
+        inv_names, inv_err = _load_inventory_device_names(args.inventory_file)
+        if inv_err:
+            print(inv_err, file=sys.stderr)
+            return 1
+        before_count = len(devices_to_fetch)
+        devices_to_fetch = [d for d in devices_to_fetch if d.name in inv_names]
+        print(
+            "Inventory filter ({}): {} -> {} device(s).".format(
+                args.inventory_file, before_count, len(devices_to_fetch)
+            ),
+            flush=True,
+            file=progress_file,
+        )
+        if not devices_to_fetch:
+            print(
+                "No devices to fetch after inventory filter (platform={}, host={}).".format(
+                    args.platform, args.host or "all"
+                ),
+                file=sys.stderr,
+            )
+            return 1
 
     n_arista = sum(1 for d in devices_to_fetch if is_arista_platform(get_device_platform_name(d, nb)))
     n_juniper = len(devices_to_fetch) - n_arista

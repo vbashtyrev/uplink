@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 
 dry-ssh.json
+netbox_inventory.json
 run_logs/
 zabbix_uplinks_cache.json
 description_to_name.json

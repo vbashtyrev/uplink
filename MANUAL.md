@@ -60,7 +60,8 @@ python run_uplinks_full.py
 Он использует:
 
 ```text
-NetBox inventory → SSH → existing-only checks → Zabbix
+NetBox inventory (netbox_inventory.json) → SSH только по найденным устройствам
+→ existing-only checks → Zabbix
 ```
 
 

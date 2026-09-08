@@ -42,8 +42,10 @@ python run_uplinks_full.py --auto
 
 **Шаги `run_uplinks_full.py` (по порядку):**
 
-1. `netbox_uplinks_inventory.py --dry-run` — чтение цепочек NetBox
-2. `uplinks_stats.py --fetch --json` → `dry-ssh.json`
+1. `netbox_uplinks_inventory.py --json --dry-run` — чтение цепочек NetBox
+   в локальный `netbox_inventory.json`
+2. `uplinks_stats.py --fetch --json --inventory-file netbox_inventory.json`
+   → `dry-ssh.json` только для найденных устройств
 3. `netbox_checks.py` — сверка существующих интерфейсов с `--existing-only`
 4. `zabbix_sync_commit_rate.py` — макросы и триггеры по готовым подключениям
 5. `zabbix_provider_aggregate.py` — агрегаты провайдеров

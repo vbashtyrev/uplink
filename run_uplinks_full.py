@@ -3,6 +3,7 @@
 """Run the full uplinks pipeline: devices → NetBox → Zabbix with reporting."""
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -10,12 +11,14 @@ import time
 from datetime import datetime
 
 from env_urls import load_env_file
+from uplinks.netbox.inventory import ERROR_AUTH_DENIED
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DRY_SSH = "dry-ssh.json"
 DEFAULT_COMMIT_RATES = "commit_rates.json"
 DEFAULT_DESC_MAP = "description_to_name.json"
+DEFAULT_NETBOX_INVENTORY = "netbox_inventory.json"
 RUN_LOGS_DIR = "run_logs" # log folder: date_time_run.log and date_time_debug.log
 CACHE_AGE_SECONDS = 24 * 3600 # dry-ssh.json cache for 24 hours for step 1
 
@@ -98,6 +101,103 @@ def _write_run_report(report_lines, run_log_path, report_file, log_func=None):
                 log_func("The report is written in {}".format(report_file))
         except Exception as e:
             print("Failed to write report to {}: {}".format(report_file, e), file=sys.stderr)
+
+
+def _load_inventory_report(path):
+    """Load inventory JSON written by netbox_uplinks_inventory.py --json."""
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _inventory_pre_ssh_gate(report):
+    """Return (ok, detail) for human-mode pre-SSH inventory gate."""
+    stats = report.get("stats") or {}
+    if stats.get("error") == ERROR_AUTH_DENIED:
+        return False, "NetBox authentication failed (check NETBOX_TOKEN)"
+    if not report.get("complete"):
+        return False, "No complete inventory entries; SSH collection skipped"
+    return True, ""
+
+
+def _log_inventory_incomplete(log, report):
+    """Log incomplete inventory rows without failing the run."""
+    incomplete = report.get("incomplete") or []
+    if not incomplete:
+        return
+    log("  Incomplete inventory entries ({}):".format(len(incomplete)))
+    for row in incomplete:
+        extra = []
+        if row.get("device"):
+            extra.append("device={}".format(row["device"]))
+        if row.get("interface"):
+            extra.append("interface={}".format(row["interface"]))
+        suffix = (" " + " ".join(extra)) if extra else ""
+        log(
+            "  INCOMPLETE provider={} circuit={} reason={} ({}){}".format(
+                row.get("provider") or "?",
+                row.get("circuit_id") or "?",
+                row.get("reason") or "?",
+                row.get("reason_label") or row.get("reason") or "?",
+                suffix,
+            )
+        )
+
+
+def _run_pre_ssh_inventory(python, inventory_path, timeout, log, step, debug_log_path, report_lines, errors, report_file, run_log_path):
+    """Human mode: fetch read-only inventory before SSH. Return True when SSH may proceed."""
+    log(
+        "Step 0: NetBox uplink inventory (read-only, pre-SSH) -> {} ...".format(
+            os.path.basename(inventory_path)
+        )
+    )
+    ok, out, err = run_cmd(
+        [python, "netbox_uplinks_inventory.py", "--json", "--dry-run"],
+        cwd=SCRIPT_DIR,
+        timeout=timeout,
+        capture_stdout_to_file=inventory_path,
+    )
+    _append_debug(
+        debug_log_path,
+        "Step 0: NetBox inventory (pre-SSH)",
+        stdout=out or "",
+        stderr=err or "",
+        ok=ok,
+    )
+    if not os.path.isfile(inventory_path):
+        detail = err or out or "inventory file was not created"
+        step("Step 0: NetBox inventory (pre-SSH)", False, detail)
+        _finish(report_lines, errors, report_file, run_log_path)
+        sys.exit(1)
+
+    try:
+        inventory_report = _load_inventory_report(inventory_path)
+    except (OSError, json.JSONDecodeError) as e:
+        step("Step 0: NetBox inventory (pre-SSH)", False, "failed to read {}: {}".format(inventory_path, e))
+        _finish(report_lines, errors, report_file, run_log_path)
+        sys.exit(1)
+
+    _log_inventory_incomplete(log, inventory_report)
+    inv_ok, inv_detail = _inventory_pre_ssh_gate(inventory_report)
+    complete_count = len(inventory_report.get("complete") or [])
+    incomplete_count = len(inventory_report.get("incomplete") or [])
+    if inv_ok:
+        step(
+            "Step 0: NetBox inventory (pre-SSH)",
+            True,
+            "complete={}, incomplete={} -> {}".format(
+                complete_count, incomplete_count, os.path.basename(inventory_path)
+            ),
+        )
+    else:
+        step("Step 0: NetBox inventory (pre-SSH)", False, inv_detail)
+        _finish(report_lines, errors, report_file, run_log_path)
+        sys.exit(1)
+    if not ok:
+        log(
+            "  Note: netbox_uplinks_inventory.py exited non-zero due to incomplete entries; continuing with complete inventory."
+        )
+    log("")
+    return True
 
 
 def main():
@@ -250,6 +350,7 @@ def main():
         debug_log_path = None
 
     skip_ssh_fetch = args.no_fetch or args.from_file
+    inventory_path = os.path.join(SCRIPT_DIR, DEFAULT_NETBOX_INVENTORY)
 
     # 1. Data collection from devices; cache for 24 hours - if there is fresh dry-ssh.json, the step is skipped (workaround: --refresh)
     if skip_ssh_fetch:
@@ -277,9 +378,26 @@ def main():
             log("[SKIP] Step 1: Data collection (cache is current, {} < 24h). To refresh, run with --refresh".format(dry_ssh_path))
             report_lines.append("")
         else:
+            inventory_ready = False
+            if not args.auto:
+                inventory_ready = _run_pre_ssh_inventory(
+                    python,
+                    inventory_path,
+                    timeout,
+                    log,
+                    step,
+                    debug_log_path,
+                    report_lines,
+                    errors,
+                    args.report,
+                    run_log_path,
+                )
             log("Step 1: Collect data from devices (uplinks_stats.py --fetch --json) -> {} ...".format(dry_ssh_path))
+            stats_argv = [python, "uplinks_stats.py", "--fetch", "--json"]
+            if inventory_ready:
+                stats_argv.extend(["--inventory-file", inventory_path])
             ok, out, err = run_cmd(
-                [python, "uplinks_stats.py", "--fetch", "--json"],
+                stats_argv,
                 cwd=SCRIPT_DIR,
                 timeout=timeout,
             )
