@@ -24,6 +24,12 @@ from zabbix_map import (
     _get_zabbix_url_token,
     validate_zabbix_token,
 )
+from uplinks.netbox.inventory import (
+    ERROR_AUTH_DENIED,
+    ERROR_PROVIDERS_UNAVAILABLE,
+    collect_uplink_inventory,
+)
+from zabbix_sync_commit_rate import _pick_one_logical, build_physical_to_logical
 from uplinks_config import (
     THRESHOLD_PERCENT_WARN,
     THRESHOLD_PERCENT_HIGH,
@@ -35,7 +41,6 @@ from uplinks_config import (
     SLA_TRIGGER_TAG_VALUE,
     UPLINKS_AGGREGATE_HOST_PREFIX,
     UPLINKS_AGGREGATE_GROUP,
-    NETBOX_AUTOMATION_TAG,
 )
 
 load_env_file_if_present()
@@ -49,8 +54,178 @@ VALUE_TYPE_NUMERIC = 3  # unsigned
 UNITS_BPS = "bps"
 
 
+def _netbox_border_tag():
+    return (os.environ.get("NETBOX_TAG") or "border").strip() or "border"
+
+
+def _get_netbox_client(debug=False):
+    """Return pynetbox API client or None when NetBox is not configured."""
+    url = os.environ.get("NETBOX_URL", "").strip()
+    token = os.environ.get("NETBOX_TOKEN", "").strip()
+    if not url or not token:
+        if debug:
+            print(
+                "NetBox: NETBOX_URL/NETBOX_TOKEN are not set - aggregates only by providers from the data",
+                file=sys.stderr,
+            )
+        return None
+    try:
+        return pynetbox.api(url, token=token)
+    except Exception as e:
+        if debug:
+            print("NetBox: failed to connect: {}".format(e), file=sys.stderr)
+        return None
+
+
+def _provider_limit_gbps_from_custom_fields(provider):
+    custom_fields = getattr(provider, "custom_fields", None) or {}
+    if not isinstance(custom_fields, dict):
+        return None
+    value = custom_fields.get("aggregate_limit_gbps")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_provider_limits_gbps(nb, debug=False):
+    """Provider.name -> aggregate_limit_gbps from NetBox custom fields."""
+    limits = {}
+    try:
+        providers = list(nb.circuits.providers.all())
+    except Exception as e:
+        if debug:
+            print("NetBox: circuits.providers.all(): {}".format(e), file=sys.stderr)
+        return limits
+    for provider in providers:
+        name = getattr(provider, "name", None)
+        if not name:
+            continue
+        limit_gbps = _provider_limit_gbps_from_custom_fields(provider)
+        if limit_gbps is not None:
+            limits[name] = limit_gbps
+    if debug and limits:
+        print(
+            "NetBox: aggregate_limit_gbps for: {}".format(", ".join(sorted(limits.keys()))),
+            file=sys.stderr,
+        )
+    return limits
+
+
+def _providers_from_inventory_report(report):
+    names = set()
+    for row in report.get("complete") or []:
+        provider = (row.get("provider") or "").strip()
+        if provider:
+            names.add(provider)
+    return names
+
+
+def _expand_provider_map_for_zabbix(inventory_map, dry_ssh_devices, debug=False):
+    """Map physical inventory interfaces to logical Zabbix interface names when needed."""
+    result = dict(inventory_map)
+    phys_to_logical = build_physical_to_logical(dry_ssh_devices)
+    substituted = []
+    for (dev_name, phys_iface), logicals in phys_to_logical.items():
+        provider = inventory_map.get((dev_name, phys_iface))
+        if not provider:
+            continue
+        logical = _pick_one_logical(logicals)
+        if logical:
+            result[(dev_name, logical)] = provider
+            if logical != phys_iface:
+                substituted.append((dev_name, phys_iface, logical, provider))
+    if debug and substituted:
+        for dev_name, phys_iface, logical, provider in substituted:
+            print(
+                "NetBox provider map: {} {} -> {} ({})".format(
+                    dev_name, phys_iface, logical, provider
+                ),
+                file=sys.stderr,
+            )
+    return result
+
+
+def _device_iface_provider_map_from_inventory(report, dry_ssh_devices, debug=False):
+    """Build (device, interface) -> provider from complete inventory rows."""
+    inventory_map = {}
+    for row in report.get("complete") or []:
+        device_name = row.get("device") or ""
+        iface_name = row.get("interface") or ""
+        provider = (row.get("provider") or "").strip()
+        if device_name and iface_name and provider:
+            inventory_map[(device_name, iface_name)] = provider
+    return _expand_provider_map_for_zabbix(inventory_map, dry_ssh_devices, debug=debug)
+
+
+def _load_netbox_aggregate_context(dry_ssh_devices, debug=False):
+    """
+    Read-only NetBox inventory for provider aggregates.
+    Return dict with device_iface_to_provider, providers, provider_limits_gbps, stats; or None.
+    """
+    nb = _get_netbox_client(debug=debug)
+    if nb is None:
+        return None
+
+    tag = _netbox_border_tag()
+    report = collect_uplink_inventory(nb, tag=tag, debug=debug, active_only=True)
+    stats = report.get("stats") or {}
+    error = stats.get("error")
+    if error == ERROR_AUTH_DENIED:
+        print(
+            "Warning: NetBox authentication failed; falling back to local provider data",
+            file=sys.stderr,
+        )
+        if debug:
+            print("collect_uplink_inventory: {}".format(error), file=sys.stderr)
+        return None
+    if error == ERROR_PROVIDERS_UNAVAILABLE:
+        if debug:
+            print("NetBox: providers unavailable; falling back to local provider data", file=sys.stderr)
+        return None
+
+    device_iface_to_provider = _device_iface_provider_map_from_inventory(
+        report, dry_ssh_devices, debug=debug
+    )
+    return {
+        "device_iface_to_provider": device_iface_to_provider,
+        "providers": _providers_from_inventory_report(report),
+        "provider_limits_gbps": _collect_provider_limits_gbps(nb, debug=debug),
+        "stats": stats,
+    }
+
+
+def _resolve_provider_limit_bps(provider, netbox_limits_gbps, legacy_limits_gbps, debug=False):
+    """NetBox aggregate_limit_gbps first; commit_rates.json _provider_limits as transition fallback."""
+    if provider in netbox_limits_gbps:
+        return netbox_limits_gbps[provider] * 1e9
+
+    legacy_entry = legacy_limits_gbps.get(provider)
+    if legacy_entry is None:
+        return None
+
+    print(
+        "Warning: provider {!r} has no aggregate_limit_gbps in NetBox; "
+        "using commit_rates.json _provider_limits (transition fallback)".format(provider),
+        file=sys.stderr,
+    )
+    if debug:
+        print(
+            "Transition fallback limit for {} from commit_rates.json: {} Gbps".format(
+                provider, legacy_entry
+            ),
+            file=sys.stderr,
+        )
+    try:
+        return float(legacy_entry) * 1e9
+    except (TypeError, ValueError):
+        return None
+
+
 def _get_providers_from_netbox(tag, debug=False):
-    """Providers from NetBox with the automatization tag. Return a list of names or [] on error/no access."""
+    """Legacy helper: providers from NetBox with a tag. Kept for tests/backward compatibility."""
     url = os.environ.get("NETBOX_URL", "").strip()
     token = os.environ.get("NETBOX_TOKEN", "").strip()
     if not url or not token:
@@ -79,7 +254,30 @@ def _get_providers_from_netbox(tag, debug=False):
         return []
 
 
-def _build_edges_with_keys(devices, host_id_by_name, items_by_host_iface, desc_to_name):
+def _provider_name_for_iface(hostname, iface, desc_to_name, device_iface_to_provider=None):
+    """Resolve provider name: NetBox inventory first, description map as fallback."""
+    device_iface_to_provider = device_iface_to_provider or {}
+    iface_name = iface.get("name", "") or ""
+    key_norm = _normalize_interface_name(iface_name)
+    for lookup in (
+        (hostname, iface_name),
+        (hostname, key_norm),
+    ):
+        provider = device_iface_to_provider.get(lookup)
+        if provider:
+            return provider
+    phys = (iface.get("physicalInterface") or "").strip()
+    if phys:
+        provider = device_iface_to_provider.get((hostname, phys))
+        if provider:
+            return provider
+    description = iface.get("description", "")
+    return desc_to_name.get(description, description)
+
+
+def _build_edges_with_keys(
+    devices, host_id_by_name, items_by_host_iface, desc_to_name, device_iface_to_provider=None
+):
     """One edge per (host, ISP), with key_in/key_out for formulas. Return [(hostname, isp, key_in, key_out), ...]."""
     edges_raw = []
     for hostname in sorted(devices.keys()):
@@ -87,8 +285,9 @@ def _build_edges_with_keys(devices, host_id_by_name, items_by_host_iface, desc_t
             continue
         for iface in devices[hostname]:
             iface_name = iface.get("name", "")
-            description = iface.get("description", "")
-            isp = desc_to_name.get(description, description)
+            isp = _provider_name_for_iface(
+                hostname, iface, desc_to_name, device_iface_to_provider=device_iface_to_provider
+            )
             key_norm = _normalize_interface_name(iface_name)
             rec = items_by_host_iface.get((hostname, key_norm), {})
             key_in = rec.get("bits_in") or ""
@@ -391,7 +590,22 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
         if cache_path:
             save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
 
-    edges = _build_edges_with_keys(devices, host_id_by_name, items_by_host_iface, desc_to_name)
+    nb_ctx = _load_netbox_aggregate_context(devices, debug=debug)
+    device_iface_to_provider = {}
+    providers_from_inventory = set()
+    netbox_limits_gbps = {}
+    if nb_ctx:
+        device_iface_to_provider = nb_ctx.get("device_iface_to_provider") or {}
+        providers_from_inventory = nb_ctx.get("providers") or set()
+        netbox_limits_gbps = nb_ctx.get("provider_limits_gbps") or {}
+
+    edges = _build_edges_with_keys(
+        devices,
+        host_id_by_name,
+        items_by_host_iface,
+        desc_to_name,
+        device_iface_to_provider=device_iface_to_provider,
+    )
     by_provider = {}
     for hostname, isp, key_in, key_out in edges:
         isp = (isp or "").strip()
@@ -399,27 +613,23 @@ def run(url, token, commit_rates_path, dry_ssh_path, desc_map_path, cache_path, 
             continue
         by_provider.setdefault(isp, []).append((hostname, key_in, key_out))
 
-    # Provider candidates for aggregates: primarily from NetBox under the automatization tag,
-    # otherwise - from data on links (by_provider).
-    providers_from_nb = set(_get_providers_from_netbox(NETBOX_AUTOMATION_TAG, debug=debug))
+    # Provider candidates: inventory providers with links in input data; otherwise all from data.
+    if providers_from_inventory:
+        providers_iter = sorted(p for p in providers_from_inventory if p in by_provider)
+    else:
+        providers_iter = sorted(by_provider.keys())
 
     done = []
-    providers_iter = sorted(providers_from_nb) if providers_from_nb else sorted(by_provider.keys())
     for provider in providers_iter:
         if not provider:
             continue
-        # Limit for triggers - only if set in _provider_limits; otherwise we create only host+items.
-        limit_entry = provider_limits.get(provider)
-        limit_bps = None
-        if limit_entry is not None:
-            try:
-                limit_bps = float(limit_entry) * 1e9
-            except (TypeError, ValueError):
-                limit_bps = None
+        limit_bps = _resolve_provider_limit_bps(
+            provider, netbox_limits_gbps, provider_limits, debug=debug
+        )
         links = by_provider.get(provider)
         if not links:
             if debug:
-                print("Provider {} in _provider_limits, but there are no links in the data - skip.".format(provider), file=sys.stderr)
+                print("Provider {} has no links in input data - skip.".format(provider), file=sys.stderr)
             continue
         refs_in = [(h, ki) for h, ki, ko in links if ki]
         refs_out = [(h, ko) for h, ki, ko in links if ko]
@@ -499,7 +709,11 @@ def main():
         if has_triggers:
             print('OK: {} - host "{}", calculated items and triggers 90%/100%'.format(provider, host_name))
         else:
-            print('OK: {} - host "{}", calculated items only (no triggers: no _provider_limits)'.format(provider, host_name))
+            print(
+                'OK: {} - host "{}", calculated items only (no triggers: no aggregate limit)'.format(
+                    provider, host_name
+                )
+            )
 
 
 if __name__ == "__main__":

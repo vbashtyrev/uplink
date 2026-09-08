@@ -74,7 +74,7 @@ def test_run_creates_aggregate_host_and_triggers(tmp_path, monkeypatch):
     )
     mocker.activate(monkeypatch)
 
-    with patch.object(agg, "_get_providers_from_netbox", return_value=[]):
+    with patch.object(agg, "_load_netbox_aggregate_context", return_value=None):
         with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
             done, err = agg.run(
                 "https://z.example/api_jsonrpc.php",
@@ -129,7 +129,14 @@ def test_run_prunes_triggers_without_limit(tmp_path, monkeypatch):
     )
     mocker.activate(monkeypatch)
 
-    with patch.object(agg, "_get_providers_from_netbox", return_value=["Cogent"]):
+    nb_ctx = {
+        "device_iface_to_provider": {("ALA-KZT-7280TR-1", "Ethernet51/1"): "Cogent"},
+        "providers": {"Cogent"},
+        "provider_limits_gbps": {},
+        "stats": {},
+    }
+
+    with patch.object(agg, "_load_netbox_aggregate_context", return_value=nb_ctx):
         with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
             done, err = agg.run(
                 "https://z.example/api_jsonrpc.php",

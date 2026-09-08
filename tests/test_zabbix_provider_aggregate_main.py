@@ -67,7 +67,7 @@ def test_main_success(monkeypatch, zabbix_env, tmp_path, capsys):
     )
     mocker.activate(monkeypatch)
 
-    with patch.object(agg, "_get_providers_from_netbox", return_value=[]):
+    with patch.object(agg, "_load_netbox_aggregate_context", return_value=None):
         with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
             monkeypatch.setattr(
                 sys,
