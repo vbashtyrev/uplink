@@ -507,6 +507,16 @@ def providers_from_complete_inventory(report):
     return names
 
 
+def device_names_from_complete_inventory(report):
+    """Unique device names from structurally complete inventory rows."""
+    names = set()
+    for row in report.get("complete") or []:
+        device = (row.get("device") or "").strip()
+        if device:
+            names.add(device)
+    return names
+
+
 def is_burst_billing_model(billing_model):
     """True when billing_model is Burst (case-insensitive)."""
     return (billing_model or "").strip().lower() == "burst"
