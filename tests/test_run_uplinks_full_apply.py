@@ -33,6 +33,7 @@ def test_main_with_netbox_apply(monkeypatch, tmp_path):
         full.argparse.ArgumentParser,
         "parse_args",
         lambda self: full.argparse.Namespace(
+            auto=False,
             no_fetch=True,
             from_file=True,
             refresh=False,
@@ -40,7 +41,7 @@ def test_main_with_netbox_apply(monkeypatch, tmp_path):
             commit_rates="commit_rates.json",
             no_netbox_apply=False,
             no_burst_triggers=False,
-            location="ALA",
+            location=None,
             stop_on_error=False,
             no_stop_on_error=True,
             report=None,

@@ -102,8 +102,14 @@ def _write_run_report(report_lines, run_log_path, report_file, log_func=None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Full uplinks chain: collection → commit_rates → NetBox → Zabbix (sync, map, dashboards, services)."
-        " Report on work and errors. Update only from corrected dry-ssh.json: --from-file (or --no-fetch).",
+        description="Full uplinks chain: collection → NetBox inventory (default) → Zabbix (sync, map, dashboards, services)."
+        " Legacy auto-create path (--auto): commit_rates → NetBox circuits. Report on work and errors."
+        " Update only from corrected dry-ssh.json: --from-file (or --no-fetch).",
+    )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Legacy pipeline: run generate_commit_rates.py and netbox_create_circuits.py (not used by default)",
     )
     parser.add_argument(
         "--no-fetch",
@@ -146,7 +152,7 @@ def main():
         "--location",
         default=None,
         metavar="LOC",
-        help="Pass --location to netbox_create_circuits (specified location only)",
+        help="Pass --location to netbox_create_circuits (--auto legacy path only)",
     )
     parser.add_argument(
         "--stop-on-error",
@@ -185,6 +191,13 @@ def main():
         help="Don't load the env file before starting the chain",
     )
     args = parser.parse_args()
+
+    if args.location and not args.auto:
+        print(
+            "Error: --location is only supported with --auto (legacy netbox_create_circuits path).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     os.chdir(SCRIPT_DIR)
     env_file_path = os.path.join(SCRIPT_DIR, args.env_file)
@@ -227,6 +240,7 @@ def main():
         log("Env file: {} (not found, current environment is used)". format(env_file_path))
     log("Run log: {}".format(run_log_path))
     log("Debug log: {}".format(debug_log_path))
+    log("Mode: {}".format("auto (legacy create path)" if args.auto else "human (NetBox-first, read-only inventory)"))
     log("")
     try:
         with open(debug_log_path, "w", encoding="utf-8") as f:
@@ -311,32 +325,50 @@ def main():
         log("[SKIP] Step 2: NetBox checks (skipped: --no-netbox-apply)")
         report_lines.append("")
 
-    # 3. Generating commit_rates.json
-    log("Step 3: Generate {} ...".format(commit_rates_path))
-    ok, out, err = run_cmd(
-        [python, "generate_commit_rates.py", "-f", dry_ssh_path, "-m", DEFAULT_DESC_MAP, "-o", commit_rates_path],
-        cwd=SCRIPT_DIR,
-        timeout=timeout,
-    )
-    _append_debug(debug_log_path, "Step 3: generate_commit_rates", stdout=out or "", stderr=err or "", ok=ok)
-    step("Step 3: generate_commit_rates", ok, err or ("code != 0" if not ok else ""))
-    if not ok and args.stop_on_error:
-        _finish(report_lines, errors, args.report, run_log_path)
-        sys.exit(1)
-    log("")
+    if args.auto:
+        # 3. Generating commit_rates.json (legacy --auto path only)
+        log("Step 3: Generate {} ...".format(commit_rates_path))
+        ok, out, err = run_cmd(
+            [python, "generate_commit_rates.py", "-f", dry_ssh_path, "-m", DEFAULT_DESC_MAP, "-o", commit_rates_path],
+            cwd=SCRIPT_DIR,
+            timeout=timeout,
+        )
+        _append_debug(debug_log_path, "Step 3: generate_commit_rates", stdout=out or "", stderr=err or "", ok=ok)
+        step("Step 3: generate_commit_rates", ok, err or ("code != 0" if not ok else ""))
+        if not ok and args.stop_on_error:
+            _finish(report_lines, errors, args.report, run_log_path)
+            sys.exit(1)
+        log("")
 
-    # 4. NetBox create circuits
-    cmd_circuits = [python, "netbox_create_circuits.py", "-f", commit_rates_path, "-d", dry_ssh_path]
-    if args.location:
-        cmd_circuits.extend(["--location", args.location])
-    log("Step 4: NetBox circuits (netbox_create_circuits.py) ...")
-    ok, out, err = run_cmd(cmd_circuits, cwd=SCRIPT_DIR, timeout=timeout)
-    _append_debug(debug_log_path, "Step 4: NetBox circuits", stdout=out or "", stderr=err or "", ok=ok)
-    step("Step 4: NetBox circuits", ok, err or ("code != 0" if not ok else ""))
-    if not ok and args.stop_on_error:
-        _finish(report_lines, errors, args.report, run_log_path)
-        sys.exit(1)
-    log("")
+        # 4. NetBox create circuits (legacy --auto path only)
+        cmd_circuits = [python, "netbox_create_circuits.py", "-f", commit_rates_path, "-d", dry_ssh_path]
+        if args.location:
+            cmd_circuits.extend(["--location", args.location])
+        log("Step 4: NetBox circuits (netbox_create_circuits.py) ...")
+        ok, out, err = run_cmd(cmd_circuits, cwd=SCRIPT_DIR, timeout=timeout)
+        _append_debug(debug_log_path, "Step 4: NetBox circuits", stdout=out or "", stderr=err or "", ok=ok)
+        step("Step 4: NetBox circuits", ok, err or ("code != 0" if not ok else ""))
+        if not ok and args.stop_on_error:
+            _finish(report_lines, errors, args.report, run_log_path)
+            sys.exit(1)
+        log("")
+    else:
+        # 3. NetBox uplink inventory (read-only, human/NetBox-first path)
+        log("Step 3: NetBox uplink inventory (netbox_uplinks_inventory.py --dry-run) ...")
+        ok, out, err = run_cmd(
+            [python, "netbox_uplinks_inventory.py", "--dry-run"],
+            cwd=SCRIPT_DIR,
+            timeout=timeout,
+        )
+        _append_debug(debug_log_path, "Step 3: NetBox uplink inventory", stdout=out or "", stderr=err or "", ok=ok)
+        step("Step 3: NetBox uplink inventory", ok, err or ("code != 0" if not ok else ""))
+        if not ok and args.stop_on_error:
+            _finish(report_lines, errors, args.report, run_log_path)
+            sys.exit(1)
+        if out:
+            for line in out.splitlines():
+                log("  {}".format(line))
+        log("")
 
     # 5. Zabbix sync: macros from NetBox, util triggers from dry-ssh, Burst link triggers from commit_rates
     sync_argv = [

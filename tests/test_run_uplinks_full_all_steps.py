@@ -11,7 +11,86 @@ import run_uplinks_full as full
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-def test_main_all_steps_success(monkeypatch, tmp_path):
+def _default_ns(**overrides):
+    base = dict(
+        auto=False,
+        no_fetch=True,
+        from_file=True,
+        refresh=False,
+        dry_ssh="dry-ssh.json",
+        commit_rates="commit_rates.json",
+        no_netbox_apply=False,
+        no_burst_triggers=False,
+        location=None,
+        stop_on_error=False,
+        no_stop_on_error=True,
+        report=None,
+        timeout=60,
+        env_file="urls.env",
+        no_env_file=True,
+    )
+    base.update(overrides)
+    return full.argparse.Namespace(**base)
+
+
+def test_main_human_mode_all_steps_success(monkeypatch, tmp_path):
+    """Default (human/NetBox-first): inventory read-only, no generate/create."""
+    dry = tmp_path / "dry-ssh.json"
+    dry.write_text((FIXTURES / "dry_ssh_minimal.json").read_text(encoding="utf-8"), encoding="utf-8")
+    cr = tmp_path / "commit_rates.json"
+    cr.write_text("{}", encoding="utf-8")
+    desc = tmp_path / "description_to_name.json"
+    desc.write_text("{}", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
+    monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
+    monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
+    monkeypatch.setattr(full, "DEFAULT_COMMIT_RATES", "commit_rates.json")
+    monkeypatch.setattr(full, "DEFAULT_DESC_MAP", "description_to_name.json")
+
+    calls = []
+
+    def fake_run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
+        calls.append(list(argv))
+        return True, "ok line", ""
+
+    monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(full.argparse.ArgumentParser, "parse_args", lambda self: _default_ns())
+    with pytest.raises(SystemExit) as exc:
+        full.main()
+    assert exc.value.code == 0
+
+    scripts = [c[1] for c in calls]
+    expected_order = [
+        "netbox_checks.py",
+        "netbox_uplinks_inventory.py",
+        "zabbix_sync_commit_rate.py",
+        "zabbix_provider_aggregate.py",
+        "zabbix_map.py",
+        "zabbix_uplinks_dashboard.py",
+        "zabbix_provider_services.py",
+    ]
+    assert scripts == expected_order
+    assert "generate_commit_rates.py" not in scripts
+    assert "netbox_create_circuits.py" not in scripts
+
+    inventory = next(c for c in calls if c[1] == "netbox_uplinks_inventory.py")
+    assert "--dry-run" in inventory
+
+    sync = next(c for c in calls if c[1] == "zabbix_sync_commit_rate.py")
+    assert sync[2:6] == ["-d", "dry-ssh.json", "-f", "commit_rates.json"]
+    assert "--create-link-triggers" in sync
+
+    services = next(c for c in calls if c[1] == "zabbix_provider_services.py")
+    assert services[-2:] == ["--parent-service", "Uplinks providers"]
+
+    assert scripts.index("zabbix_provider_aggregate.py") < scripts.index("zabbix_map.py")
+    assert scripts.count("zabbix_map.py") == 1
+
+
+def test_main_auto_all_steps_success(monkeypatch, tmp_path):
+    """--auto: legacy chain with generate_commit_rates and netbox_create_circuits."""
     dry = tmp_path / "dry-ssh.json"
     dry.write_text((FIXTURES / "dry_ssh_minimal.json").read_text(encoding="utf-8"), encoding="utf-8")
     cr = tmp_path / "commit_rates.json"
@@ -36,22 +115,7 @@ def test_main_all_steps_success(monkeypatch, tmp_path):
     monkeypatch.setattr(
         full.argparse.ArgumentParser,
         "parse_args",
-        lambda self: full.argparse.Namespace(
-            no_fetch=True,
-            from_file=True,
-            refresh=False,
-            dry_ssh="dry-ssh.json",
-            commit_rates="commit_rates.json",
-            no_netbox_apply=False,
-            no_burst_triggers=False,
-            location="ALA",
-            stop_on_error=False,
-            no_stop_on_error=True,
-            report=None,
-            timeout=60,
-            env_file="urls.env",
-            no_env_file=True,
-        ),
+        lambda self: _default_ns(auto=True, location="ALA"),
     )
     with pytest.raises(SystemExit) as exc:
         full.main()
@@ -69,20 +133,28 @@ def test_main_all_steps_success(monkeypatch, tmp_path):
         "zabbix_provider_services.py",
     ]
     assert scripts == expected_order
-
-    sync = next(c for c in calls if c[1] == "zabbix_sync_commit_rate.py")
-    assert sync[2:6] == ["-d", "dry-ssh.json", "-f", "commit_rates.json"]
-    assert "--create-link-triggers" in sync
+    assert "netbox_uplinks_inventory.py" not in scripts
 
     circuits = next(c for c in calls if c[1] == "netbox_create_circuits.py")
     assert circuits[2:6] == ["-f", "commit_rates.json", "-d", "dry-ssh.json"]
     assert circuits[-2:] == ["--location", "ALA"]
 
-    services = next(c for c in calls if c[1] == "zabbix_provider_services.py")
-    assert services[-2:] == ["--parent-service", "Uplinks providers"]
 
-    assert scripts.index("zabbix_provider_aggregate.py") < scripts.index("zabbix_map.py")
-    assert scripts.count("zabbix_map.py") == 1
+def test_main_location_without_auto_exits(monkeypatch, tmp_path):
+    dry = tmp_path / "dry-ssh.json"
+    dry.write_text("{}", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
+    monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
+    monkeypatch.setattr(full, "run_cmd", lambda *a, **k: (True, "", ""))
+    monkeypatch.setattr(
+        full.argparse.ArgumentParser,
+        "parse_args",
+        lambda self: _default_ns(location="ALA"),
+    )
+    with pytest.raises(SystemExit) as exc:
+        full.main()
+    assert exc.value.code == 2
 
 
 def test_main_fetch_includes_uplinks_stats(monkeypatch, tmp_path):
@@ -109,22 +181,7 @@ def test_main_fetch_includes_uplinks_stats(monkeypatch, tmp_path):
     monkeypatch.setattr(
         full.argparse.ArgumentParser,
         "parse_args",
-        lambda self: full.argparse.Namespace(
-            no_fetch=False,
-            from_file=False,
-            refresh=True,
-            dry_ssh="dry-ssh.json",
-            commit_rates="commit_rates.json",
-            no_netbox_apply=False,
-            no_burst_triggers=False,
-            location=None,
-            stop_on_error=False,
-            no_stop_on_error=True,
-            report=None,
-            timeout=60,
-            env_file="urls.env",
-            no_env_file=True,
-        ),
+        lambda self: _default_ns(no_fetch=False, from_file=False, refresh=True),
     )
     with pytest.raises(SystemExit) as exc:
         full.main()
@@ -132,16 +189,43 @@ def test_main_fetch_includes_uplinks_stats(monkeypatch, tmp_path):
 
     scripts = [c[1] for c in calls]
     assert scripts[0] == "uplinks_stats.py"
-    assert scripts[1:9] == [
+    assert scripts[1:8] == [
         "netbox_checks.py",
-        "generate_commit_rates.py",
-        "netbox_create_circuits.py",
+        "netbox_uplinks_inventory.py",
         "zabbix_sync_commit_rate.py",
         "zabbix_provider_aggregate.py",
         "zabbix_map.py",
         "zabbix_uplinks_dashboard.py",
         "zabbix_provider_services.py",
     ]
+
+
+def test_main_inventory_failure_stop_on_error(monkeypatch, tmp_path):
+    dry = tmp_path / "dry-ssh.json"
+    dry.write_text("{}", encoding="utf-8")
+    (tmp_path / "commit_rates.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
+    monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
+    monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
+    monkeypatch.setattr(full, "DEFAULT_COMMIT_RATES", "commit_rates.json")
+    monkeypatch.setattr(full, "DEFAULT_DESC_MAP", "description_to_name.json")
+
+    def fake_run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
+        if "netbox_uplinks_inventory.py" in argv:
+            return False, "", "inventory failed"
+        return True, "", ""
+
+    monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(
+        full.argparse.ArgumentParser,
+        "parse_args",
+        lambda self: _default_ns(stop_on_error=True, no_stop_on_error=False),
+    )
+    with pytest.raises(SystemExit) as exc:
+        full.main()
+    assert exc.value.code == 1
 
 
 def test_main_no_burst_triggers_omits_flag(monkeypatch, tmp_path):
@@ -167,22 +251,7 @@ def test_main_no_burst_triggers_omits_flag(monkeypatch, tmp_path):
     monkeypatch.setattr(
         full.argparse.ArgumentParser,
         "parse_args",
-        lambda self: full.argparse.Namespace(
-            no_fetch=True,
-            from_file=True,
-            refresh=False,
-            dry_ssh="dry-ssh.json",
-            commit_rates="commit_rates.json",
-            no_netbox_apply=False,
-            no_burst_triggers=True,
-            location=None,
-            stop_on_error=False,
-            no_stop_on_error=True,
-            report=None,
-            timeout=60,
-            env_file="urls.env",
-            no_env_file=True,
-        ),
+        lambda self: _default_ns(no_burst_triggers=True),
     )
     with pytest.raises(SystemExit) as exc:
         full.main()

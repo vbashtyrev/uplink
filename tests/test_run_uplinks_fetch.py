@@ -40,6 +40,7 @@ def test_main_fetch_step(monkeypatch, tmp_path):
         full.argparse.ArgumentParser,
         "parse_args",
         lambda self: full.argparse.Namespace(
+            auto=True,
             no_fetch=False,
             from_file=False,
             refresh=True,

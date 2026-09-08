@@ -12,6 +12,7 @@ import run_uplinks_full as full
 
 def _ns(**overrides):
     base = dict(
+        auto=False,
         no_fetch=False,
         from_file=None,
         refresh=True,

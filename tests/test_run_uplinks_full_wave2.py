@@ -77,6 +77,7 @@ def test_main_fetch_step_writes_dry_ssh(monkeypatch, tmp_path):
         full.argparse.ArgumentParser,
         "parse_args",
         lambda self: full.argparse.Namespace(
+            auto=False,
             no_fetch=False,
             from_file=False,
             refresh=True,
@@ -118,6 +119,7 @@ def test_main_cache_skip(monkeypatch, tmp_path, capsys):
         full.argparse.ArgumentParser,
         "parse_args",
         lambda self: full.argparse.Namespace(
+            auto=False,
             no_fetch=False,
             from_file=False,
             refresh=False,
