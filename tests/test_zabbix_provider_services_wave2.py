@@ -92,6 +92,7 @@ def test_main_with_parent_service(tmp_path, monkeypatch, capsys):
     )
     monkeypatch.setenv("ZABBIX_URL", "https://z.example/api_jsonrpc.php")
     monkeypatch.setenv("ZABBIX_TOKEN", "t")
+    monkeypatch.setattr("zabbix_provider_services.netbox_client_from_env", lambda **k: None)
     import sys
 
     monkeypatch.setattr(

@@ -288,15 +288,21 @@ run_uplinks_full.py
 
 ## Этап 8. Перенести локальные файлы в NetBox
 
-- [ ] Перестать использовать `description_to_name.json` как источник истины.
-- [ ] Перестать использовать `commit_rates.json` как источник истины.
-- [ ] Перестать записывать данные из JSON обратно в NetBox.
+- [x] Перестать использовать `description_to_name.json` как основной источник
+      имени для полного inventory.
+- [x] Перестать записывать данные из JSON обратно в NetBox в новом пути.
+- [x] Читать лимиты Provider из `aggregate_limit_gbps` с переходным fallback.
+- [x] Читать billing model Circuit из NetBox с переходным fallback.
+- [x] Использовать стандартный `Circuit.commit_rate`.
+- [x] Читать SLA из `slo_percent`, если поле заполнено, с переходным fallback
+      на общий SLA.
+- [ ] Создать и заполнить дополнительные поля в рабочем NetBox.
+- [ ] Перестать использовать `commit_rates.json` после заполнения полей.
 - [ ] Перенести Provider aliases в `interface_aliases`.
-- [ ] Перенести лимиты в `aggregate_limit_gbps`.
-- [ ] Перенести billing model в Circuit.
-- [ ] Использовать стандартный `Circuit.commit_rate`.
-- [ ] Оставить SLA `99.95` в общей конфигурации.
 - [ ] При необходимости создать отдельный read-only экспорт из NetBox.
+
+Сервисы и Burst используют объединение NetBox + недостающие записи из JSON.
+При ошибке доступа к NetBox переход в старый JSON запрещён.
 
 ## Этап 9. Удалить устаревший код
 

@@ -11,6 +11,17 @@ from zabbix_map import (
     zabbix_request,
     validate_zabbix_token,
 )
+from uplinks.netbox.inventory import (
+    ERROR_AUTH_DENIED,
+    ERROR_PROVIDERS_UNAVAILABLE,
+    burst_circuits_unique_from_inventory,
+    collect_provider_limits_gbps,
+    collect_provider_slo_percent,
+    collect_uplink_inventory,
+    netbox_border_tag,
+    netbox_client_from_env,
+    providers_from_complete_inventory,
+)
 from uplinks_config import UPLINKS_AGGREGATE_HOST_PREFIX, SLA_EFFECTIVE_DATE_UTC
 
 load_env_file_if_present()
@@ -19,6 +30,10 @@ load_env_file_if_present()
 DEFAULT_COMMIT_RATES = "commit_rates.json"
 PROVIDER_ROLE = "provider"
 BURST_CIRCUIT_ROLE = "burst-circuit"
+_NETBOX_AUTH_MESSAGE = (
+    "NetBox error: token has expired or access is denied (403). "
+    "Check NETBOX_TOKEN and update the token if necessary."
+)
 
 
 def _load_commit_rates(path):
@@ -26,7 +41,7 @@ def _load_commit_rates(path):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
-        return None, "file not found: {}".format(path)
+        return {}, None
     except json.JSONDecodeError as e:
         return None, "invalid JSON in {}: {}".format(path, e)
     if not isinstance(data, dict):
@@ -82,6 +97,161 @@ def _get_global_provider_sla(commit_rates):
             return float(val)
         except (TypeError, ValueError):
             return None
+    return None
+
+
+def _load_netbox_services_context(debug=False):
+    """
+    Read-only NetBox context for provider/Burst services.
+    Return dict with report, providers, burst_circuits, provider_slo_percent,
+    provider_limits_gbps; or None when NetBox is unavailable.
+    """
+    nb = netbox_client_from_env(debug=debug)
+    if nb is None:
+        return None
+
+    tag = netbox_border_tag()
+    report = collect_uplink_inventory(nb, tag=tag, debug=debug, active_only=True)
+    stats = report.get("stats") or {}
+    error = stats.get("error")
+    if error == ERROR_AUTH_DENIED:
+        if debug:
+            print("collect_uplink_inventory: {}".format(error), file=sys.stderr)
+        return {"auth_denied": True}
+    if error == ERROR_PROVIDERS_UNAVAILABLE:
+        if debug:
+            print(
+                "NetBox: providers unavailable; falling back to commit_rates.json",
+                file=sys.stderr,
+            )
+        return None
+
+    provider_slo_percent, slo_error = collect_provider_slo_percent(nb, debug=debug)
+    if slo_error == ERROR_AUTH_DENIED:
+        if debug:
+            print("collect_provider_slo_percent: {}".format(slo_error), file=sys.stderr)
+        return {"auth_denied": True}
+
+    return {
+        "report": report,
+        "providers": providers_from_complete_inventory(report),
+        "burst_circuits": burst_circuits_unique_from_inventory(report),
+        "provider_slo_percent": provider_slo_percent,
+        "provider_limits_gbps": collect_provider_limits_gbps(nb, debug=debug),
+    }
+
+
+def _resolve_providers(netbox_ctx, commit_rates, debug=False):
+    """Provider names: NetBox inventory first, per-provider _provider_limits fallback."""
+    commit_rates = commit_rates or {}
+    providers = set()
+    netbox_available = bool(netbox_ctx) and not netbox_ctx.get("auth_denied")
+    if netbox_available:
+        providers = set(netbox_ctx.get("providers") or [])
+        if providers and debug:
+            print(
+                "Providers from NetBox inventory: {}".format(", ".join(sorted(providers))),
+                file=sys.stderr,
+            )
+
+    json_providers = _get_providers_from_limits(commit_rates)
+    added = []
+    for provider in json_providers:
+        if provider not in providers:
+            providers.add(provider)
+            added.append(provider)
+
+    if added:
+        if netbox_available:
+            for provider in added:
+                print(
+                    "Warning: provider {!r} not in NetBox inventory; "
+                    "using commit_rates.json _provider_limits (transition fallback)".format(
+                        provider
+                    ),
+                    file=sys.stderr,
+                )
+        else:
+            print(
+                "Warning: no providers in NetBox inventory; "
+                "using commit_rates.json _provider_limits (transition fallback)",
+                file=sys.stderr,
+            )
+        if debug:
+            print(
+                "Transition fallback providers from _provider_limits: {}".format(
+                    ", ".join(added)
+                ),
+                file=sys.stderr,
+            )
+    return sorted(providers)
+
+
+def _resolve_burst_circuits(netbox_ctx, commit_rates, debug=False):
+    """Unique Burst circuits: NetBox inventory first, per-circuit commit_rates.json fallback."""
+    commit_rates = commit_rates or {}
+    merged = {}
+    netbox_available = bool(netbox_ctx) and not netbox_ctx.get("auth_denied")
+    if netbox_available:
+        for circuit_id, provider in netbox_ctx.get("burst_circuits") or []:
+            merged[circuit_id] = provider
+        if merged and debug:
+            print(
+                "Burst circuits from NetBox inventory: {}".format(len(merged)),
+                file=sys.stderr,
+            )
+
+    json_pairs = dict(_burst_circuits_unique(commit_rates))
+    added = []
+    for circuit_id, provider in json_pairs.items():
+        if circuit_id not in merged:
+            merged[circuit_id] = provider
+            added.append(circuit_id)
+
+    if added:
+        if netbox_available:
+            for circuit_id in added:
+                print(
+                    "Warning: Burst circuit {!r} not in NetBox inventory; "
+                    "using commit_rates.json billing_model (transition fallback)".format(
+                        circuit_id
+                    ),
+                    file=sys.stderr,
+                )
+        else:
+            print(
+                "Warning: no Burst billing_model in NetBox inventory; "
+                "using commit_rates.json billing_model (transition fallback)",
+                file=sys.stderr,
+            )
+        if debug:
+            print(
+                "Burst circuits from commit_rates.json: {}".format(len(added)),
+                file=sys.stderr,
+            )
+    return sorted(merged.items(), key=lambda x: x[0])
+
+
+def _resolve_provider_slo(provider, netbox_ctx, global_slo, debug=False):
+    """Per-provider slo_percent from NetBox, else global _provider_sla fallback."""
+    netbox_slo = (netbox_ctx or {}).get("provider_slo_percent") or {}
+    if provider in netbox_slo:
+        return netbox_slo[provider]
+    if global_slo is not None:
+        if netbox_ctx is not None and provider in (netbox_ctx.get("providers") or set()):
+            print(
+                "Warning: provider {!r} has no slo_percent in NetBox; "
+                "using commit_rates.json _provider_sla (transition fallback)".format(provider),
+                file=sys.stderr,
+            )
+            if debug:
+                print(
+                    "Transition fallback SLA for {} from _provider_sla: {:.4f}%".format(
+                        provider, global_slo
+                    ),
+                    file=sys.stderr,
+                )
+        return global_slo
     return None
 
 
@@ -406,6 +576,7 @@ def main():
     if err:
         print(err, file=sys.stderr)
         sys.exit(1)
+    commit_rates = commit_rates or {}
 
     url, token = _get_zabbix_url_token()
     if not url or not token:
@@ -417,16 +588,21 @@ def main():
         print("Authorization error in Zabbix (token): {}".format(err), file=sys.stderr)
         sys.exit(1)
 
-    providers = _get_providers_from_limits(commit_rates)
-    burst_pairs = _burst_circuits_unique(commit_rates)
+    netbox_ctx = _load_netbox_services_context(debug=args.debug)
+    if netbox_ctx and netbox_ctx.get("auth_denied"):
+        print(_NETBOX_AUTH_MESSAGE, file=sys.stderr)
+        sys.exit(1)
+
+    providers = _resolve_providers(netbox_ctx, commit_rates, debug=args.debug)
+    burst_pairs = _resolve_burst_circuits(netbox_ctx, commit_rates, debug=args.debug)
     if not providers and not burst_pairs and not args.parent_service:
         print(
-            "No _provider_limits entries and no Burst circuits (billing_model=burst); nothing to do.",
+            "No providers in NetBox/_provider_limits and no Burst circuits; nothing to do.",
             file=sys.stderr,
         )
         sys.exit(0)
     if not providers:
-        print("No providers in _provider_limits; skipping aggregate services.", file=sys.stderr)
+        print("No providers found; skipping aggregate services.", file=sys.stderr)
     if not burst_pairs:
         print("No Burst circuits; skipping Burst services.", file=sys.stderr)
     parentid = None
@@ -438,7 +614,7 @@ def main():
             print(err, file=sys.stderr)
             sys.exit(1)
 
-    slo = _get_global_provider_sla(commit_rates)
+    global_slo = _get_global_provider_sla(commit_rates)
 
     if providers:
         for provider in providers:
@@ -455,6 +631,7 @@ def main():
             if err:
                 print("Provider {} legacy SLA source cleanup error: {}".format(provider, err), file=sys.stderr)
 
+            slo = _resolve_provider_slo(provider, netbox_ctx, global_slo, debug=args.debug)
             if slo is not None:
                 slaid, err = _ensure_provider_sla(url, token, provider, slo, debug=args.debug)
                 if err:
@@ -478,6 +655,7 @@ def main():
                 circuit_id, serviceid
             )
         )
+        slo = _resolve_provider_slo(b_provider, netbox_ctx, global_slo, debug=args.debug)
         if slo is not None:
             slaid, err = _ensure_burst_circuit_sla(
                 url, token, circuit_id, slo, debug=args.debug

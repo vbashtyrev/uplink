@@ -21,6 +21,8 @@ from zabbix_map import (
 from uplinks.netbox.inventory import (
     ERROR_AUTH_DENIED,
     ERROR_PROVIDERS_UNAVAILABLE,
+    burst_metadata_from_inventory,
+    burst_pairs_from_inventory,
     collect_uplink_inventory,
     is_netbox_auth_error,
 )
@@ -144,15 +146,30 @@ def interfaces_by_host_from_dry_ssh(dry_ssh_devices, physical_only=False):
     return result
 
 
-def load_burst_pairs(path):
-    """Load pairs (device, interface) with billing_model == 'Burst' from commit_rates.json."""
+def _load_commit_rates_json_file(path, strict=False):
+    """Load commit_rates.json root dict. Missing file -> {}. Invalid JSON fails when strict."""
     if not path or not os.path.isfile(path):
-        return set()
+        return {}, None
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return set()
+    except json.JSONDecodeError as e:
+        if strict:
+            return None, "invalid JSON in {}: {}".format(path, e)
+        return {}, None
+    except OSError as e:
+        if strict:
+            return None, "cannot read {}: {}".format(path, e)
+        return {}, None
+    if not isinstance(data, dict):
+        if strict:
+            return None, "unexpected JSON root in {}".format(path)
+        return {}, None
+    return data, None
+
+
+def _burst_pairs_from_commit_rates_data(data):
+    """Pairs (device, interface) with billing_model == 'Burst' from commit_rates dict."""
     out = set()
     for dev_name, ifaces in (data or {}).items():
         if not isinstance(dev_name, str) or dev_name.startswith("_"):
@@ -168,15 +185,62 @@ def load_burst_pairs(path):
     return out
 
 
-def load_burst_metadata(path):
+def _burst_pairs_from_json(path):
+    """Load pairs (device, interface) with billing_model == 'Burst' from commit_rates.json."""
+    data, _err = _load_commit_rates_json_file(path, strict=False)
+    return _burst_pairs_from_commit_rates_data(data)
+
+
+def load_burst_pairs(path, inventory_report=None, debug=False):
+    """Burst (device, interface) pairs: NetBox inventory first, per-pair commit_rates.json fallback."""
+    strict_json = inventory_report is not None
+    data, err = _load_commit_rates_json_file(path, strict=strict_json)
+    if err:
+        raise ValueError(err)
+
+    merged = set()
+    netbox_available = inventory_report is not None
+    netbox_pairs = set()
+    if netbox_available:
+        netbox_pairs = burst_pairs_from_inventory(inventory_report)
+        merged = set(netbox_pairs)
+        if merged and debug:
+            print(
+                "Burst pairs from NetBox inventory: {}".format(len(merged)),
+                file=sys.stderr,
+            )
+
+    json_pairs = _burst_pairs_from_commit_rates_data(data)
+    added = []
+    for pair in json_pairs:
+        if pair not in merged:
+            merged.add(pair)
+            added.append(pair)
+
+    if added:
+        if netbox_available:
+            if netbox_pairs:
+                for dev_name, iface_name in sorted(added):
+                    print(
+                        "Warning: Burst pair ({!r}, {!r}) not in NetBox inventory; "
+                        "using commit_rates.json billing_model (transition fallback)".format(
+                            dev_name, iface_name
+                        ),
+                        file=sys.stderr,
+                    )
+            else:
+                print(
+                    "Warning: no Burst billing_model in NetBox inventory; "
+                    "using commit_rates.json billing_model (transition fallback)",
+                    file=sys.stderr,
+                )
+        if debug:
+            print("Burst pairs from {}: {}".format(path, len(added)), file=sys.stderr)
+    return merged
+
+
+def _burst_metadata_from_commit_rates_data(data):
     """(device, interface) -> {provider, circuit_id} for billing_model=Burst."""
-    if not path or not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
     out = {}
     for dev_name, ifaces in (data or {}).items():
         if not isinstance(dev_name, str) or dev_name.startswith("_"):
@@ -194,6 +258,60 @@ def load_burst_metadata(path):
                 continue
             out[(dev_name, (iface_name or "").strip())] = {"provider": prov, "circuit_id": cid}
     return out
+
+
+def _burst_metadata_from_json(path):
+    """(device, interface) -> {provider, circuit_id} for billing_model=Burst."""
+    data, _err = _load_commit_rates_json_file(path, strict=False)
+    return _burst_metadata_from_commit_rates_data(data)
+
+
+def load_burst_metadata(path, inventory_report=None, debug=False):
+    """Burst link metadata: NetBox inventory first, per-pair commit_rates.json fallback."""
+    strict_json = inventory_report is not None
+    data, err = _load_commit_rates_json_file(path, strict=strict_json)
+    if err:
+        raise ValueError(err)
+
+    merged = {}
+    netbox_available = inventory_report is not None
+    netbox_meta = {}
+    if netbox_available:
+        netbox_meta = burst_metadata_from_inventory(inventory_report)
+        merged = dict(netbox_meta)
+        if merged and debug:
+            print(
+                "Burst metadata from NetBox inventory: {} pairs".format(len(merged)),
+                file=sys.stderr,
+            )
+
+    json_meta = _burst_metadata_from_commit_rates_data(data)
+    added = []
+    for pair, meta in json_meta.items():
+        if pair not in merged:
+            merged[pair] = meta
+            added.append(pair)
+
+    if added:
+        if netbox_available:
+            if netbox_meta:
+                for dev_name, iface_name in sorted(added):
+                    print(
+                        "Warning: Burst metadata ({!r}, {!r}) not in NetBox inventory; "
+                        "using commit_rates.json provider/circuit_id (transition fallback)".format(
+                            dev_name, iface_name
+                        ),
+                        file=sys.stderr,
+                    )
+            else:
+                print(
+                    "Warning: no Burst circuit metadata in NetBox inventory; "
+                    "using commit_rates.json provider/circuit_id (transition fallback)",
+                    file=sys.stderr,
+                )
+        if debug:
+            print("Burst metadata from {}: {} pairs".format(path, len(added)), file=sys.stderr)
+    return merged
 
 
 def burst_link_trigger_tags_no_sla(provider, circuit_id):
@@ -290,20 +408,10 @@ _NETBOX_AUTH_MESSAGE = (
 _is_netbox_auth_error = is_netbox_auth_error
 
 
-def get_commit_rates_from_netbox(nb, tag, debug=False):
-    """
-    By NetBox: active circuits on border devices (via shared inventory collector).
-    Return: dict (device_name, interface_name) -> commit_rate_bps (int).
-    Only devices with the tag tag are taken into account when tag is set.
-    """
-    report = collect_uplink_inventory(nb, tag=tag, debug=debug, active_only=True)
+def commit_rates_from_inventory_report(report, debug=False):
+    """Build (device, interface) -> commit_rate_bps from inventory complete rows."""
     stats = report.get("stats") or {}
     error = stats.get("error")
-    if error == ERROR_AUTH_DENIED:
-        print(_NETBOX_AUTH_MESSAGE, file=sys.stderr)
-        if debug:
-            print("collect_uplink_inventory: {}".format(error), file=sys.stderr)
-        sys.exit(1)
     if error == ERROR_PROVIDERS_UNAVAILABLE:
         if debug:
             print("NetBox: providers unavailable", file=sys.stderr)
@@ -360,6 +468,30 @@ def get_commit_rates_from_netbox(nb, tag, debug=False):
                 file=sys.stderr,
             )
     return result
+
+
+def fetch_uplink_inventory_report(nb, tag, debug=False, exit_on_auth=True):
+    """Collect uplink inventory; exit on auth error when exit_on_auth is True."""
+    report = collect_uplink_inventory(nb, tag=tag, debug=debug, active_only=True)
+    stats = report.get("stats") or {}
+    error = stats.get("error")
+    if error == ERROR_AUTH_DENIED:
+        print(_NETBOX_AUTH_MESSAGE, file=sys.stderr)
+        if debug:
+            print("collect_uplink_inventory: {}".format(error), file=sys.stderr)
+        if exit_on_auth:
+            sys.exit(1)
+    return report
+
+
+def get_commit_rates_from_netbox(nb, tag, debug=False):
+    """
+    By NetBox: active circuits on border devices (via shared inventory collector).
+    Return: dict (device_name, interface_name) -> commit_rate_bps (int).
+    Only devices with the tag tag are taken into account when tag is set.
+    """
+    report = fetch_uplink_inventory_report(nb, tag, debug=debug, exit_on_auth=True)
+    return commit_rates_from_inventory_report(report, debug=debug)
 
 
 def get_zabbix_host_macros(url, token, hostids, debug=False):
@@ -1195,7 +1327,8 @@ def main():
         )
 
     nb = pynetbox.api(nb_url, token=nb_token)
-    commit_rates = get_commit_rates_from_netbox(nb, tag, debug=args.debug)
+    inventory_report = fetch_uplink_inventory_report(nb, tag, debug=args.debug, exit_on_auth=True)
+    commit_rates = commit_rates_from_inventory_report(inventory_report, debug=args.debug)
     if dry_ssh_devices and commit_rates:
         commit_rates = apply_logical_context(commit_rates, dry_ssh_devices, debug=args.debug)
     elif dry_ssh_path and dry_ssh_devices and args.debug:
@@ -1242,10 +1375,20 @@ def main():
         print("Hosts not found in Zabbix: {}".format(", ".join(sorted(missing))), file=sys.stderr)
 
     updated = 0
-    burst_pairs = load_burst_pairs(args.commit_rates) if args.create_link_triggers else set()
-    burst_meta = load_burst_metadata(args.commit_rates) if args.create_link_triggers else {}
-    if args.create_link_triggers and args.debug:
-        print("Burst pairs from {}: {}".format(args.commit_rates, len(burst_pairs)), file=sys.stderr)
+    try:
+        burst_pairs = (
+            load_burst_pairs(args.commit_rates, inventory_report=inventory_report, debug=args.debug)
+            if args.create_link_triggers
+            else set()
+        )
+        burst_meta = (
+            load_burst_metadata(args.commit_rates, inventory_report=inventory_report, debug=args.debug)
+            if args.create_link_triggers
+            else {}
+        )
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
     for dev_name in hostnames:
         if dev_name not in hostid_by_host:
             continue

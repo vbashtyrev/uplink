@@ -12,8 +12,8 @@ import zabbix_provider_services as svc
 
 def test_load_commit_rates_errors(tmp_path):
     missing, err = svc._load_commit_rates(str(tmp_path / "nope.json"))
-    assert missing is None
-    assert "not found" in err
+    assert missing == {}
+    assert err is None
 
     bad = tmp_path / "bad.json"
     bad.write_text("{not json", encoding="utf-8")
@@ -103,6 +103,7 @@ def test_main_invalid_token(monkeypatch, tmp_path, zabbix_env):
     cr = tmp_path / "cr.json"
     cr.write_text(json.dumps({"_provider_limits": {"Cogent": 10}}), encoding="utf-8")
     monkeypatch.setattr("zabbix_provider_services.validate_zabbix_token", lambda *a, **k: (False, "bad"))
+    monkeypatch.setattr("zabbix_provider_services.netbox_client_from_env", lambda **k: None)
     monkeypatch.setattr(sys, "argv", ["zabbix_provider_services.py", "-f", str(cr)])
     with pytest.raises(SystemExit):
         svc.main()
@@ -116,6 +117,7 @@ def test_main_nothing_to_do(tmp_path, monkeypatch, capsys, zabbix_env):
         .on("user.get", lambda p: [{"userid": "1"}])
         .activate(monkeypatch)
     )
+    monkeypatch.setattr("zabbix_provider_services.netbox_client_from_env", lambda **k: None)
     monkeypatch.setattr(sys, "argv", ["zabbix_provider_services.py", "-f", str(cr)])
     with pytest.raises(SystemExit):
         svc.main()

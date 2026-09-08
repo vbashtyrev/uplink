@@ -149,6 +149,7 @@ def test_main_creates_services(tmp_path, monkeypatch):
 
     monkeypatch.setenv("ZABBIX_URL", "https://zabbix.example")
     monkeypatch.setenv("ZABBIX_TOKEN", "token")
+    monkeypatch.setattr("zabbix_provider_services.netbox_client_from_env", lambda **k: None)
 
     with patch.object(svc.sys, "argv", ["zabbix_provider_services.py", "-f", str(cr)]):
         svc.main()

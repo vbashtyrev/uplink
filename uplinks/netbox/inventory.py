@@ -507,6 +507,137 @@ def providers_from_complete_inventory(report):
     return names
 
 
+def is_burst_billing_model(billing_model):
+    """True when billing_model is Burst (case-insensitive)."""
+    return (billing_model or "").strip().lower() == "burst"
+
+
+def burst_pairs_from_inventory(report):
+    """(device, interface) pairs with billing_model=Burst from complete inventory rows."""
+    pairs = set()
+    for row in report.get("complete") or []:
+        if not is_burst_billing_model(row.get("billing_model")):
+            continue
+        device_name = (row.get("device") or "").strip()
+        iface_name = (row.get("interface") or "").strip()
+        if device_name and iface_name:
+            pairs.add((device_name, iface_name))
+    return pairs
+
+
+def burst_metadata_from_inventory(report):
+    """(device, interface) -> {provider, circuit_id} for billing_model=Burst."""
+    out = {}
+    for row in report.get("complete") or []:
+        if not is_burst_billing_model(row.get("billing_model")):
+            continue
+        provider = (row.get("provider") or "").strip()
+        circuit_id = (row.get("circuit_id") or "").strip()
+        device_name = (row.get("device") or "").strip()
+        iface_name = (row.get("interface") or "").strip()
+        if not device_name or not iface_name or not provider or not circuit_id:
+            continue
+        out[(device_name, iface_name)] = {"provider": provider, "circuit_id": circuit_id}
+    return out
+
+
+def burst_circuits_unique_from_inventory(report):
+    """Unique circuit_id -> provider (first encountered) for Burst rows."""
+    out = {}
+    for row in report.get("complete") or []:
+        if not is_burst_billing_model(row.get("billing_model")):
+            continue
+        circuit_id = (row.get("circuit_id") or "").strip()
+        provider = (row.get("provider") or "").strip()
+        if not circuit_id or not provider:
+            continue
+        if circuit_id not in out:
+            out[circuit_id] = provider
+    return sorted(out.items(), key=lambda x: x[0])
+
+
+def _provider_custom_field_float(provider, field_name):
+    custom_fields = getattr(provider, "custom_fields", None) or {}
+    if not isinstance(custom_fields, dict):
+        return None
+    value = custom_fields.get(field_name)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def provider_slo_percent_from_custom_fields(provider):
+    """Read slo_percent from Provider custom fields."""
+    return _provider_custom_field_float(provider, "slo_percent")
+
+
+def provider_aggregate_limit_gbps_from_custom_fields(provider):
+    """Read aggregate_limit_gbps from Provider custom fields."""
+    return _provider_custom_field_float(provider, "aggregate_limit_gbps")
+
+
+def collect_provider_slo_percent(nb, debug=False):
+    """Provider.name -> slo_percent from NetBox custom fields.
+
+    Returns (mapping, error) where error is ERROR_AUTH_DENIED on token/auth failure,
+    or None on success / non-auth read errors (missing custom fields are omitted).
+    """
+    slo = {}
+    try:
+        providers = list(nb.circuits.providers.all())
+    except Exception as e:
+        if is_netbox_auth_error(e):
+            if debug:
+                print(
+                    "NetBox: circuits.providers.all(): auth denied ({})".format(e),
+                    file=sys.stderr,
+                )
+            return slo, ERROR_AUTH_DENIED
+        if debug:
+            print("NetBox: circuits.providers.all(): {}".format(e), file=sys.stderr)
+        return slo, None
+    for provider in providers:
+        name = getattr(provider, "name", None)
+        if not name:
+            continue
+        slo_percent = provider_slo_percent_from_custom_fields(provider)
+        if slo_percent is not None:
+            slo[name] = slo_percent
+    if debug and slo:
+        print(
+            "NetBox: slo_percent for: {}".format(", ".join(sorted(slo.keys()))),
+            file=sys.stderr,
+        )
+    return slo, None
+
+
+def collect_provider_limits_gbps(nb, debug=False):
+    """Provider.name -> aggregate_limit_gbps from NetBox custom fields."""
+    limits = {}
+    try:
+        providers = list(nb.circuits.providers.all())
+    except Exception as e:
+        if debug:
+            print("NetBox: circuits.providers.all(): {}".format(e), file=sys.stderr)
+        return limits
+    for provider in providers:
+        name = getattr(provider, "name", None)
+        if not name:
+            continue
+        limit_gbps = provider_aggregate_limit_gbps_from_custom_fields(provider)
+        if limit_gbps is not None:
+            limits[name] = limit_gbps
+    if debug and limits:
+        print(
+            "NetBox: aggregate_limit_gbps for: {}".format(", ".join(sorted(limits.keys()))),
+            file=sys.stderr,
+        )
+    return limits
+
+
 def _normalize_iface_name(iface_name):
     """Lowercase interface name for case-insensitive inventory/dry-ssh joins."""
     from uplinks.zabbix.client import normalize_interface_name
