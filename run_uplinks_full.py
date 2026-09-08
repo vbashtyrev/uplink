@@ -308,9 +308,22 @@ def main():
 
     # 2. NetBox checks (optional)
     if not args.no_netbox_apply:
-        log("Step 2: NetBox - reconciliation and application (netbox_checks.py -f {} --all --mt-ref --apply) ...".format(dry_ssh_path))
+        netbox_checks_argv = [
+            python, "netbox_checks.py", "-f", dry_ssh_path, "--all", "--mt-ref", "--apply",
+        ]
+        if args.auto:
+            netbox_checks_argv.append("--auto")
+            netbox_checks_mode = "--auto"
+        else:
+            netbox_checks_argv.append("--existing-only")
+            netbox_checks_mode = "--existing-only"
+        log(
+            "Step 2: NetBox - reconciliation and application (netbox_checks.py -f {} --all --mt-ref --apply {}) ...".format(
+                dry_ssh_path, netbox_checks_mode
+            )
+        )
         ok, out, err = run_cmd(
-            [python, "netbox_checks.py", "-f", dry_ssh_path, "--all", "--mt-ref", "--apply"],
+            netbox_checks_argv,
             cwd=SCRIPT_DIR,
             timeout=timeout,
         )

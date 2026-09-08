@@ -75,6 +75,10 @@ def test_main_human_mode_all_steps_success(monkeypatch, tmp_path):
     assert "generate_commit_rates.py" not in scripts
     assert "netbox_create_circuits.py" not in scripts
 
+    netbox_checks = next(c for c in calls if c[1] == "netbox_checks.py")
+    assert "--existing-only" in netbox_checks
+    assert "--auto" not in netbox_checks
+
     inventory = next(c for c in calls if c[1] == "netbox_uplinks_inventory.py")
     assert "--dry-run" in inventory
 
@@ -134,6 +138,10 @@ def test_main_auto_all_steps_success(monkeypatch, tmp_path):
     ]
     assert scripts == expected_order
     assert "netbox_uplinks_inventory.py" not in scripts
+
+    netbox_checks = next(c for c in calls if c[1] == "netbox_checks.py")
+    assert "--auto" in netbox_checks
+    assert "--existing-only" not in netbox_checks
 
     circuits = next(c for c in calls if c[1] == "netbox_create_circuits.py")
     assert circuits[2:6] == ["-f", "commit_rates.json", "-d", "dry-ssh.json"]

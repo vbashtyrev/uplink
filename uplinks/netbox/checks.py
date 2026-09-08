@@ -374,10 +374,11 @@ def _get_related_interface_id(nb_iface, attr_name):
     return getattr(obj, "id", None)
 
 
-def _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, relation_attr, is_target_entry_fn, relation_label):
+def _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, relation_attr, is_target_entry_fn, relation_label, existing_only=False):
     """Second pass: set the connection (lag or parent) for the interfaces by payload.
     relation_attr — "lag" or "parent"; is_target_entry_fn(entry, int_name) — predicate “this entry is participating”;
-    relation_label — signature for messages (“LAG”, “parent”)."""
+    relation_label — signature for messages (“LAG”, “parent”).
+    When existing_only is True (--existing-only): report mismatch and skip update."""
     for entry in payload:
         if not isinstance(entry, dict):
             continue
@@ -392,6 +393,14 @@ def _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, r
         if not nb_iface or not nb_target:
             continue
         if _get_related_interface_id(nb_iface, relation_attr) != getattr(nb_target, "id", None):
+            if existing_only:
+                print(
+                    "{} {}: {} → {} skipped (--existing-only)".format(
+                        dev_name, int_name, relation_label, aggregate_name
+                    ),
+                    flush=True,
+                )
+                continue
             try:
                 nb_iface.update({relation_attr: nb_target.id})
                 print("{} {}: {} set to {}".format(dev_name, int_name, relation_label, aggregate_name), flush=True)
@@ -421,10 +430,12 @@ def _find_ip_in_netbox_any_vrf(nb, address):
         return []
 
 
-def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface, addrs_f, vrf_id_f=None):
+def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface, addrs_f, vrf_id_f=None, existing_only=False):
     """Bring the IP binding to the interface in NetBox to the list from the file.
     addrs_f — list of global addresses (strings), vrf_id_f — VRF id in NetBox or None (global).
-    VRF is taken into account: the same address in different VRFs is considered different."""
+    VRF is taken into account: the same address in different VRFs is considered different.
+    When existing_only is True (--existing-only): no create, unbind or rebind; only in-place updates
+    for IPs already bound to this interface."""
     if nb is None or nb_iface is None:
         return
     addrs_n_tuples = _get_interface_ip_addresses(nb, nb_iface)
@@ -434,6 +445,14 @@ def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface,
     to_add = set_f - set_n
     try:
         for addr, vrf_id_n in to_remove:
+            if existing_only:
+                print(
+                    "IP {} {} {}: extra on interface, skipped (--existing-only)".format(
+                        dev_name, iface_display_name, addr
+                    ),
+                    flush=True,
+                )
+                continue
             existing = _find_ip_in_netbox(nb, addr, vrf_id_n)
             if existing:
                 ip_obj = existing[0]
@@ -448,6 +467,14 @@ def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface,
                 cur_id = getattr(ip_obj, "assigned_object_id", None)
                 if cur_id == nb_iface.id:
                     continue
+                if existing_only:
+                    print(
+                        "IP {} {} {}: not bound to this interface, skipped (--existing-only)".format(
+                            dev_name, iface_display_name, addr
+                        ),
+                        flush=True,
+                    )
+                    continue
                 ip_obj.assigned_object_id = nb_iface.id
                 ip_obj.assigned_object_type = "dcim.interface"
                 ip_obj.save()
@@ -460,6 +487,19 @@ def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface,
                     cur_vrf = getattr(ip_obj, "vrf", None)
                     cur_vrf_id = cur_vrf if isinstance(cur_vrf, (int, type(None))) else getattr(cur_vrf, "id", None)
                     cur_id = getattr(ip_obj, "assigned_object_id", None)
+                    if existing_only:
+                        if cur_id == nb_iface.id and cur_vrf_id != vrf_id:
+                            ip_obj.vrf = vrf_id
+                            ip_obj.save()
+                            print("IP {} {} {}: VRF changed to target".format(dev_name, iface_display_name, addr), flush=True)
+                        elif cur_id != nb_iface.id:
+                            print(
+                                "IP {} {} {}: not bound to this interface, skipped (--existing-only)".format(
+                                    dev_name, iface_display_name, addr
+                                ),
+                                flush=True,
+                            )
+                        continue
                     if cur_vrf_id != vrf_id or cur_id != nb_iface.id:
                         if cur_vrf_id != vrf_id:
                             ip_obj.vrf = vrf_id
@@ -472,6 +512,14 @@ def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface,
                         if cur_id != nb_iface.id:
                             print("IP {} {} {}: bound to interface".format(dev_name, iface_display_name, addr), flush=True)
                 else:
+                    if existing_only:
+                        print(
+                            "IP {} {} {}: not found in NetBox, skipped (--existing-only)".format(
+                                dev_name, iface_display_name, addr
+                            ),
+                            flush=True,
+                        )
+                        continue
                     create_kw = dict(
                         address=addr,
                         assigned_object_id=nb_iface.id,
@@ -485,10 +533,11 @@ def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface,
         print("Error applying IP {} {}: {}".format(dev_name, iface_display_name, e), file=sys.stderr, flush=True)
 
 
-def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f):
+def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f, existing_only=False):
     """Create or find a MAC entry in NetBox, bind it to the interface, set primary_mac_address.
     If there is already a MAC, but it is attached to another interface, we transfer it to the current one (assigned_object_id).
-    mac_f — physicalAddress value from the file."""
+    mac_f — physicalAddress value from the file.
+    When existing_only is True (--existing-only): no create, unbind or rebind between interfaces."""
     if not mac_f or not nb_iface:
         return
     mac_netbox = _mac_netbox_format(mac_f)
@@ -502,6 +551,14 @@ def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f):
             mac_id = getattr(rec, "id", None)
             current_assigned_id = getattr(rec, "assigned_object_id", None)
             if current_assigned_id is not None and current_assigned_id != nb_iface.id:
+                if existing_only:
+                    print(
+                        "MAC {} {} {}: bound to another interface, skipped (--existing-only)".format(
+                            dev_name, iface_display_name, mac_netbox
+                        ),
+                        flush=True,
+                    )
+                    return
                 try:
                     # NetBox does not allow you to reassign the MAC while it is primary on the old interface - first reset
                     old_iface = nb.dcim.interfaces.get(current_assigned_id)
@@ -518,6 +575,14 @@ def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f):
                     print("Error transferring MAC {} {} {} to interface: {} - {}".format(dev_name, iface_display_name, mac_netbox, url, e_move), file=sys.stderr, flush=True)
                     return
             elif current_assigned_id is None:
+                if existing_only:
+                    print(
+                        "MAC {} {} {}: not bound to this interface, skipped (--existing-only)".format(
+                            dev_name, iface_display_name, mac_netbox
+                        ),
+                        flush=True,
+                    )
+                    return
                 try:
                     setattr(rec, "assigned_object_type", "dcim.interface")
                     setattr(rec, "assigned_object_id", nb_iface.id)
@@ -529,6 +594,14 @@ def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f):
             else:
                 print("MAC {} {} {}: already in Netbox on this interface - {}".format(dev_name, iface_display_name, mac_netbox, url), flush=True)
         else:
+            if existing_only:
+                print(
+                    "MAC {} {} {}: not found in NetBox, skipped (--existing-only)".format(
+                        dev_name, iface_display_name, mac_netbox
+                    ),
+                    flush=True,
+                )
+                return
             created = nb.dcim.mac_addresses.create(
                 mac_address=mac_netbox,
                 assigned_object_type="dcim.interface",
@@ -538,7 +611,7 @@ def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f):
             url = getattr(created, "url", None) or getattr(created, "display", created)
             print("MAC {} {} {}: created - {}".format(dev_name, iface_display_name, mac_netbox, url), flush=True)
         mac_id = getattr(rec, "id", None)
-        if mac_id is not None:
+        if mac_id is not None and (not existing_only or getattr(rec, "assigned_object_id", None) == nb_iface.id):
             try:
                 nb_iface.update({"primary_mac_address": mac_id})
                 print("Updated {} {}: primary_mac_address={}".format(dev_name, iface_display_name, mac_id), flush=True)
@@ -762,7 +835,21 @@ def main():
         dest="apply",
         help="If there is a difference in the selected keys, update the interface in Netbox (the table is not displayed)",
     )
+    g_apply.add_argument(
+        "--existing-only",
+        action="store_true",
+        dest="existing_only",
+        help="With --apply: update existing interfaces only; do not create, unbind or rebind interface/MAC/IP objects",
+    )
+    g_apply.add_argument(
+        "--auto",
+        action="store_true",
+        dest="auto",
+        help="Legacy: with --apply allow creating missing interfaces, MAC and IP objects (--auto overrides --existing-only)",
+    )
     args = parser.parse_args()
+
+    existing_only_mode = args.existing_only and not args.auto
 
     if args.all_checks:
         args.intname = True
@@ -1203,12 +1290,28 @@ def main():
                     if aggregate_name and not entry.get("isLag") and not is_logical_unit:
                         nb_lag = nb_by_iface_name.get(aggregate_name)
                         if nb_lag and _get_related_interface_id(nb_iface, "lag") != getattr(nb_lag, "id", None):
-                            updates["lag"] = nb_lag.id
+                            if existing_only_mode:
+                                print(
+                                    "{} {}: LAG → {} skipped (--existing-only)".format(
+                                        dev_name, nb_name or int_name, aggregate_name
+                                    ),
+                                    flush=True,
+                                )
+                            else:
+                                updates["lag"] = nb_lag.id
                     # Parent interface: logical units (ae5.0) must reference parent LAG (ae5)
                     elif aggregate_name and is_logical_unit:
                         nb_parent_iface = nb_by_iface_name.get(aggregate_name)
                         if nb_parent_iface and _get_related_interface_id(nb_iface, "parent") != getattr(nb_parent_iface, "id", None):
-                            updates["parent"] = nb_parent_iface.id
+                            if existing_only_mode:
+                                print(
+                                    "{} {}: parent → {} skipped (--existing-only)".format(
+                                        dev_name, nb_name or int_name, aggregate_name
+                                    ),
+                                    flush=True,
+                                )
+                            else:
+                                updates["parent"] = nb_parent_iface.id
                     if updates:
                         try:
                             nb_iface.update(updates)
@@ -1217,10 +1320,19 @@ def main():
                             print("{} {} update error: {} - {}".format(dev_name, nb_name or int_name, updates, e), file=sys.stderr, flush=True)
                     # MAC in Netbox is a separate entity (dcim.mac-addresses); only for physical interfaces
                     if args.mac and is_physical_for_mac and (nMac or (mac_f and not mac_n)) and nb_iface is not None:
-                        _apply_mac_to_interface(nb, dev_name, nb_name or int_name, nb_iface, mac_f)
+                        _apply_mac_to_interface(
+                            nb, dev_name, nb_name or int_name, nb_iface, mac_f, existing_only=existing_only_mode
+                        )
                     # IP in Netbox - ipam.ip_addresses with assigned_object_id/type; result in a list from a file
                     if args.ip_address and nIp and nb_iface is not None:
-                        _apply_ip_addresses_to_interface(nb, dev_name, nb_name or int_name, nb_iface, addrs_f, vrf_id_f)
+                        _apply_ip_addresses_to_interface(
+                            nb, dev_name, nb_name or int_name, nb_iface, addrs_f, vrf_id_f, existing_only=existing_only_mode
+                        )
+                elif args.apply and args.intname and note_code == NOTE_MISSING and existing_only_mode:
+                    print(
+                        "Interface {} {}: not found in NetBox, skipped (--existing-only)".format(dev_name, int_name),
+                        flush=True,
+                    )
                 elif args.apply and args.intname and note_code == NOTE_MISSING:
                     # The interface was not found in NetBox - create and immediately fill in all fields from the file
                     create_data = {"device": device.id, "name": int_name}
@@ -1275,9 +1387,13 @@ def main():
                         nb_by_iface_name[int_name] = nb_iface  # so that the second pass (LAG) and subsequent writes see the new interface
                         print("Interface {} {} created: {}".format(dev_name, int_name, list(create_data.keys())), flush=True)
                         if args.mac and is_physical_for_mac and mac_f:
-                            _apply_mac_to_interface(nb, dev_name, int_name, nb_iface, mac_f)
+                            _apply_mac_to_interface(
+                                nb, dev_name, int_name, nb_iface, mac_f, existing_only=existing_only_mode
+                            )
                         if args.ip_address and addrs_f:
-                            _apply_ip_addresses_to_interface(nb, dev_name, int_name, nb_iface, addrs_f, vrf_id_f)
+                            _apply_ip_addresses_to_interface(
+                                nb, dev_name, int_name, nb_iface, addrs_f, vrf_id_f, existing_only=existing_only_mode
+                            )
                     except Exception as e:
                         print("Error creating {} {}: {} - {}".format(dev_name, int_name, create_data, e), file=sys.stderr, flush=True)
                 mt_to_set_display = mt_to_set if nM else ""
@@ -1288,8 +1404,14 @@ def main():
                     return not e.get("isLag") and not (e.get("isLogical") or (n and "." in str(n) and str(n).startswith("ae")))
                 def _is_logical_unit_entry(e, n):
                     return e.get("isLogical") or (n and "." in str(n) and str(n).startswith("ae"))
-                _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, "lag", _is_physical_lag_member, "LAG")
-                _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, "parent", _is_logical_unit_entry, "parent")
+                _apply_aggregate_relation_second_pass(
+                    dev_name, payload, nb_by_iface_name, "lag", _is_physical_lag_member, "LAG",
+                    existing_only=existing_only_mode,
+                )
+                _apply_aggregate_relation_second_pass(
+                    dev_name, payload, nb_by_iface_name, "parent", _is_logical_unit_entry, "parent",
+                    existing_only=existing_only_mode,
+                )
         if skipped_no_netbox:
             print("Skipped (the device is in the file, but not in Netbox by tag): {}.".format(", ".join(skipped_no_netbox)))
         if skipped_not_list:
