@@ -98,10 +98,10 @@ Provider
 
 ### Provider
 
-- [ ] Создать дополнительное поле `interface_aliases`.
-- [ ] Хранить в нём возможные описания провайдера на интерфейсах.
-- [ ] Создать поле `aggregate_limit_gbps`.
-- [ ] Заполнить лимиты из текущего `_provider_limits`.
+- [x] Создать дополнительное поле `interface_aliases`.
+- [x] Хранить в нём возможные описания провайдера на интерфейсах.
+- [x] Создать поле `aggregate_limit_gbps`.
+- [x] Заполнить лимиты из текущего `_provider_limits`.
 - [ ] Проверить текущие значения:
       `Cogent = 15`, `KZT = 12`.
 
@@ -115,10 +115,10 @@ Uplink: Cogent
 
 ### Circuit
 
-- [ ] Использовать стандартное поле `commit_rate`.
+- [x] Использовать стандартное поле `commit_rate`.
 - [ ] Проверить, что commit rate заполнен в каждом активном контуре.
-- [ ] Создать дополнительное поле `billing_model`.
-- [ ] Перенести значения `Burst`, `Flat`, `95thAggBurst`,
+- [x] Создать дополнительное поле `billing_model` как Selection.
+- [x] Перенести значения `Burst`, `Flat`, `95thAggBurst`,
       `FlatAggCap` и другие фактические значения.
 
 ### Общий SLA
@@ -342,9 +342,9 @@ run_uplinks_full.py
 - [x] Читать billing model Circuit из NetBox с переходным fallback.
 - [x] Использовать стандартный `Circuit.commit_rate`.
 - [x] Оставить общий SLA в конфигурации проекта без дублирования по Provider.
-- [ ] Создать и заполнить дополнительные поля в рабочем NetBox.
+- [x] Создать и заполнить дополнительные поля в рабочем NetBox.
 - [ ] Перестать использовать `commit_rates.json` после заполнения полей.
-- [ ] Перенести Provider aliases в `interface_aliases`.
+- [x] Перенести Provider aliases в `interface_aliases`.
 - [ ] При необходимости создать отдельный read-only экспорт из NetBox.
 
 Сервисы и Burst используют объединение NetBox + недостающие записи из JSON.
