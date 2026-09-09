@@ -467,6 +467,312 @@ def test_is_netbox_auth_error_401_is_auth():
     assert inv.is_netbox_auth_error(Exception("The request failed with code 401 Unauthorized: {}")) is True
 
 
+def _netbox44_path_segment(
+    border_iface,
+    cable_to_iface,
+    front_port,
+    rear_port,
+    cable_to_rear,
+    ct,
+):
+    """NetBox 4.4 flat path: Interface, Cable, FrontPort, RearPort, Cable, CircuitTermination."""
+    return [
+        border_iface,
+        cable_to_iface,
+        front_port,
+        rear_port,
+        cable_to_rear,
+        ct,
+    ]
+
+
+def _build_odf_inventory_nb(
+    *,
+    provider=None,
+    circuit=None,
+    border_device=None,
+    border_iface=None,
+    odf_device=None,
+    rear_port=None,
+    front_port=None,
+    ct=None,
+    cable_to_rear=None,
+    cable_to_iface=None,
+    paths_result=None,
+):
+    """Circuit Termination -> cable -> rearport -> frontport -> cable -> interface."""
+    provider = provider or _provider(name="Cogent")
+    circuit = circuit or _circuit(cid="Cogent-MIA-1", circuit_id=100)
+    border_device = border_device or _Record(id=1, name="MIA-EQX-7280QR-1", tag="border")
+    border_iface = border_iface or _Record(
+        id=10000,
+        name="Ethernet23/1",
+        device=border_device,
+        device_id=border_device.id,
+        url="https://netbox.example/api/dcim/interfaces/10000/",
+    )
+    odf_device = odf_device or _Record(id=99, name="MIA-ODF-1")
+    rear_port = rear_port or _Record(
+        id=5,
+        name="Trunk-1",
+        device=odf_device,
+        url="https://netbox.example/api/dcim/rear-ports/5/",
+    )
+    front_port = front_port or _Record(
+        id=121,
+        name="Port-1",
+        device=odf_device,
+        url="https://netbox.example/api/dcim/front-ports/121/",
+    )
+    ct = ct or _Record(
+        id=44,
+        term_side="A",
+        cable=_Record(id=7564),
+        circuit=circuit,
+        circuit_id=circuit.id,
+        url="https://netbox.example/api/circuits/circuit-terminations/44/",
+    )
+    cable_to_rear = cable_to_rear or _Record(
+        id=7564,
+        url="https://netbox.example/api/dcim/cables/7564/",
+        a_terminations=[{"object_type": "circuits.circuittermination", "object_id": ct.id}],
+        b_terminations=[{"object_type": "dcim.rearport", "object_id": rear_port.id}],
+    )
+    cable_to_iface = cable_to_iface or _Record(
+        id=6615,
+        url="https://netbox.example/api/dcim/cables/6615/",
+    )
+    if paths_result is None:
+        paths_result = [
+            {
+                "origin": border_iface,
+                "destination": ct,
+                "path": [
+                    _netbox44_path_segment(
+                        border_iface,
+                        cable_to_iface,
+                        front_port,
+                        rear_port,
+                        cable_to_rear,
+                        ct,
+                    )
+                ],
+            }
+        ]
+
+    rear_port.paths = MagicMock(return_value=paths_result)
+
+    class _RearPorts:
+        def get(self, pk):
+            if pk == rear_port.id:
+                return rear_port
+            return None
+
+    nb = _build_inventory_nb(
+        provider=provider,
+        circuit=circuit,
+        device=border_device,
+        iface=border_iface,
+        ct=ct,
+        cable=cable_to_rear,
+    )
+    nb.dcim.rear_ports = _RearPorts()
+    return nb, rear_port
+
+
+def test_collect_path_through_rear_front_ports():
+    nb, rear_port = _build_odf_inventory_nb()
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert len(report["complete"]) == 1
+    row = report["complete"][0]
+    assert row["provider"] == "Cogent"
+    assert row["circuit_id"] == "Cogent-MIA-1"
+    assert row["device"] == "MIA-EQX-7280QR-1"
+    assert row["interface"] == "Ethernet23/1"
+    assert report["incomplete"] == []
+    rear_port.paths.assert_called_once()
+
+
+def test_incomplete_pass_through_path_without_interface():
+    provider = _provider(name="Cogent")
+    circuit = _circuit(cid="Cogent-MIA-1", circuit_id=100)
+    odf_device = _Record(id=99, name="MIA-ODF-1")
+    rear_port = _Record(
+        id=5,
+        name="Trunk-1",
+        device=odf_device,
+        url="https://netbox.example/api/dcim/rear-ports/5/",
+    )
+    ct = _Record(
+        id=44,
+        term_side="A",
+        cable=_Record(id=7564),
+        circuit=circuit,
+        circuit_id=circuit.id,
+    )
+    cable_to_rear = _Record(
+        id=7564,
+        a_terminations=[{"object_type": "circuits.circuittermination", "object_id": ct.id}],
+        b_terminations=[{"object_type": "dcim.rearport", "object_id": rear_port.id}],
+    )
+    front_port = _Record(
+        id=121,
+        name="Port-1",
+        url="https://netbox.example/api/dcim/front-ports/121/",
+    )
+    rear_port.paths = MagicMock(
+        return_value=[
+            {
+                "origin": None,
+                "destination": None,
+                "path": [[rear_port, cable_to_rear, front_port]],
+            }
+        ]
+    )
+
+    class _RearPorts:
+        def get(self, pk):
+            if pk == rear_port.id:
+                return rear_port
+            return None
+
+    nb = _build_inventory_nb(circuit=circuit, ct=ct, cable=cable_to_rear)
+    nb.dcim.rear_ports = _RearPorts()
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
+    rear_port.paths.assert_called_once()
+
+
+def test_paths_called_read_only():
+    nb, rear_port = _build_odf_inventory_nb()
+    rear_port.create = MagicMock(side_effect=AssertionError("create must not be called"))
+    rear_port.delete = MagicMock(side_effect=AssertionError("delete must not be called"))
+    rear_port.update = MagicMock(side_effect=AssertionError("update must not be called"))
+    inv.collect_uplink_inventory(nb, tag="border")
+    rear_port.paths.assert_called_once()
+    rear_port.create.assert_not_called()
+    rear_port.delete.assert_not_called()
+    rear_port.update.assert_not_called()
+
+
+def test_interface_first_in_path_segment():
+    """NetBox 4.4 may place the interface as the first element in a path segment."""
+    nb, rear_port = _build_odf_inventory_nb()
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert len(report["complete"]) == 1
+    assert report["complete"][0]["interface"] == "Ethernet23/1"
+    assert report["complete"][0]["device"] == "MIA-EQX-7280QR-1"
+
+
+def test_pass_through_non_border_device():
+    core_device = _Record(id=2, name="core-switch", tag="core")
+    core_iface = _Record(
+        id=10000,
+        name="Ethernet23/1",
+        device=core_device,
+        device_id=core_device.id,
+        url="https://netbox.example/api/dcim/interfaces/10000/",
+    )
+    nb, rear_port = _build_odf_inventory_nb(border_iface=core_iface, border_device=core_device)
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_NOT_BORDER_DEVICE
+    assert report["incomplete"][0]["device"] == "core-switch"
+    assert report["incomplete"][0]["interface"] == "Ethernet23/1"
+    rear_port.paths.assert_called_once()
+
+
+def test_pass_through_selects_matching_path_among_multiple():
+    border_device = _Record(id=1, name="MIA-EQX-7280QR-1", tag="border")
+    border_iface = _Record(
+        id=10000,
+        name="Ethernet23/1",
+        device=border_device,
+        device_id=border_device.id,
+        url="https://netbox.example/api/dcim/interfaces/10000/",
+    )
+    wrong_device = _Record(id=3, name="other-border", tag="border")
+    wrong_iface = _Record(
+        id=20000,
+        name="Ethernet99/1",
+        device=wrong_device,
+        device_id=wrong_device.id,
+        url="https://netbox.example/api/dcim/interfaces/20000/",
+    )
+    odf_device = _Record(id=99, name="MIA-ODF-1")
+    rear_port = _Record(
+        id=5,
+        name="Trunk-1",
+        device=odf_device,
+        url="https://netbox.example/api/dcim/rear-ports/5/",
+    )
+    front_port = _Record(
+        id=121,
+        name="Port-1",
+        device=odf_device,
+        url="https://netbox.example/api/dcim/front-ports/121/",
+    )
+    ct = _Record(
+        id=44,
+        term_side="A",
+        cable=_Record(id=7564),
+        circuit=_circuit(cid="Cogent-MIA-1"),
+        circuit_id=100,
+        url="https://netbox.example/api/circuits/circuit-terminations/44/",
+    )
+    cable_to_rear = _Record(
+        id=7564,
+        url="https://netbox.example/api/dcim/cables/7564/",
+        a_terminations=[{"object_type": "circuits.circuittermination", "object_id": ct.id}],
+        b_terminations=[{"object_type": "dcim.rearport", "object_id": rear_port.id}],
+    )
+    cable_to_iface = _Record(id=6615, url="https://netbox.example/api/dcim/cables/6615/")
+    wrong_cable = _Record(id=9999, url="https://netbox.example/api/dcim/cables/9999/")
+    wrong_ct = _Record(
+        id=999,
+        url="https://netbox.example/api/circuits/circuit-terminations/999/",
+    )
+    paths_result = [
+        {
+            "origin": wrong_iface,
+            "destination": wrong_ct,
+            "path": [[wrong_iface, wrong_cable, wrong_ct]],
+        },
+        {
+            "origin": border_iface,
+            "destination": ct,
+            "path": [
+                _netbox44_path_segment(
+                    border_iface,
+                    cable_to_iface,
+                    front_port,
+                    rear_port,
+                    cable_to_rear,
+                    ct,
+                )
+            ],
+        },
+    ]
+    nb, rear_port = _build_odf_inventory_nb(
+        border_device=border_device,
+        border_iface=border_iface,
+        rear_port=rear_port,
+        front_port=front_port,
+        ct=ct,
+        cable_to_rear=cable_to_rear,
+        cable_to_iface=cable_to_iface,
+        paths_result=paths_result,
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert len(report["complete"]) == 1
+    assert report["complete"][0]["interface"] == "Ethernet23/1"
+    assert report["complete"][0]["device"] == "MIA-EQX-7280QR-1"
+    rear_port.paths.assert_called_once()
+
+
 def test_auth_mid_walk_clears_partial_results():
     circuit1 = _circuit(cid="CKT-1", circuit_id=100)
     circuit2 = _circuit(cid="CKT-2", circuit_id=101)

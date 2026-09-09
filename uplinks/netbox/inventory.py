@@ -178,39 +178,279 @@ def _object_type_key(value):
         return ""
 
 
-def _interface_from_cable(nb, cable_obj, debug=False):
-    """Return interface record from cable a/b terminations, or None."""
+def _is_interface_object_type(ot_key):
+    return "interface" in ot_key and "circuit" not in ot_key
+
+
+def _safe_get_mapping(obj, key, default=None):
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    try:
+        return getattr(obj, key, default)
+    except Exception:
+        pass
+    try:
+        return obj[key]
+    except Exception:
+        pass
+    return default
+
+
+def _record_object_id(record):
+    if record is None:
+        return None
+    if isinstance(record, dict):
+        return record.get("id")
+    try:
+        return getattr(record, "id", None)
+    except Exception:
+        return None
+
+
+def _object_type_from_url(url):
+    url = (url or "").lower()
+    if "/dcim/interfaces/" in url:
+        return "dcim.interface"
+    if "/dcim/rear-ports/" in url:
+        return "dcim.rearport"
+    if "/dcim/front-ports/" in url:
+        return "dcim.frontport"
+    if "/dcim/cables/" in url:
+        return "dcim.cable"
+    if "/circuits/circuit-terminations/" in url:
+        return "circuits.circuittermination"
+    return ""
+
+
+def _record_object_type_key(record):
+    if record is None:
+        return ""
+    if isinstance(record, dict):
+        url = record.get("url") or ""
+        if url:
+            return _object_type_from_url(url)
+        ot = record.get("object_type") or record.get("object_type_id")
+        return _object_type_key(ot)
+    url = ""
+    try:
+        url = getattr(record, "url", "") or ""
+    except Exception:
+        pass
+    if url:
+        return _object_type_from_url(url)
+    cls_name = type(record).__name__.lower()
+    type_map = {
+        "interfaces": "dcim.interface",
+        "interface": "dcim.interface",
+        "rearports": "dcim.rearport",
+        "rearport": "dcim.rearport",
+        "frontports": "dcim.frontport",
+        "frontport": "dcim.frontport",
+        "cables": "dcim.cable",
+        "cable": "dcim.cable",
+        "termination": "circuits.circuittermination",
+        "circuittermination": "circuits.circuittermination",
+    }
+    return type_map.get(cls_name, "")
+
+
+def _record_is_interface(record):
+    ot_key = _record_object_type_key(record)
+    return "interface" in ot_key and "circuit" not in ot_key
+
+
+def _record_is_cable(record):
+    return "cable" in _record_object_type_key(record)
+
+
+def _record_is_circuit_termination(record):
+    ot_key = _record_object_type_key(record)
+    return "circuittermination" in ot_key or "circuit termination" in ot_key
+
+
+def _iter_path_objects(path_info):
+    if path_info is None:
+        return
+    for key in ("origin", "destination"):
+        obj = _safe_get_mapping(path_info, key)
+        if obj is not None:
+            yield obj
+    path_segments = _safe_get_mapping(path_info, "path") or []
+    if not isinstance(path_segments, (list, tuple)):
+        return
+    for segment in path_segments:
+        if isinstance(segment, (list, tuple)):
+            for obj in segment:
+                if obj is not None:
+                    yield obj
+        elif segment is not None:
+            yield segment
+
+
+def _path_matches_cable_and_termination(path_info, cable_id, circuit_termination_id):
+    if cable_id is None or circuit_termination_id is None:
+        return False
+    has_cable = False
+    has_ct = False
+    for obj in _iter_path_objects(path_info):
+        try:
+            oid = _record_object_id(obj)
+            if oid is None:
+                continue
+            if int(oid) == int(cable_id) and _record_is_cable(obj):
+                has_cable = True
+            if int(oid) == int(circuit_termination_id) and _record_is_circuit_termination(obj):
+                has_ct = True
+        except (TypeError, ValueError):
+            continue
+        except Exception:
+            continue
+    return has_cable and has_ct
+
+
+def _interface_from_path_info(path_info, circuit_termination_id=None):
+    """Extract confirmed terminal dcim.interface from a validated paths() entry."""
+    objects = list(_iter_path_objects(path_info))
+    interfaces = []
+    ct_index = None
+    for index, obj in enumerate(objects):
+        try:
+            if _record_is_interface(obj):
+                interfaces.append((index, obj))
+            if circuit_termination_id is not None:
+                oid = _record_object_id(obj)
+                if (
+                    oid is not None
+                    and int(oid) == int(circuit_termination_id)
+                    and _record_is_circuit_termination(obj)
+                ):
+                    ct_index = index
+        except (TypeError, ValueError):
+            continue
+        except Exception:
+            continue
+
+    if not interfaces:
+        return None
+    if len(interfaces) == 1:
+        return interfaces[0][1]
+    if ct_index is not None:
+        farthest = max(interfaces, key=lambda item: abs(item[0] - ct_index))
+        return farthest[1]
+    return interfaces[-1][1]
+
+
+def _cable_terminations(cable_obj):
     a_terms = getattr(cable_obj, "a_terminations", None) or []
     b_terms = getattr(cable_obj, "b_terminations", None) or []
     if not isinstance(a_terms, list):
         a_terms = [a_terms] if a_terms else []
     if not isinstance(b_terms, list):
         b_terms = [b_terms] if b_terms else []
+    return a_terms, b_terms
 
-    interface_oid = None
+
+def _termination_object_type_and_id(term):
+    if isinstance(term, dict):
+        ot = term.get("object_type") or term.get("object_type_id")
+        oid = term.get("object_id")
+    else:
+        ot = getattr(term, "object_type", None) or getattr(term, "object_type_id", None)
+        oid = getattr(term, "object_id", None)
+    return ot, oid
+
+
+def _port_from_cable(nb, cable_obj, debug=False):
+    """Return rear/front port record from cable terminations, or None."""
+    a_terms, b_terms = _cable_terminations(cable_obj)
+    port_oid = None
+    is_rear = None
     for term in a_terms + b_terms:
-        if isinstance(term, dict):
-            ot = term.get("object_type") or term.get("object_type_id")
-            oid = term.get("object_id")
-        else:
-            ot = getattr(term, "object_type", None) or getattr(term, "object_type_id", None)
-            oid = getattr(term, "object_id", None)
+        ot, oid = _termination_object_type_and_id(term)
         if not oid:
             continue
         ot_key = _object_type_key(ot)
-        if "interface" in ot_key and "circuit" not in ot_key:
-            interface_oid = oid
+        if "rearport" in ot_key:
+            port_oid = oid
+            is_rear = True
             break
-    if not interface_oid:
+        if "frontport" in ot_key:
+            port_oid = oid
+            is_rear = False
+            break
+    if not port_oid:
         return None
 
+    endpoint = nb.dcim.rear_ports if is_rear else nb.dcim.front_ports
+    if endpoint is None or not hasattr(endpoint, "get"):
+        return None
     try:
-        return nb.dcim.interfaces.get(interface_oid)
+        return endpoint.get(port_oid)
     except Exception as e:
         _raise_if_netbox_auth(e)
         if debug:
-            print("dcim.interfaces.get({}): {}".format(interface_oid, e), file=sys.stderr)
+            label = "rear_ports" if is_rear else "front_ports"
+            print("dcim.{}.get({}): {}".format(label, port_oid, e), file=sys.stderr)
         return None
+
+
+def _interface_from_port_paths(nb, port, cable_id, circuit_termination_id, debug=False):
+    """Trace through pass-through port paths() to find terminal dcim.interface."""
+    paths_fn = getattr(port, "paths", None)
+    if not callable(paths_fn):
+        return None
+    try:
+        path_list = paths_fn()
+    except Exception as e:
+        _raise_if_netbox_auth(e)
+        if debug:
+            print("{}.paths(): {}".format(getattr(port, "name", port), e), file=sys.stderr)
+        return None
+    if not path_list or not isinstance(path_list, (list, tuple)):
+        return None
+    for path_info in path_list:
+        if not isinstance(path_info, dict):
+            continue
+        if not _path_matches_cable_and_termination(path_info, cable_id, circuit_termination_id):
+            continue
+        iface = _interface_from_path_info(path_info, circuit_termination_id=circuit_termination_id)
+        if iface:
+            return iface
+    return None
+
+
+def _interface_from_cable(nb, cable_obj, cable_id=None, circuit_termination_id=None, debug=False):
+    """Return interface from cable terminations or traced pass-through port paths()."""
+    if cable_id is None:
+        cable_id = _record_object_id(cable_obj)
+    a_terms, b_terms = _cable_terminations(cable_obj)
+
+    interface_oid = None
+    for term in a_terms + b_terms:
+        ot, oid = _termination_object_type_and_id(term)
+        if not oid:
+            continue
+        ot_key = _object_type_key(ot)
+        if _is_interface_object_type(ot_key):
+            interface_oid = oid
+            break
+    if interface_oid:
+        try:
+            return nb.dcim.interfaces.get(interface_oid)
+        except Exception as e:
+            _raise_if_netbox_auth(e)
+            if debug:
+                print("dcim.interfaces.get({}): {}".format(interface_oid, e), file=sys.stderr)
+            return None
+
+    port = _port_from_cable(nb, cable_obj, debug=debug)
+    if not port:
+        return None
+    return _interface_from_port_paths(
+        nb, port, cable_id, circuit_termination_id, debug=debug
+    )
 
 
 def _resolve_device(nb, iface):
@@ -398,7 +638,14 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
                 stats["incomplete"] += 1
                 continue
 
-            iface = _interface_from_cable(nb, cable_obj, debug=debug)
+            ct_a_id = getattr(ct_a, "id", None)
+            iface = _interface_from_cable(
+                nb,
+                cable_obj,
+                cable_id=cable_id,
+                circuit_termination_id=ct_a_id,
+                debug=debug,
+            )
             if not iface:
                 result["incomplete"].append(
                     _incomplete_entry(base, REASON_CABLE_NOT_TO_INTERFACE, cable_id=cable_id)
