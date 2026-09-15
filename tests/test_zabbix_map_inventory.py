@@ -74,6 +74,7 @@ def test_update_map_prefers_inventory_provider(monkeypatch):
         items,
         desc,
         device_iface_to_provider=inventory_map,
+        inventory_scoped=True,
     )
     assert err is None
     assert sid == "55"
@@ -95,12 +96,100 @@ def test_update_map_fallback_description_without_inventory(monkeypatch):
         items,
         desc,
         device_iface_to_provider={},
+        inventory_scoped=False,
     )
     assert err is None
     assert sid == "55"
     selement_updates = [u for u in updates if u.get("selements")]
     labels = [el.get("label") for u in selement_updates for el in u.get("selements", [])]
     assert "Cogent Legacy" in labels
+
+
+def test_update_map_excludes_out_of_scope_uplink_description(monkeypatch):
+    devices = {
+        "WAW-EQX-7280QR-2": [
+            {
+                "name": "Ethernet23/1",
+                "description": "Uplink: HurricaneE",
+            },
+            {
+                "name": "Ethernet34/1",
+                "description": "Uplink: Fiord and MSK PING-WIN 3Gbps link",
+            },
+        ],
+    }
+    host_id = {"WAW-EQX-7280QR-2": "102"}
+    items = {
+        ("WAW-EQX-7280QR-2", "ethernet23/1"): {
+            "itemid_in": "501",
+            "itemid_out": "502",
+            "bits_in": 'net.if.in["Ethernet23/1"]',
+            "bits_out": 'net.if.out["Ethernet23/1"]',
+        },
+        ("WAW-EQX-7280QR-2", "ethernet34/1"): {
+            "itemid_in": "601",
+            "itemid_out": "602",
+            "bits_in": 'net.if.in["Ethernet34/1"]',
+            "bits_out": 'net.if.out["Ethernet34/1"]',
+        },
+    }
+    inventory_map = {("WAW-EQX-7280QR-2", "ethernet23/1"): "Hurricane"}
+    map_state = {
+        "sysmapid": "58",
+        "selements": [
+            {
+                "selementid": "1",
+                "elementtype": 0,
+                "elements": [{"hostid": "102"}],
+                "label": "WAW-EQX-7280QR-2",
+            },
+        ],
+        "links": [],
+    }
+    updates = []
+
+    def map_get(params):
+        if params.get("sysmapids"):
+            return [dict(map_state)]
+        if (params.get("filter") or {}).get("name") == MAP_NAME:
+            return [{"sysmapid": "58"}]
+        return []
+
+    (
+        build_standard_zabbix_mocker()
+        .on("map.get", map_get)
+        .on("map.create", lambda p: {"sysmapids": ["58"]})
+        .on("map.update", lambda p: updates.append(p) or True)
+        .activate(monkeypatch)
+    )
+    monkeypatch.setattr(
+        "zabbix_map.get_provider_aggregate_triggers",
+        lambda url, token, providers, debug=False: {},
+    )
+    monkeypatch.setattr(
+        "zabbix_map.get_link_commit_triggers",
+        lambda url, token, hostids, debug=False: {},
+    )
+
+    err, sid = update_uplinks_map(
+        "https://z.example/api_jsonrpc.php",
+        "t",
+        devices,
+        host_id,
+        items,
+        {
+            "Uplink: HurricaneE": "Hurricane Legacy",
+            "Uplink: Fiord and MSK PING-WIN 3Gbps link": "Fiord Legacy",
+        },
+        device_iface_to_provider=inventory_map,
+        inventory_scoped=True,
+    )
+    assert err is None
+    selement_updates = [u for u in updates if u.get("selements")]
+    labels = [el.get("label") for u in selement_updates for el in u.get("selements", [])]
+    assert "Hurricane" in labels
+    assert "Fiord Legacy" not in labels
+    assert "Fiord" not in labels
 
 
 def test_update_map_juniper_logical_inventory_provider(monkeypatch):
@@ -163,6 +252,7 @@ def test_update_map_juniper_logical_inventory_provider(monkeypatch):
         items,
         desc,
         device_iface_to_provider=inventory_map,
+        inventory_scoped=True,
     )
     assert err is None
     selement_updates = [u for u in updates if u.get("selements")]
@@ -187,6 +277,7 @@ def test_update_map_inventory_without_uplink_description(monkeypatch):
         items,
         {},
         device_iface_to_provider=inventory_map,
+        inventory_scoped=True,
     )
     assert err is None
     selement_updates = [u for u in updates if u.get("selements")]
@@ -261,6 +352,7 @@ def test_update_map_juniper_member_inventory_to_logical(monkeypatch):
         items,
         {},
         device_iface_to_provider=inventory_map,
+        inventory_scoped=True,
     )
     assert err is None
     selement_updates = [u for u in updates if u.get("selements")]

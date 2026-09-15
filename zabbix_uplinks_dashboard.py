@@ -6,8 +6,6 @@ import json
 import os
 import sys
 
-import pynetbox
-
 from env_urls import load_env_file_if_present
 from zabbix_map import (
     DEFAULT_INPUT,
@@ -23,6 +21,7 @@ from zabbix_map import (
     _get_zabbix_url_token,
 )
 from uplinks.netbox.inventory import (
+    arm_netbox_incomplete_guard,
     is_uplink_iface,
     load_uplink_provider_context,
     resolve_provider_name_for_iface,
@@ -42,42 +41,14 @@ AGGREGATE_ITEM_KEY_IN = "aggregate.bits.in[]"
 AGGREGATE_ITEM_KEY_OUT = "aggregate.bits.out[]"
 
 
-def _get_providers_from_inventory(dry_ssh_devices, debug=False):
-    """Return provider names from complete NetBox inventory or [] on error."""
-    ctx = load_uplink_provider_context(dry_ssh_devices, debug=debug)
-    if not ctx:
-        return []
-    providers = sorted(ctx.get("providers") or [])
-    if debug and providers:
-        print(
-            "NetBox: providers from complete inventory: {}".format(", ".join(providers)),
-            file=sys.stderr,
-        )
-    return providers
-
-
-def _get_providers_from_netbox(tag, debug=False):
-    """Return provider names from NetBox by tag or [] on error."""
-    url = os.environ.get("NETBOX_URL", "").strip()
-    token = os.environ.get("NETBOX_TOKEN", "").strip()
-    if not url or not token:
-        if debug:
-            print("NetBox: NETBOX_URL/NETBOX_TOKEN are not set - providers only from the config", file=sys.stderr)
-        return []
-    try:
-        nb = pynetbox.api(url, token=token)
-        providers = list(nb.circuits.providers.filter(tag=tag))
-        names = [p.name for p in providers if getattr(p, "name", None)]
-        if debug and names:
-            print("NetBox: providers with tag {}: {}".format(tag, ", ".join(names)), file=sys.stderr)
-        return names
-    except Exception as e:
-        if debug:
-            print("NetBox: failed to get providers ({}): {}".format(tag, e), file=sys.stderr)
-        return []
-
-
-def _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name, device_iface_to_provider=None):
+def _build_edges(
+    devices,
+    host_id_by_name,
+    items_by_host_iface,
+    desc_to_name,
+    device_iface_to_provider=None,
+    inventory_scoped=False,
+):
     """Build per-(host, provider) edge list similar to zabbix_map."""
     edges_raw = []
     for hostname in sorted(devices.keys()):
@@ -86,7 +57,10 @@ def _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name, de
             continue
         for iface in devices[hostname]:
             if not is_uplink_iface(
-                iface, hostname=hostname, device_iface_to_provider=device_iface_to_provider
+                iface,
+                hostname=hostname,
+                device_iface_to_provider=device_iface_to_provider,
+                inventory_scoped=inventory_scoped,
             ):
                 continue
             iface_name = iface.get("name", "")
@@ -611,10 +585,15 @@ def main():
     parser.add_argument("--dashboard-by-provider", default=DASHBOARD_NAME_BY_PROVIDER, metavar="NAME",
                         help="Summary dashboard for providers with >1 link (tab = provider). Empty line - do not create")
     parser.add_argument("--providers", nargs="*", default=None, metavar="NAME",
-                        help="Providers for the summary dashboard (default from uplinks_config: Cogent, HE)")
+                        help="Providers for the summary dashboard (default: PROVIDERS_FOR_SUMMARY from uplinks_config plus providers from scoped NetBox inventory)")
     parser.add_argument("--no-cache", action="store_true", help="Do not use Zabbix cache")
     parser.add_argument("--no-show-threshold", action="store_true",
                         help="Do not draw trigger thresholds (Simple triggers) on graphs")
+    parser.add_argument(
+        "--legacy-provider-filter",
+        action="store_true",
+        help="Use description-based uplink filter instead of NetBox circuit scope (legacy)",
+    )
     parser.add_argument("--debug", action="store_true", help="Debug output")
     args = parser.parse_args()
     show_threshold = not args.no_show_threshold
@@ -627,9 +606,16 @@ def main():
     desc_to_name = load_description_map(args.description_map)
 
     device_iface_to_provider = {}
-    inv_ctx = load_uplink_provider_context(devices, debug=args.debug)
-    if inv_ctx:
-        device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
+    inventory_scoped = not args.legacy_provider_filter
+    inventory_read_error = False
+    inv_ctx = None
+    if not args.legacy_provider_filter:
+        inv_ctx = load_uplink_provider_context(devices, debug=args.debug)
+        if inv_ctx is not None:
+            device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
+            inventory_read_error = bool(inv_ctx.get("read_error"))
+            if inventory_read_error:
+                arm_netbox_incomplete_guard(inv_ctx.get("stats"))
 
     url, token = _get_zabbix_url_token()
     if not url:
@@ -664,7 +650,19 @@ def main():
         items_by_host_iface,
         desc_to_name,
         device_iface_to_provider=device_iface_to_provider,
+        inventory_scoped=inventory_scoped,
     )
+    if inventory_read_error:
+        print(
+            "NetBox data is incomplete; dashboard not updated "
+            "(replacing pages from partial data would drop widgets)",
+            file=sys.stderr,
+        )
+        print(
+            "NetBox inventory is incomplete; dashboard run marked as failed",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if not edges:
         print("No data for dashboard (no hosts in Zabbix or uplink without items)", file=sys.stderr)
         sys.exit(1)
@@ -691,7 +689,14 @@ def main():
             providers_filter = args.providers
         else:
             # Config + providers from complete NetBox inventory (no duplicates, order: config, then inventory)
-            from_inventory = _get_providers_from_inventory(devices, debug=args.debug)
+            from_inventory = sorted((inv_ctx or {}).get("providers") or [])
+            if args.debug and from_inventory:
+                print(
+                    "NetBox: providers from complete inventory: {}".format(
+                        ", ".join(from_inventory)
+                    ),
+                    file=sys.stderr,
+                )
             seen = set()
             providers_filter = []
             for p in list(PROVIDERS_FOR_SUMMARY) + from_inventory:

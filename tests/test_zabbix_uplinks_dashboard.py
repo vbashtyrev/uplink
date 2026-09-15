@@ -25,7 +25,7 @@ def test_build_edges_skips_non_uplink():
             {"name": "Eth2", "description": "management"},
         ],
     }
-    edges = _build_edges(devices, {"h1": "1"}, {}, {"Uplink: ISP": "ISP"})
+    edges = _build_edges(devices, {"h1": "1"}, {}, {"Uplink: ISP": "ISP"}, inventory_scoped=False)
     assert len(edges) == 1
     assert edges[0][2] == "Eth1"
 

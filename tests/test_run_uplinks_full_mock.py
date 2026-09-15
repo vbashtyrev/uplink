@@ -66,6 +66,7 @@ def test_run_no_fetch_human_mode(monkeypatch, tmp_path, minimal_dry_ssh, minimal
     with patch.object(full.argparse.ArgumentParser, "parse_args") as mock_parse:
         mock_parse.return_value = full.argparse.Namespace(
             auto=False,
+            plan=False,
             no_fetch=True,
             from_file=False,
             refresh=False,
@@ -127,6 +128,7 @@ def test_run_auto_mode_includes_legacy_steps(monkeypatch, tmp_path, minimal_dry_
     with patch.object(full.argparse.ArgumentParser, "parse_args") as mock_parse:
         mock_parse.return_value = full.argparse.Namespace(
             auto=True,
+            plan=False,
             no_fetch=True,
             from_file=False,
             refresh=False,

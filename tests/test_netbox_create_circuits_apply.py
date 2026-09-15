@@ -49,6 +49,7 @@ def test_main_apply_circuit(monkeypatch, netbox_env, tmp_path, capsys):
                 str(cr),
                 "-d",
                 str(FIXTURES / "dry_ssh_minimal.json"),
+                "--auto",
             ],
         )
         with pytest.raises(SystemExit) as exc:

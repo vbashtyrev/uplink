@@ -16,6 +16,7 @@ from uplinks.data import (
     load_devices_json,
 )
 from uplinks.netbox.inventory import (
+    arm_netbox_incomplete_guard,
     is_uplink_iface,
     load_uplink_provider_context,
     resolve_provider_name_for_iface,
@@ -473,6 +474,7 @@ def update_uplinks_map(
     debug=False,
     prune_obsolete=True,
     device_iface_to_provider=None,
+    inventory_scoped=True,
 ):
     """
     Update the map: hosts, providers (image), links.
@@ -492,7 +494,10 @@ def update_uplinks_map(
             continue
         for iface in devices[hostname]:
             if not is_uplink_iface(
-                iface, hostname=hostname, device_iface_to_provider=device_iface_to_provider
+                iface,
+                hostname=hostname,
+                device_iface_to_provider=device_iface_to_provider,
+                inventory_scoped=inventory_scoped,
             ):
                 continue
             iface_name = iface.get("name", "")
@@ -680,6 +685,11 @@ def update_uplinks_map(
     need_clear_links = pruned_selements > 0 or len(old_selements) < len(old_selements_raw)
     map_sid = _api_map_id(sysmapid)
     if need_clear_links:
+        n_clear = len(existing[0].get("links") or [])
+        print(
+            "Warning: clearing {} map link(s) after element merge/collapse".format(n_clear),
+            file=sys.stderr,
+        )
         _, err_clear = zabbix_request(
             url, token, "map.update", {"sysmapid": map_sid, "links": []}, debug=debug
         )
@@ -782,13 +792,8 @@ def update_uplinks_map(
             link["linktriggers"] = linktriggers
         new_links.append(link)
 
-    # Existing links: only those that are not from our hosts; replace deleted duplicates with the canonical selementid
-    our_host_sids_str = {str(s) for s in our_host_sids}
-    links_merged = []
-    for l in links_existing:
+    def _link_entry_from_existing(l):
         s1 = str(l.get("selementid1", ""))
-        if s1 in our_host_sids_str:
-            continue
         s2 = str(l.get("selementid2", ""))
         s1 = selementid_to_canonical.get(s1, s1)
         s2 = selementid_to_canonical.get(s2, s2)
@@ -800,7 +805,6 @@ def update_uplinks_map(
                 "selementid2": _api_map_id(s2),
                 "label": label,
             }
-            # Save trigger bindings to the link when updating
             lt_list = l.get("linktriggers") or []
             if lt_list:
                 entry["linktriggers"] = [
@@ -814,7 +818,16 @@ def update_uplinks_map(
                 "selementid2": _api_map_id(s2),
                 "label": label,
             }
-        links_merged.append(entry)
+        return entry
+
+    # Existing links: only those that are not from our hosts; replace deleted duplicates with the canonical selementid
+    our_host_sids_str = {str(s) for s in our_host_sids}
+    links_merged = []
+    for l in links_existing:
+        s1 = str(l.get("selementid1", ""))
+        if s1 in our_host_sids_str:
+            continue
+        links_merged.append(_link_entry_from_existing(l))
     links_merged.extend(new_links)
     # Ensure that each link has a label key (string) so that there are no gaps in the JSON.
     for link in links_merged:
@@ -904,6 +917,11 @@ def main():
         help="When --update-map, do not remove hosts/providers from the map that are not in the current JSON (old behavior)",
     )
     parser.add_argument(
+        "--legacy-provider-filter",
+        action="store_true",
+        help="Use description-based uplink filter instead of NetBox circuit scope (legacy)",
+    )
+    parser.add_argument(
         "--export-map",
         metavar="SYSMAPID",
         help="Output JSON maps from the API (sysmapid) for comparison with a manual map; ZABBIX_URL and ZABBIX_TOKEN are needed",
@@ -987,10 +1005,15 @@ def main():
 
     use_zabbix = args.zabbix or args.create_map or args.update_map or default_create_map
     device_iface_to_provider = {}
-    if use_zabbix:
+    inventory_scoped = not args.legacy_provider_filter
+    inventory_read_error = False
+    if use_zabbix and not args.legacy_provider_filter:
         inv_ctx = load_uplink_provider_context(devices, debug=args.debug)
-        if inv_ctx:
+        if inv_ctx is not None:
             device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
+            inventory_read_error = bool(inv_ctx.get("read_error"))
+            if inventory_read_error:
+                arm_netbox_incomplete_guard(inv_ctx.get("stats"))
 
     items_by_host_iface = {}
     if use_zabbix:
@@ -1023,9 +1046,10 @@ def main():
     else:
         host_id_by_name = {}
 
-    # Table to output to the console (only with --print-table)
+    # Table to output to the console (--print-table, or on incomplete inventory before exit)
+    print_table = args.print_table or inventory_read_error
     rows = []
-    if args.print_table:
+    if print_table:
         header = ("hostname", "interface", "description", "ISP")
         if use_zabbix:
             header = ("hostname", "hostid", "interface", "description", "ISP", "key Bits received", "key Bits sent")
@@ -1057,22 +1081,28 @@ def main():
 
     # Map update on demand
     if args.update_map:
-        prune_map = (not args.host) and (not args.keep_obsolete_map_elements)
-        err_msg, sysmapid = update_uplinks_map(
-            url,
-            token,
-            devices,
-            host_id_by_name,
-            items_by_host_iface,
-            desc_to_name,
-            debug=args.debug,
-            prune_obsolete=prune_map,
-            device_iface_to_provider=device_iface_to_provider,
-        )
-        if err_msg:
-            print(err_msg, file=sys.stderr)
-            sys.exit(1)
-        print("Map updated: sysmapid={}".format(sysmapid), file=sys.stderr)
+        if inventory_read_error:
+            print(
+                "NetBox data is incomplete; map not updated (a map built from partial data would drop links)",
+                file=sys.stderr,
+            )
+        else:
+            err_msg, sysmapid = update_uplinks_map(
+                url,
+                token,
+                devices,
+                host_id_by_name,
+                items_by_host_iface,
+                desc_to_name,
+                debug=args.debug,
+                prune_obsolete=(not args.host) and (not args.keep_obsolete_map_elements),
+                device_iface_to_provider=device_iface_to_provider,
+                inventory_scoped=inventory_scoped,
+            )
+            if err_msg:
+                print(err_msg, file=sys.stderr)
+                sys.exit(1)
+            print("Map updated: sysmapid={}".format(sysmapid), file=sys.stderr)
     # Default behavior: create a map with elements if it doesn't already exist
     elif default_create_map and use_zabbix:
         # Check if there is already a card with the same name
@@ -1088,6 +1118,11 @@ def main():
             sysmapid = existing[0].get("sysmapid")
             print("Map already exists: name={!r}, sysmapid={}. Use --update-map to update.".format(
                 MAP_NAME, sysmapid), file=sys.stderr)
+        elif inventory_read_error:
+            print(
+                "NetBox data is incomplete; map not created",
+                file=sys.stderr,
+            )
         else:
             err_msg, sysmapid = update_uplinks_map(
                 url,
@@ -1097,21 +1132,27 @@ def main():
                 items_by_host_iface,
                 desc_to_name,
                 debug=args.debug,
-                prune_obsolete=True,
                 device_iface_to_provider=device_iface_to_provider,
+                inventory_scoped=inventory_scoped,
             )
             if err_msg:
                 print(err_msg, file=sys.stderr)
                 sys.exit(1)
             print("Map created: name={!r}, sysmapid={}".format(MAP_NAME, sysmapid), file=sys.stderr)
 
-    # Print table only when requested
-    if args.print_table and rows:
+    if print_table and rows:
         num_cols = len(rows[0])
         widths = [max(len(str(rows[i][c])) for i in range(len(rows))) for c in range(num_cols)]
         pad = "  "
         for row in rows:
             print(pad.join(str(row[c]).ljust(widths[c]) for c in range(num_cols)))
+
+    if inventory_read_error:
+        print(
+            "NetBox inventory is incomplete; map run marked as failed",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

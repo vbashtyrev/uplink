@@ -6,7 +6,6 @@ from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from zabbix_provider_sla import (
     _burst_report_rows,
     _get_hostid_for_device,
-    _get_providers_from_limits,
     _iter_burst_links,
     _load_commit_rates,
 )
@@ -31,7 +30,6 @@ def test_iter_burst_and_report_rows():
     }
     links = list(_iter_burst_links(cr))
     assert len(links) == 1
-    assert _get_providers_from_limits(cr) == ["Cogent"]
     rows = _burst_report_rows(cr)
     assert rows[0][0] == "C1"
 

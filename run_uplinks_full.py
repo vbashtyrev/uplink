@@ -11,8 +11,13 @@ import time
 from datetime import datetime
 
 from env_urls import load_env_file
-from uplinks.netbox.inventory import ERROR_AUTH_DENIED
-
+from uplinks.netbox.inventory import (
+    ERROR_AUTH_DENIED,
+    ERROR_PARTIAL_READ,
+    ERROR_PROVIDERS_UNAVAILABLE,
+    format_inventory_text,
+)
+from uplinks.zabbix.plan import inventory_plan_gate
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DRY_SSH = "dry-ssh.json"
@@ -21,6 +26,11 @@ DEFAULT_DESC_MAP = "description_to_name.json"
 DEFAULT_NETBOX_INVENTORY = "netbox_inventory.json"
 RUN_LOGS_DIR = "run_logs" # log folder: date_time_run.log and date_time_debug.log
 CACHE_AGE_SECONDS = 24 * 3600 # dry-ssh.json cache for 24 hours for step 1
+
+
+def _plan_mode(args):
+    """True when --plan is set; safe for Namespace objects built without plan (tests, callers)."""
+    return getattr(args, "plan", False)
 
 
 def run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
@@ -114,6 +124,12 @@ def _inventory_pre_ssh_gate(report):
     stats = report.get("stats") or {}
     if stats.get("error") == ERROR_AUTH_DENIED:
         return False, "NetBox authentication failed (check NETBOX_TOKEN)"
+    if stats.get("error") == ERROR_PROVIDERS_UNAVAILABLE:
+        return False, "NetBox provider list unavailable"
+    if stats.get("error") == ERROR_PARTIAL_READ:
+        return False, "NetBox inventory read incomplete ({} read error(s))".format(
+            stats.get("read_errors", 0)
+        )
     if not report.get("complete"):
         return False, "No complete inventory entries; SSH collection skipped"
     return True, ""
@@ -141,6 +157,59 @@ def _log_inventory_incomplete(log, report):
                 suffix,
             )
         )
+
+
+def _run_plan_inventory(python, inventory_path, timeout, log, step, debug_log_path, report_lines, errors, report_file, run_log_path):
+    """Plan mode: scoped read-only inventory; fail closed on auth, empty, or incomplete."""
+    log(
+        "Step 0: NetBox uplink inventory (scoped, read-only) -> {} ...".format(
+            os.path.basename(inventory_path)
+        )
+    )
+    ok, out, err = run_cmd(
+        [python, "netbox_uplinks_inventory.py", "--json", "--dry-run"],
+        cwd=SCRIPT_DIR,
+        timeout=timeout,
+        capture_stdout_to_file=inventory_path,
+    )
+    _append_debug(
+        debug_log_path,
+        "Step 0: NetBox inventory (plan)",
+        stdout=out or "",
+        stderr=err or "",
+        ok=ok,
+    )
+    if not os.path.isfile(inventory_path):
+        detail = err or out or "inventory file was not created"
+        step("Step 0: NetBox inventory (plan)", False, detail)
+        _finish(report_lines, errors, report_file, run_log_path)
+        sys.exit(1)
+
+    try:
+        inventory_report = _load_inventory_report(inventory_path)
+    except (OSError, json.JSONDecodeError) as e:
+        step("Step 0: NetBox inventory (plan)", False, "failed to read {}: {}".format(inventory_path, e))
+        _finish(report_lines, errors, report_file, run_log_path)
+        sys.exit(1)
+
+    inv_ok, inv_detail = inventory_plan_gate(inventory_report)
+    complete_count = len(inventory_report.get("complete") or [])
+    incomplete_count = len(inventory_report.get("incomplete") or [])
+    if inv_ok:
+        step(
+            "Step 0: NetBox inventory (plan)",
+            True,
+            "complete={}, incomplete={} -> {}".format(
+                complete_count, incomplete_count, os.path.basename(inventory_path)
+            ),
+        )
+    else:
+        _log_inventory_incomplete(log, inventory_report)
+        step("Step 0: NetBox inventory (plan)", False, inv_detail)
+        _finish(report_lines, errors, report_file, run_log_path)
+        sys.exit(1)
+    log("")
+    return inventory_report
 
 
 def _run_pre_ssh_inventory(python, inventory_path, timeout, log, step, debug_log_path, report_lines, errors, report_file, run_log_path):
@@ -192,9 +261,11 @@ def _run_pre_ssh_inventory(python, inventory_path, timeout, log, step, debug_log
         step("Step 0: NetBox inventory (pre-SSH)", False, inv_detail)
         _finish(report_lines, errors, report_file, run_log_path)
         sys.exit(1)
+    # Reading NetBox failed is already handled by the gate above, so the only way to
+    # get here with a non-zero exit is incomplete chains alongside complete ones.
     if not ok:
         log(
-            "  Note: netbox_uplinks_inventory.py exited non-zero due to incomplete entries; continuing with complete inventory."
+            "  Note: netbox_uplinks_inventory.py exited non-zero: some chains are incomplete."
         )
     log("")
     return True
@@ -290,7 +361,22 @@ def main():
         action="store_true",
         help="Don't load the env file before starting the chain",
     )
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        help="Read-only preview: scoped NetBox inventory, netbox_checks without --apply, Zabbix plan report (requires --from-file)",
+    )
     args = parser.parse_args()
+
+    if _plan_mode(args) and args.auto:
+        print("Error: --plan cannot be used with --auto.", file=sys.stderr)
+        sys.exit(2)
+    if _plan_mode(args) and not (args.no_fetch or args.from_file):
+        print(
+            "Error: --plan requires --from-file or --no-fetch (use validated dry-ssh.json, no SSH fetch).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     if args.location and not args.auto:
         print(
@@ -340,7 +426,13 @@ def main():
         log("Env file: {} (not found, current environment is used)". format(env_file_path))
     log("Run log: {}".format(run_log_path))
     log("Debug log: {}".format(debug_log_path))
-    log("Mode: {}".format("auto (legacy create path)" if args.auto else "human (NetBox-first, read-only inventory)"))
+    if _plan_mode(args):
+        mode_label = "plan (read-only NetBox + Zabbix preview)"
+    elif args.auto:
+        mode_label = "auto (legacy create path)"
+    else:
+        mode_label = "human (NetBox-first, read-only inventory)"
+    log("Mode: {}".format(mode_label))
     log("")
     try:
         with open(debug_log_path, "w", encoding="utf-8") as f:
@@ -351,6 +443,22 @@ def main():
 
     skip_ssh_fetch = args.no_fetch or args.from_file
     inventory_path = os.path.join(SCRIPT_DIR, DEFAULT_NETBOX_INVENTORY)
+    plan_json_path = os.path.join(logs_dir, "{}_zabbix_plan.json".format(run_ts))
+
+    plan_inventory_report = None
+    if _plan_mode(args):
+        plan_inventory_report = _run_plan_inventory(
+            python,
+            inventory_path,
+            timeout,
+            log,
+            step,
+            debug_log_path,
+            report_lines,
+            errors,
+            args.report,
+            run_log_path,
+        )
 
     # 1. Data collection from devices; cache for 24 hours - if there is fresh dry-ssh.json, the step is skipped (workaround: --refresh)
     if skip_ssh_fetch:
@@ -424,29 +532,42 @@ def main():
                 else:
                     step("Step 1: Data Collection", True, "-> {}".format(dry_ssh_path))
 
-    # 2. NetBox checks (optional)
-    if not args.no_netbox_apply:
+    # 2. NetBox checks (optional apply; plan mode is read-only preview)
+    if _plan_mode(args) or not args.no_netbox_apply:
         netbox_checks_argv = [
-            python, "netbox_checks.py", "-f", dry_ssh_path, "--all", "--mt-ref", "--apply",
+            python, "netbox_checks.py", "-f", dry_ssh_path, "--all", "--mt-ref",
         ]
-        if args.auto:
+        if _plan_mode(args):
+            netbox_checks_argv.append("--existing-only")
+            netbox_checks_mode = "--existing-only (preview)"
+        elif args.auto:
             netbox_checks_argv.append("--auto")
-            netbox_checks_mode = "--auto"
+            netbox_checks_argv.append("--apply")
+            netbox_checks_mode = "--auto --apply"
         else:
             netbox_checks_argv.append("--existing-only")
-            netbox_checks_mode = "--existing-only"
-        log(
-            "Step 2: NetBox - reconciliation and application (netbox_checks.py -f {} --all --mt-ref --apply {}) ...".format(
-                dry_ssh_path, netbox_checks_mode
+            netbox_checks_argv.append("--apply")
+            netbox_checks_mode = "--existing-only --apply"
+        if _plan_mode(args):
+            log(
+                "Step 2: NetBox - read-only preview (netbox_checks.py -f {} --all --mt-ref --existing-only) ...".format(
+                    dry_ssh_path
+                )
             )
-        )
+        else:
+            log(
+                "Step 2: NetBox - reconciliation and application (netbox_checks.py -f {} --all --mt-ref {}) ...".format(
+                    dry_ssh_path, netbox_checks_mode
+                )
+            )
         ok, out, err = run_cmd(
             netbox_checks_argv,
             cwd=SCRIPT_DIR,
             timeout=timeout,
         )
-        _append_debug(debug_log_path, "Step 2: NetBox checks --apply", stdout=out or "", stderr=err or "", ok=ok)
-        step("Step 2: NetBox checks --apply", ok, err or out or ("code != 0" if not ok else ""))
+        step_name = "Step 2: NetBox checks (preview)" if _plan_mode(args) else "Step 2: NetBox checks --apply"
+        _append_debug(debug_log_path, step_name, stdout=out or "", stderr=err or "", ok=ok)
+        step(step_name, ok, err or out or ("code != 0" if not ok else ""))
         if not ok and args.stop_on_error:
             _finish(report_lines, errors, args.report, run_log_path)
             sys.exit(1)
@@ -455,6 +576,60 @@ def main():
         _append_debug(debug_log_path, "Step 2: NetBox checks --apply", skip_reason="--no-netbox-apply")
         log("[SKIP] Step 2: NetBox checks (skipped: --no-netbox-apply)")
         report_lines.append("")
+
+    if _plan_mode(args):
+        log("Step 3: NetBox uplink inventory summary (from step 0, no new NetBox read) ...")
+        inv_summary = format_inventory_text(plan_inventory_report, dry_run=True)
+        _append_debug(
+            debug_log_path,
+            "Step 3: NetBox uplink inventory (plan)",
+            stdout=inv_summary or "",
+            stderr="",
+            ok=True,
+        )
+        step("Step 3: NetBox uplink inventory (plan)", True, "")
+        if inv_summary:
+            for line in inv_summary.splitlines():
+                log("  {}".format(line))
+        log("")
+
+        plan_argv = [
+            python,
+            "zabbix_uplinks_plan.py",
+            "-d",
+            dry_ssh_path,
+            "--inventory-file",
+            inventory_path,
+            "-o",
+            plan_json_path,
+            "--text",
+            plan_json_path.replace(".json", ".txt"),
+        ]
+        if not args.no_burst_triggers:
+            plan_argv.append("--create-link-triggers")
+        log("Step 4: Zabbix plan (read-only) -> {} ...".format(os.path.basename(plan_json_path)))
+        ok, out, err = run_cmd(plan_argv, cwd=SCRIPT_DIR, timeout=timeout)
+        _append_debug(debug_log_path, "Step 4: Zabbix plan", stdout=out or "", stderr=err or "", ok=ok)
+        step("Step 4: Zabbix plan", ok, err or out or ("code != 0" if not ok else ""))
+        if not ok and args.stop_on_error:
+            _finish(report_lines, errors, args.report, run_log_path)
+            sys.exit(1)
+        if out:
+            for line in out.splitlines():
+                log("  {}".format(line))
+        log("Zabbix plan JSON: {}".format(plan_json_path))
+        log("")
+
+        log("--- Total ---")
+        if errors:
+            log("Errors ({}):".format(len(errors)))
+            for name, detail in errors:
+                log(" {}: {}".format(name, (detail or "").strip() or "return code != 0"))
+            _write_run_report(report_lines, run_log_path, args.report, log_func=log)
+            sys.exit(1)
+        log("Plan completed successfully (no NetBox or Zabbix writes).")
+        _write_run_report(report_lines, run_log_path, args.report, log_func=log)
+        sys.exit(0)
 
     if args.auto:
         # 3. Generating commit_rates.json (legacy --auto path only)
@@ -472,7 +647,15 @@ def main():
         log("")
 
         # 4. NetBox create circuits (legacy --auto path only)
-        cmd_circuits = [python, "netbox_create_circuits.py", "-f", commit_rates_path, "-d", dry_ssh_path]
+        cmd_circuits = [
+            python,
+            "netbox_create_circuits.py",
+            "-f",
+            commit_rates_path,
+            "-d",
+            dry_ssh_path,
+            "--auto",
+        ]
         if args.location:
             cmd_circuits.extend(["--location", args.location])
         log("Step 4: NetBox circuits (netbox_create_circuits.py) ...")
@@ -501,15 +684,10 @@ def main():
                 log("  {}".format(line))
         log("")
 
-    # 5. Zabbix sync: macros from NetBox, util triggers from dry-ssh, Burst link triggers from commit_rates
-    sync_argv = [
-        python,
-        "zabbix_sync_commit_rate.py",
-        "-d",
-        dry_ssh_path,
-        "-f",
-        commit_rates_path,
-    ]
+    # 5. Zabbix sync: macros from NetBox, util triggers from dry-ssh, Burst link triggers from inventory
+    sync_argv = [python, "zabbix_sync_commit_rate.py", "-d", dry_ssh_path]
+    if args.auto:
+        sync_argv.extend(["-f", commit_rates_path, "--legacy-commit-rates-fallback"])
     if not args.no_burst_triggers:
         sync_argv.append("--create-link-triggers")
     sync_detail = " ".join(sync_argv[1:])
@@ -526,13 +704,14 @@ def main():
     log("")
 
     # 6. Zabbix - aggregate hosts Uplinks {Provider} (calculated items + 90%/100%/SLA triggers)
+    agg_argv = [python, "zabbix_provider_aggregate.py", "-d", dry_ssh_path]
+    if args.auto:
+        agg_argv.extend(["-f", commit_rates_path, "--legacy-commit-rates-fallback"])
     log(
-        "Step 6: Zabbix - aggregate by provider (zabbix_provider_aggregate.py -f {} -d {}) ...".format(
-            commit_rates_path, dry_ssh_path
-        )
+        "Step 6: Zabbix - aggregate by provider ({}) ...".format(" ".join(agg_argv[1:]))
     )
     ok, out, err = run_cmd(
-        [python, "zabbix_provider_aggregate.py", "-f", commit_rates_path, "-d", dry_ssh_path],
+        agg_argv,
         cwd=SCRIPT_DIR,
         timeout=timeout,
     )
@@ -578,9 +757,21 @@ def main():
     log("")
 
     # 9. Zabbix - services and SLAs by provider
-    log("Step 9: Zabbix - services and SLAs by providers (zabbix_provider_services.py -f {} --parent-service 'Uplinks providers') ...".format(commit_rates_path))
+    services_argv = [
+        python,
+        "zabbix_provider_services.py",
+        "--parent-service",
+        "Uplinks providers",
+    ]
+    if args.auto:
+        services_argv.extend(["-f", commit_rates_path, "--legacy-commit-rates-fallback"])
+    log(
+        "Step 9: Zabbix - services and SLAs by providers ({}) ...".format(
+            " ".join(services_argv[1:])
+        )
+    )
     ok, out, err = run_cmd(
-        [python, "zabbix_provider_services.py", "-f", commit_rates_path, "--parent-service", "Uplinks providers"],
+        services_argv,
         cwd=SCRIPT_DIR,
         timeout=timeout,
     )

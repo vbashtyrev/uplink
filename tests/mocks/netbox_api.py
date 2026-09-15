@@ -30,6 +30,20 @@ class _Filterable:
         return None
 
 
+def _record_has_tag(rec, tag_slug):
+    tags = getattr(rec, "tags", None)
+    if tags:
+        for t in tags:
+            slug = getattr(t, "slug", None) or (t if isinstance(t, str) else None)
+            if slug == tag_slug:
+                return True
+    if getattr(rec, "tag", None) == tag_slug:
+        return True
+    if getattr(rec, "tag_slug", None) == tag_slug:
+        return True
+    return False
+
+
 class _Providers:
     def __init__(self, providers):
         self._providers = list(providers)
@@ -38,7 +52,15 @@ class _Providers:
         return self._providers
 
     def filter(self, **kwargs):
-        return self._providers
+        out = self._providers
+        for key, val in kwargs.items():
+            if val is None:
+                continue
+            if key == "tag":
+                out = [x for x in out if _record_has_tag(x, val)]
+            else:
+                out = [x for x in out if getattr(x, key, None) == val]
+        return out
 
     def get(self, pk):
         for provider in self._providers:
@@ -55,6 +77,8 @@ class _CircuitsEndpoint:
         out = self._items
         if "provider_id" in kwargs:
             out = [c for c in out if getattr(c, "provider_id", None) == kwargs["provider_id"]]
+        if "tag" in kwargs:
+            out = [c for c in out if _record_has_tag(c, kwargs["tag"])]
         return out
 
     def get(self, pk):
@@ -85,9 +109,21 @@ class MockNetBox:
         self.circuits = _Circuits(terminations, circuits)
 
 
+def add_project_circuit_scope(circuit, monitor_tag="uplinks", lifecycle="active"):
+    """Tag circuit for project monitoring scope (tag + uplinks_circuit_lifecycle)."""
+    circuit.tag = monitor_tag
+    custom_fields = getattr(circuit, "custom_fields", None) or {}
+    if not isinstance(custom_fields, dict):
+        custom_fields = {}
+    custom_fields = dict(custom_fields)
+    custom_fields["uplinks_circuit_lifecycle"] = lifecycle
+    circuit.custom_fields = custom_fields
+    return circuit
+
+
 def wire_inventory_collector(nb, provider=None, circuits=None):
     """
-    Attach providers/circuits endpoints required by collect_uplink_inventory / get_commit_rates_from_netbox.
+    Attach providers/circuits endpoints required by collect_uplink_inventory.
     Mutates nb in place; returns nb.
     """
     if circuits is None:
@@ -103,6 +139,7 @@ def wire_inventory_collector(nb, provider=None, circuits=None):
             circuit.status = "active"
         if getattr(circuit, "cid", None) is None and getattr(circuit, "id", None) is not None:
             circuit.cid = "CKT-{}".format(circuit.id)
+        add_project_circuit_scope(circuit)
     nb.circuits.providers = _Providers([provider])
     nb.circuits.circuits = _CircuitsEndpoint(circuits)
     return nb
@@ -116,7 +153,7 @@ def build_netbox_for_commit_rates(
     iface_id=10,
     commit_rate_kbps=10000,
     tag_device=True,
-    device_tag="uplinks",
+    device_tag="border",
     cable_id=50,
     ct_id=1,
     circuit_id=100,
@@ -127,7 +164,7 @@ def build_netbox_for_commit_rates(
     circuit_status="active",
 ):
     """
-    Build NetBox mock wired for zabbix_sync_commit_rate.get_commit_rates_from_netbox:
+    Build NetBox mock for the commit rate chain:
     provider -> active circuit -> termination (A) -> cable -> interface on tagged device.
     """
     provider = _Record(

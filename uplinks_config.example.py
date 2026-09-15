@@ -54,16 +54,20 @@ SLA_EFFECTIVE_DATE_UTC = 1772323200
 LINK_COLOR_WARN = "DDBB00"
 LINK_COLOR_HIGH = "DD0000"
 
-# Macros (host level)
-MACRO_PREFIX_MAX = "{$IF.UTIL.MAX"
-MACRO_PREFIX_WARN = "{$IF.UTIL.WARN"
-
 # Legacy threshold item key (cleanup)
 THRESHOLD_ITEM_KEY = "net.if.threshold"
 
 # Uplink VRF name for stats collection (per-device)
 UPLINK_VRF_NAME = "internet"
 
-# NetBox automation tag for all created objects
+# NetBox tag left on objects created by the legacy --auto path.
+# Not used to select what is monitored; only for legacy cleanup.
 NETBOX_AUTOMATION_TAG = TRIGGER_TAG_VALUE
+
+# NetBox Circuit tag that defines the monitoring scope
+# (inventory, sync, aggregate, map, dashboard).
+NETBOX_MONITOR_TAG = "uplinks"
+
+# Shared target SLA for all providers when Provider has no slo_percent in NetBox.
+PROJECT_PROVIDER_SLO_PERCENT = 99.95
 

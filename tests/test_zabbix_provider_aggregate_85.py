@@ -89,17 +89,6 @@ def test_get_or_create_host_errors(monkeypatch):
     assert "Zabbix API" in err
 
 
-def test_get_providers_netbox_debug_names(capsys, monkeypatch):
-    nb = MagicMock()
-    nb.circuits.providers.filter.return_value = [type("P", (), {"name": "Cogent"})()]
-    with patch("zabbix_provider_aggregate.pynetbox.api", return_value=nb):
-        monkeypatch.setenv("NETBOX_URL", "https://nb.example")
-        monkeypatch.setenv("NETBOX_TOKEN", "tok")
-        names = agg._get_providers_from_netbox("automatization", debug=True)
-    assert names == ["Cogent"]
-    assert "Cogent" in capsys.readouterr().err
-
-
 def test_get_or_create_host_create_error(monkeypatch):
     (
         ZabbixRpcMocker()

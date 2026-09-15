@@ -46,6 +46,7 @@ def test_main_apply_creates_circuit_and_cable(monkeypatch, netbox_env, tmp_path,
                         str(cr),
                         "-d",
                         str(FIXTURES / "dry_ssh_minimal.json"),
+                        "--auto",
                     ],
                 )
                 with pytest.raises(SystemExit) as exc:

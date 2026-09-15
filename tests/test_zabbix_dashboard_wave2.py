@@ -5,12 +5,13 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from tests.mocks.zabbix_rpc import ZabbixRpcMocker
 from tests.mocks.netbox_full import NetBoxTestEnvironment
 from zabbix_uplinks_dashboard import (
     _build_edges,
-    _get_providers_from_netbox,
+    load_uplink_provider_context,
     _make_graph_widget,
     create_or_update_dashboard,
     load_zabbix_cache,
@@ -31,7 +32,13 @@ def test_build_edges_dedup():
         ("h1", "eth1"): {"itemid_in": "1", "itemid_out": "2"},
         ("h1", "eth1.0"): {"itemid_in": "", "itemid_out": ""},
     }
-    edges = _build_edges(devices, {"h1": "101"}, items, {"Uplink: Cogent": "Cogent"})
+    edges = _build_edges(
+        devices,
+        {"h1": "101"},
+        items,
+        {"Uplink: Cogent": "Cogent"},
+        inventory_scoped=False,
+    )
     assert len(edges) == 1
     assert edges[0][3] == "Cogent"
 
@@ -51,15 +58,15 @@ def test_cache_roundtrip(tmp_path):
     assert ("h1", "eth1") in i
 
 
-def test_get_providers_from_netbox(monkeypatch, netbox_env):
-    env = NetBoxTestEnvironment()
-    tag = env.seed_automation_tag()
-    prov = env.circuits.providers.create(name="Cogent", slug="cogent")
-    prov.tags = [tag]
-    prov.tag_slug = tag.slug
-    with patch("zabbix_uplinks_dashboard.pynetbox.api", lambda url, token: env):
-        names = _get_providers_from_netbox(tag.slug, debug=True)
+def test_load_uplink_provider_context_providers(monkeypatch):
+    with patch(
+        "zabbix_uplinks_dashboard.load_uplink_provider_context",
+        return_value={"providers": {"Cogent", "Hurricane"}, "read_error": False},
+    ):
+        ctx = load_uplink_provider_context({}, debug=False)
+    names = sorted(ctx.get("providers") or [])
     assert "Cogent" in names
+    assert "Hurricane" in names
 
 
 def test_create_or_update_dashboard_update(monkeypatch):
@@ -147,5 +154,6 @@ def test_main_uses_cache(monkeypatch, zabbix_env, tmp_path, capsys):
             "",
         ],
     )
-    mod.main()
+    with patch.object(mod, "load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()):
+        mod.main()
     assert "OK:" in capsys.readouterr().out

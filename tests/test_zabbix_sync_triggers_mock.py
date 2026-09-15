@@ -94,7 +94,8 @@ def test_prune_util_triggers_on_host(monkeypatch):
         .on("trigger.delete", lambda p: deleted.extend(p) or True)
         .activate(monkeypatch)
     )
-    n = prune_util_triggers_on_host("https://z.example/api_jsonrpc.php", "t", "50", ["Eth1"])
+    n, err = prune_util_triggers_on_host("https://z.example/api_jsonrpc.php", "t", "50", ["Eth1"])
+    assert err is None
     assert n == 1
     assert deleted == ["20"]
 

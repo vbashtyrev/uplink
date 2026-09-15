@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pynetbox.core.query import RequestError
 
-from tests.mocks.netbox_api import MockNetBox, _Record
+from tests.mocks.netbox_api import MockNetBox, _Record, add_project_circuit_scope
 from uplinks.netbox import inventory as inv
 
 
@@ -30,6 +30,18 @@ def _netbox_request_error(status, url_path):
 
 def _provider(name="Cogent", provider_id=1):
     return _Record(id=provider_id, name=name)
+
+
+def _scoped_circuit(cid="CKT-1", circuit_id=100, provider_id=1, commit_rate=10000000, status="active"):
+    circuit = _Record(
+        id=circuit_id,
+        cid=cid,
+        provider_id=provider_id,
+        provider=provider_id,
+        commit_rate=commit_rate,
+        status=status,
+    )
+    return add_project_circuit_scope(circuit)
 
 
 def _circuit(cid="CKT-1", circuit_id=100, provider_id=1, commit_rate=10000000, status="active"):
@@ -92,6 +104,8 @@ def _build_inventory_nb(
             out = self._items
             if "provider_id" in kwargs:
                 out = [c for c in out if getattr(c, "provider_id", None) == kwargs["provider_id"]]
+            if "tag" in kwargs:
+                out = [c for c in out if getattr(c, "tag", None) == kwargs["tag"]]
             return out
 
         def get(self, pk):
@@ -156,6 +170,62 @@ def test_complete_with_missing_commit_rate_warning():
     assert inv.REASON_MISSING_COMMIT_RATE in report["complete"][0]["warnings"]
 
 
+def _flat_agg_cap_circuit(cid="KZT-ALA-1", circuit_id=100, provider_id=1, commit_rate=None):
+    circuit = _circuit(
+        cid=cid,
+        circuit_id=circuit_id,
+        provider_id=provider_id,
+        commit_rate=commit_rate,
+    )
+    circuit.custom_fields = {"billing_model": "FlatAggCap"}
+    return circuit
+
+
+def test_flat_agg_cap_with_provider_aggregate_limit_no_commit_warning():
+    provider = _provider(name="KZT", provider_id=1)
+    provider.custom_fields = {"aggregate_limit_gbps": 12}
+    circuit = _flat_agg_cap_circuit()
+    nb = _build_inventory_nb(provider=provider, circuit=circuit)
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert len(report["complete"]) == 1
+    row = report["complete"][0]
+    assert row["commit_rate_kbps"] is None
+    assert row["billing_model"] == "FlatAggCap"
+    assert "warnings" not in row
+
+
+def test_flat_agg_cap_without_provider_aggregate_limit_warns():
+    provider = _provider(name="KZT", provider_id=1)
+    circuit = _flat_agg_cap_circuit()
+    nb = _build_inventory_nb(provider=provider, circuit=circuit)
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert len(report["complete"]) == 1
+    row = report["complete"][0]
+    assert row["commit_rate_kbps"] is None
+    assert inv.REASON_MISSING_PROVIDER_AGGREGATE_LIMIT in row["warnings"]
+    assert inv.REASON_MISSING_COMMIT_RATE not in row["warnings"]
+
+
+def test_flat_agg_cap_invalid_provider_aggregate_limit_warns():
+    provider = _provider(name="KZT", provider_id=1)
+    provider.custom_fields = {"aggregate_limit_gbps": "not-a-number"}
+    circuit = _flat_agg_cap_circuit()
+    nb = _build_inventory_nb(provider=provider, circuit=circuit)
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    row = report["complete"][0]
+    assert inv.REASON_MISSING_PROVIDER_AGGREGATE_LIMIT in row["warnings"]
+
+
+def test_non_flat_agg_cap_missing_commit_rate_warning_unchanged():
+    circuit = _circuit(commit_rate=None)
+    circuit.custom_fields = {"billing_model": "Flat"}
+    nb = _build_inventory_nb(circuit=circuit)
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    row = report["complete"][0]
+    assert inv.REASON_MISSING_COMMIT_RATE in row["warnings"]
+    assert inv.REASON_MISSING_PROVIDER_AGGREGATE_LIMIT not in row.get("warnings", [])
+
+
 def test_inventory_is_read_only_no_mutations():
     nb = _build_inventory_nb()
     for endpoint_name in ("providers", "circuits", "circuit_terminations"):
@@ -173,7 +243,7 @@ def test_inventory_is_read_only_no_mutations():
 
 
 def test_main_json_dry_run(monkeypatch, netbox_env, capsys):
-    nb = _build_inventory_nb()
+    nb = _build_inventory_nb(circuit=_scoped_circuit())
     with patch.object(inv.pynetbox, "api", lambda url, token: nb):
         monkeypatch.setattr(
             sys,
@@ -213,8 +283,12 @@ def test_termination_side_a_choice_record():
 
 
 def test_json_serializes_choice_status(monkeypatch, netbox_env, capsys):
-    circuit = _circuit(status=_choice_record("active", "Active"))
-    nb = _build_inventory_nb(circuit=circuit)
+    provider = _provider()
+    circuit = add_project_circuit_scope(
+        _circuit(status=_choice_record("active", "Active"), provider_id=provider.id)
+    )
+    circuit.provider = provider.id
+    nb = _build_inventory_nb(provider=provider, circuit=circuit)
     report = inv.collect_uplink_inventory(nb, tag="border")
     payload = dict(report)
     payload["dry_run"] = False
@@ -258,9 +332,11 @@ def test_providers_unavailable_exit_code(monkeypatch, netbox_env, capsys):
 
 
 def test_main_text_output_incomplete_exit_code(monkeypatch, netbox_env, capsys):
-    circuit = _circuit()
+    provider = _provider()
+    circuit = _scoped_circuit(provider_id=provider.id)
+    circuit.provider = provider.id
     ct = _Record(id=1, term_side="A", cable=None, circuit=circuit, circuit_id=circuit.id)
-    nb = _build_inventory_nb(circuit=circuit, ct=ct, cable=None)
+    nb = _build_inventory_nb(provider=provider, circuit=circuit, ct=ct, cable=None)
     nb.dcim.cables = type("C", (), {"get": lambda self, pk: None})()
     with patch.object(inv.pynetbox, "api", lambda url, token: nb):
         monkeypatch.setattr(sys, "argv", ["netbox_uplinks_inventory.py"])
@@ -439,7 +515,7 @@ def test_auth_denied_on_cables_get():
 
 
 def test_main_auth_exit_code(monkeypatch, netbox_env, capsys):
-    nb = _build_inventory_nb()
+    nb = _build_inventory_nb(circuit=_scoped_circuit())
     nb.circuits.providers = type(
         "P",
         (),
@@ -545,6 +621,10 @@ def _build_odf_inventory_nb(
     if paths_result is None:
         paths_result = [
             {
+                "id": 1,
+                "is_active": True,
+                "is_complete": True,
+                "is_split": False,
                 "origin": border_iface,
                 "destination": ct,
                 "path": [
@@ -737,11 +817,19 @@ def test_pass_through_selects_matching_path_among_multiple():
     )
     paths_result = [
         {
+            "id": 1,
+            "is_active": True,
+            "is_complete": True,
+            "is_split": False,
             "origin": wrong_iface,
             "destination": wrong_ct,
             "path": [[wrong_iface, wrong_cable, wrong_ct]],
         },
         {
+            "id": 2,
+            "is_active": True,
+            "is_complete": True,
+            "is_split": False,
             "origin": border_iface,
             "destination": ct,
             "path": [
@@ -770,6 +858,147 @@ def test_pass_through_selects_matching_path_among_multiple():
     assert len(report["complete"]) == 1
     assert report["complete"][0]["interface"] == "Ethernet23/1"
     assert report["complete"][0]["device"] == "MIA-EQX-7280QR-1"
+    rear_port.paths.assert_called_once()
+
+
+def _valid_odf_paths_result(nb_fixture):
+    """Path that resolves to the border interface when is_complete/is_split allow it."""
+    border_device = _Record(id=1, name="MIA-EQX-7280QR-1", tag="border")
+    border_iface = _Record(
+        id=10000,
+        name="Ethernet23/1",
+        device=border_device,
+        device_id=border_device.id,
+        url="https://netbox.example/api/dcim/interfaces/10000/",
+    )
+    odf_device = _Record(id=99, name="MIA-ODF-1")
+    rear_port = _Record(
+        id=5,
+        name="Trunk-1",
+        device=odf_device,
+        url="https://netbox.example/api/dcim/rear-ports/5/",
+    )
+    front_port = _Record(
+        id=121,
+        name="Port-1",
+        device=odf_device,
+        url="https://netbox.example/api/dcim/front-ports/121/",
+    )
+    circuit = _circuit(cid="Cogent-MIA-1", circuit_id=100)
+    ct = _Record(
+        id=44,
+        term_side="A",
+        cable=_Record(id=7564),
+        circuit=circuit,
+        circuit_id=circuit.id,
+        url="https://netbox.example/api/circuits/circuit-terminations/44/",
+    )
+    cable_to_rear = _Record(
+        id=7564,
+        url="https://netbox.example/api/dcim/cables/7564/",
+        a_terminations=[{"object_type": "circuits.circuittermination", "object_id": ct.id}],
+        b_terminations=[{"object_type": "dcim.rearport", "object_id": rear_port.id}],
+    )
+    cable_to_iface = _Record(id=6615, url="https://netbox.example/api/dcim/cables/6615/")
+    segment = _netbox44_path_segment(
+        border_iface,
+        cable_to_iface,
+        front_port,
+        rear_port,
+        cable_to_rear,
+        ct,
+    )
+    return {
+        "border_iface": border_iface,
+        "ct": ct,
+        "cable_to_rear": cable_to_rear,
+        "cable_to_iface": cable_to_iface,
+        "rear_port": rear_port,
+        "front_port": front_port,
+        "segment": segment,
+    }
+
+
+def test_pass_through_incomplete_path_skipped():
+    parts = _valid_odf_paths_result(None)
+    paths_result = [
+        {
+            "id": 1,
+            "is_active": True,
+            "is_complete": False,
+            "is_split": False,
+            "origin": parts["border_iface"],
+            "destination": parts["ct"],
+            "path": [parts["segment"]],
+        }
+    ]
+    nb, _rear_port = _build_odf_inventory_nb(
+        paths_result=paths_result,
+        border_iface=parts["border_iface"],
+        ct=parts["ct"],
+        cable_to_rear=parts["cable_to_rear"],
+        cable_to_iface=parts["cable_to_iface"],
+        rear_port=parts["rear_port"],
+        front_port=parts["front_port"],
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
+
+
+def test_pass_through_split_path_skipped():
+    parts = _valid_odf_paths_result(None)
+    paths_result = [
+        {
+            "id": 1,
+            "is_active": True,
+            "is_complete": True,
+            "is_split": True,
+            "origin": parts["border_iface"],
+            "destination": parts["ct"],
+            "path": [parts["segment"]],
+        }
+    ]
+    nb, _rear_port = _build_odf_inventory_nb(
+        paths_result=paths_result,
+        border_iface=parts["border_iface"],
+        ct=parts["ct"],
+        cable_to_rear=parts["cable_to_rear"],
+        cable_to_iface=parts["cable_to_iface"],
+        rear_port=parts["rear_port"],
+        front_port=parts["front_port"],
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
+
+
+def test_pass_through_path_without_is_complete_key_succeeds():
+    parts = _valid_odf_paths_result(None)
+    paths_result = [
+        {
+            "id": 1,
+            "is_active": True,
+            "is_split": False,
+            "origin": parts["border_iface"],
+            "destination": parts["ct"],
+            "path": [parts["segment"]],
+        }
+    ]
+    nb, rear_port = _build_odf_inventory_nb(
+        paths_result=paths_result,
+        border_iface=parts["border_iface"],
+        ct=parts["ct"],
+        cable_to_rear=parts["cable_to_rear"],
+        cable_to_iface=parts["cable_to_iface"],
+        rear_port=parts["rear_port"],
+        front_port=parts["front_port"],
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert len(report["complete"]) == 1
+    assert report["complete"][0]["interface"] == "Ethernet23/1"
     rear_port.paths.assert_called_once()
 
 
@@ -824,3 +1053,46 @@ def test_auth_mid_walk_clears_partial_results():
     assert report["stats"] == {"error": inv.ERROR_AUTH_DENIED}
     assert report["complete"] == []
     assert report["incomplete"] == []
+
+
+def test_incomplete_provider_unavailable_when_circuit_provider_missing():
+    provider = _provider(name="Cogent", provider_id=1)
+    circuit = _scoped_circuit(provider_id=1)
+    circuit.provider = 1
+    nb = _build_inventory_nb(provider=provider, circuit=circuit, circuits=[circuit])
+
+    class _ProvidersMissing:
+        def all(self):
+            return [provider]
+
+        def filter(self, **kwargs):
+            return [provider]
+
+        def get(self, pk):
+            return None
+
+    nb.circuits.providers = _ProvidersMissing()
+    report = inv.collect_uplink_inventory(nb, tag="border", circuit_scope=inv.project_circuit_scope())
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_PROVIDER_UNAVAILABLE
+    assert report["incomplete"][0]["provider"] == "Cogent"
+
+
+def test_incomplete_row_when_provider_circuits_query_fails():
+    provider = _provider(name="Cogent", provider_id=1)
+
+    class _CircuitsFail:
+        def filter(self, **kwargs):
+            raise RuntimeError("circuits unavailable")
+
+        def get(self, pk):
+            return None
+
+    nb = _build_inventory_nb(provider=provider, circuits=[])
+    nb.circuits.circuits = _CircuitsFail()
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["stats"]["read_errors"] == 1
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["provider"] == "Cogent"
+    assert report["incomplete"][0]["reason"] == inv.REASON_PROVIDER_UNAVAILABLE

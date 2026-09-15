@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.mocks.netbox_api import build_netbox_for_commit_rates
 from tests.mocks.zabbix_rpc import ZabbixRpcMocker
 import zabbix_provider_services as svc
 import zabbix_provider_sla as sla
@@ -131,7 +132,11 @@ def test_main_provider_errors_continue(tmp_path, monkeypatch, capsys, zabbix_env
         .activate(monkeypatch)
     )
     monkeypatch.setattr("zabbix_provider_services.netbox_client_from_env", lambda **k: None)
-    monkeypatch.setattr(sys, "argv", ["zabbix_provider_services.py", "-f", str(cr)])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["zabbix_provider_services.py", "-f", str(cr), "--legacy-commit-rates-fallback"],
+    )
     svc.main()
     err = capsys.readouterr().err
     assert "create fail" in err or "Provider Bad" in err
@@ -198,14 +203,25 @@ def test_get_aggregate_triggers_with_hosts(monkeypatch):
 
 
 def test_main_with_events_and_from_ts(tmp_path, monkeypatch, zabbix_env, capsys):
+    nb = build_netbox_for_commit_rates(
+        device_name="ALA-R1",
+        iface_name="Eth1",
+        provider_name="Cogent",
+        provider_custom_fields={"aggregate_limit_gbps": 10},
+        tag_device=False,
+    )
     cr = tmp_path / "cr.json"
     cr.write_text(
         json.dumps({"_provider_limits": {"Cogent": 10}, "_provider_sla": 99.0}),
         encoding="utf-8",
     )
+    agg = sla.UPLINKS_AGGREGATE_HOST_PREFIX + "Cogent"
     (
         ZabbixRpcMocker()
-        .on("host.get", lambda p: [{"hostid": "200", "host": "Uplinks Cogent", "name": "Uplinks Cogent"}])
+        .on(
+            "host.get",
+            lambda p: [{"hostid": "200", "host": agg, "name": agg}],
+        )
         .on(
             "trigger.get",
             lambda p: [
@@ -222,20 +238,24 @@ def test_main_with_events_and_from_ts(tmp_path, monkeypatch, zabbix_env, capsys)
         )
         .activate(monkeypatch)
     )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "zabbix_provider_sla.py",
-            "-f",
-            str(cr),
-            "--from-ts",
-            "0",
-            "--to-ts",
-            "1000",
-        ],
-    )
-    sla.main()
+    with patch("zabbix_provider_services.netbox_client_from_env", return_value=nb), patch(
+        "zabbix_provider_services.netbox_border_tag", return_value=None
+    ):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "zabbix_provider_sla.py",
+                "-f",
+                str(cr),
+                "--from-ts",
+                "0",
+                "--to-ts",
+                "1000",
+            ],
+        )
+        sla.main()
     out = capsys.readouterr().out
     assert "Cogent" in out
     assert "BelowSLA" in out
+    assert "Target SLA (_provider_sla)" not in out

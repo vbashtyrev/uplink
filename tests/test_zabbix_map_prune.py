@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from zabbix_map import load_devices_json, update_uplinks_map
 
@@ -62,6 +63,7 @@ def test_update_map_prunes_obsolete_selements(monkeypatch, zabbix_env):
         items,
         desc,
         prune_obsolete=True,
+        device_iface_to_provider=dry_ssh_minimal_inventory_context()["device_iface_to_provider"],
     )
     assert err is None
     assert updates

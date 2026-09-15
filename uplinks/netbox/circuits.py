@@ -11,6 +11,7 @@ import requests
 
 from env_urls import load_env_file_if_present
 from uplinks.netbox.checks import resolve_interface
+from uplinks.netbox.inventory import _normalize_choice, interface_from_cable
 from uplinks_config import NETBOX_AUTOMATION_TAG as AUTOMATION_TAG
 
 load_env_file_if_present()
@@ -112,6 +113,96 @@ def location_from_hostname(hostname):
     """The first segment before the hyphen."""
     parts = (hostname or "").split("-")
     return parts[0] if parts and parts[0] else ""
+
+
+def find_provider(nb, name):
+    """Return provider by name or (None, error). Lookup-only: never creates or updates."""
+    existing = list(nb.circuits.providers.filter(name=name))
+    if existing:
+        return existing[0], None
+    return None, "provider not found: {}".format(name)
+
+
+def find_circuit_type(nb, name=CIRCUIT_TYPE_DEFAULT):
+    """Return circuit type by name or (None, error). Lookup-only: never creates or updates."""
+    existing = list(nb.circuits.circuit_types.filter(name=name))
+    if existing:
+        return existing[0], None
+    return None, "circuit type not found: {}".format(name)
+
+
+def find_circuit(nb, cid, provider):
+    """Return circuit by cid and provider or (None, error). Lookup-only: never creates or updates."""
+    existing = list(nb.circuits.circuits.filter(cid=cid, provider_id=provider.id))
+    if existing:
+        return existing[0], None
+    provider_name = getattr(provider, "name", None) or provider.id
+    return None, "circuit not found: {} (provider {})".format(cid, provider_name)
+
+
+def _cable_connects_to_interface(nb, cable_id, iface_id, circuit_termination_id=None):
+    """Return True when cable_id reaches dcim.interface iface_id (direct or pass-through)."""
+    if not cable_id:
+        return False
+    try:
+        cable_rec = nb.dcim.cables.get(cable_id)
+        if cable_rec is None:
+            return False
+        resolved = interface_from_cable(
+            nb,
+            cable_rec,
+            cable_id=cable_id,
+            circuit_termination_id=circuit_termination_id,
+        )
+        if resolved is None:
+            return False
+        rid = getattr(resolved, "id", None)
+        return rid is not None and int(rid) == int(iface_id)
+    except Exception:
+        return False
+
+
+def verify_termination_and_cable(nb, circuit, device, nb_iface, term_side="A"):
+    """Verify circuit termination and cable to interface exist. Lookup-only: never mutates NetBox."""
+    dev_name = getattr(device, "name", "")
+    iface_name = getattr(nb_iface, "name", "")
+    circuit_cid = getattr(circuit, "cid", None) or getattr(circuit, "id", "?")
+
+    terminations = list(nb.circuits.circuit_terminations.filter(circuit_id=circuit.id))
+    ct = None
+    for t in terminations:
+        side = _normalize_choice(getattr(t, "term_side", None)) or _normalize_choice(
+            getattr(t, "termination_side", None)
+        )
+        if side == _normalize_choice(term_side):
+            ct = t
+            break
+    if not ct:
+        return None, "circuit termination not found: circuit {} side {}".format(circuit_cid, term_side)
+
+    existing_ct_cable = getattr(ct, "cable", None)
+    if existing_ct_cable is None:
+        return ct, "cable not found for circuit {} termination (side {})".format(circuit_cid, term_side)
+
+    cable_id = existing_ct_cable.id if hasattr(existing_ct_cable, "id") else existing_ct_cable
+    if not cable_id:
+        return ct, "cable not found for circuit {} termination (side {})".format(circuit_cid, term_side)
+
+    try:
+        cable_rec = nb.dcim.cables.get(cable_id)
+    except Exception:
+        cable_rec = None
+    if cable_rec is None:
+        return ct, "cable record not found: id {} (circuit {} termination side {})".format(
+            cable_id, circuit_cid, term_side
+        )
+
+    if _cable_connects_to_interface(nb, cable_id, nb_iface.id, circuit_termination_id=ct.id):
+        return ct, None
+
+    return ct, "cable for circuit {} does not connect to interface {} on device {}".format(
+        circuit_cid, iface_name, dev_name
+    )
 
 
 def get_or_create_provider(nb, name):
@@ -259,8 +350,10 @@ def create_termination_and_cable(nb, circuit, device, nb_iface, term_side="A", r
     # Does this circuit already have a termination (A or Z)
     terminations = list(nb.circuits.circuit_terminations.filter(circuit_id=circuit.id))
     ct = None
+    term_side_norm = _normalize_choice(term_side)
     for t in terminations:
-        if getattr(t, "term_side", None) == term_side or getattr(t, "termination_side", None) == term_side:
+        side = _normalize_choice(getattr(t, "term_side", None) or getattr(t, "termination_side", None))
+        if side == term_side_norm:
             ct = t
             break
     if not ct:
@@ -292,26 +385,7 @@ def create_termination_and_cable(nb, circuit, device, nb_iface, term_side="A", r
     existing_ct_cable = getattr(ct, "cable", None)
     if existing_ct_cable is not None:
         cable_id = existing_ct_cable.id if hasattr(existing_ct_cable, "id") else existing_ct_cable
-        same_iface = False
-        try:
-            cable_rec = nb.dcim.cables.get(cable_id) if cable_id else None
-            for terms in (
-                getattr(cable_rec, "a_terminations", None) or [],
-                getattr(cable_rec, "b_terminations", None) or [],
-            ):
-                for term in terms:
-                    obj = term.get("object") if isinstance(term, dict) else getattr(term, "object", term)
-                    obj_id = getattr(obj, "id", None)
-                    if obj_id is None and isinstance(term, dict):
-                        obj_id = term.get("object_id")
-                    if obj_id is not None and int(obj_id) == int(nb_iface.id):
-                        same_iface = True
-                        break
-                if same_iface:
-                    break
-        except Exception:
-            same_iface = False
-        if same_iface:
+        if _cable_connects_to_interface(nb, cable_id, nb_iface.id, circuit_termination_id=ct.id):
             tag_obj = _get_or_create_automation_tag(nb)
             if tag_obj and cable_id:
                 try:
@@ -373,11 +447,17 @@ def main():
     parser.add_argument("--location", default=None, metavar="LOC", help="Process only the specified location (the first hostname segment); default - all")
     parser.add_argument("--dry-run", action="store_true", help="Do not make changes to NetBox")
     parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Legacy: create/update providers, circuits, terminations and cables in NetBox",
+    )
+    parser.add_argument(
         "--clear-null-commit",
         action="store_true",
-        help="If commit_rate_gbps=null in file, clear commit_rate in NetBox for existing circuit",
+        help="Legacy (--auto only): if commit_rate_gbps=null in file, clear commit_rate in NetBox",
     )
     args = parser.parse_args()
+    auto_mode = args.auto
 
     rates, err = load_commit_rates(args.commit_rates)
     if err:
@@ -401,9 +481,14 @@ def main():
         sys.exit(1)
     nb_devices_by_name = {d.name: d for d in devices}
 
-    circuit_type_obj, ct_err = get_or_create_circuit_type(nb, CIRCUIT_TYPE_DEFAULT)
+    if auto_mode:
+        circuit_type_obj, ct_err = get_or_create_circuit_type(nb, CIRCUIT_TYPE_DEFAULT)
+        ct_action = "get/create"
+    else:
+        circuit_type_obj, ct_err = find_circuit_type(nb, CIRCUIT_TYPE_DEFAULT)
+        ct_action = "find"
     if not circuit_type_obj:
-        print("Failed to get/create circuit type: {}".format(ct_err or "?"), file=sys.stderr)
+        print("Failed to {} circuit type: {}".format(ct_action, ct_err or "?"), file=sys.stderr)
         sys.exit(1)
 
     dry_ssh_path = args.dry_ssh or (DEFAULT_DRY_SSH if os.path.isfile(DEFAULT_DRY_SSH) else None)
@@ -459,35 +544,60 @@ def main():
                 ok += 1
                 continue
 
-            provider_obj, prov_msg = get_or_create_provider(nb, provider_name)
-            if not provider_obj:
-                errors.append("{} {}: provider {}: {}".format(dev_name, iface_name, provider_name, prov_msg))
-                continue
-            if prov_msg:
-                report["created_providers"].append(provider_name)
-                print("Provider {}: {}".format(provider_name, prov_msg))
+            if auto_mode:
+                provider_obj, prov_msg = get_or_create_provider(nb, provider_name)
+                if not provider_obj:
+                    errors.append("{} {}: provider {}: {}".format(dev_name, iface_name, provider_name, prov_msg))
+                    continue
+                if prov_msg:
+                    report["created_providers"].append(provider_name)
+                    print("Provider {}: {}".format(provider_name, prov_msg))
 
-            circuit_obj, circ_msg = get_or_create_circuit(
-                nb, circuit_id, provider_obj, circuit_type_obj, commit_rate_kbps, clear_null_commit=args.clear_null_commit
-            )
-            if not circuit_obj:
-                errors.append("{} {}: circuit {}: {}".format(dev_name, iface_name, circuit_id, circ_msg))
-                continue
-            if circ_msg:
-                if circ_msg == "commit_rate updated":
-                    report["updated_commit_rate"].append(circuit_id)
-                elif circ_msg == "commit_rate cleared":
-                    report["cleared_commit_rate"].append(circuit_id)
+                circuit_obj, circ_msg = get_or_create_circuit(
+                    nb,
+                    circuit_id,
+                    provider_obj,
+                    circuit_type_obj,
+                    commit_rate_kbps,
+                    clear_null_commit=args.clear_null_commit,
+                )
+                if not circuit_obj:
+                    errors.append("{} {}: circuit {}: {}".format(dev_name, iface_name, circuit_id, circ_msg))
+                    continue
+                if circ_msg:
+                    if circ_msg == "commit_rate updated":
+                        report["updated_commit_rate"].append(circuit_id)
+                    elif circ_msg == "commit_rate cleared":
+                        report["cleared_commit_rate"].append(circuit_id)
+                    else:
+                        report["created_circuits"].append(circuit_id)
+                    print("Circuit {}: {}".format(circuit_id, circ_msg))
+
+                ct, cable_err = create_termination_and_cable(
+                    nb, circuit_obj, device, nb_iface, report=report
+                )
+                if cable_err:
+                    errors.append("{} {}: {}".format(dev_name, iface_name, cable_err))
                 else:
-                    report["created_circuits"].append(circuit_id)
-                print("Circuit {}: {}".format(circuit_id, circ_msg))
-
-            ct, cable_err = create_termination_and_cable(nb, circuit_obj, device, nb_iface, report=report)
-            if cable_err:
-                errors.append("{} {}: {}".format(dev_name, iface_name, cable_err))
+                    ok += 1
+                    print("OK: {} {} -> {} (termination + cable)".format(dev_name, iface_name, circuit_id))
             else:
-                ok += 1
-                print("OK: {} {} -> {} (termination + cable)".format(dev_name, iface_name, circuit_id))
+                provider_obj, prov_msg = find_provider(nb, provider_name)
+                if not provider_obj:
+                    errors.append("{} {}: {}".format(dev_name, iface_name, prov_msg))
+                    continue
+
+                circuit_obj, circ_msg = find_circuit(nb, circuit_id, provider_obj)
+                if not circuit_obj:
+                    errors.append("{} {}: {}".format(dev_name, iface_name, circ_msg))
+                    continue
+
+                ct, cable_err = verify_termination_and_cable(nb, circuit_obj, device, nb_iface)
+                if cable_err:
+                    errors.append("{} {}: {}".format(dev_name, iface_name, cable_err))
+                else:
+                    ok += 1
+                    print("OK: {} {} -> {} (lookup)".format(dev_name, iface_name, circuit_id))
 
     if errors:
         for e in errors:

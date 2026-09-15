@@ -14,6 +14,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 def _default_ns(**overrides):
     base = dict(
         auto=False,
+        plan=False,
         no_fetch=True,
         from_file=True,
         refresh=False,
@@ -83,14 +84,54 @@ def test_main_human_mode_all_steps_success(monkeypatch, tmp_path):
     assert "--dry-run" in inventory
 
     sync = next(c for c in calls if c[1] == "zabbix_sync_commit_rate.py")
-    assert sync[2:6] == ["-d", "dry-ssh.json", "-f", "commit_rates.json"]
+    assert sync[2:4] == ["-d", "dry-ssh.json"]
+    assert "-f" not in sync
     assert "--create-link-triggers" in sync
 
+    aggregate = next(c for c in calls if c[1] == "zabbix_provider_aggregate.py")
+    assert aggregate[2:4] == ["-d", "dry-ssh.json"]
+    assert "-f" not in aggregate
+
     services = next(c for c in calls if c[1] == "zabbix_provider_services.py")
-    assert services[-2:] == ["--parent-service", "Uplinks providers"]
+    assert services[2:4] == ["--parent-service", "Uplinks providers"]
+    assert "-f" not in services
+    assert "--legacy-commit-rates-fallback" not in services
 
     assert scripts.index("zabbix_provider_aggregate.py") < scripts.index("zabbix_map.py")
     assert scripts.count("zabbix_map.py") == 1
+
+
+def test_main_provider_services_without_commit_rates_file(monkeypatch, tmp_path):
+    """Human mode must not require commit_rates.json for provider services step."""
+    dry = tmp_path / "dry-ssh.json"
+    dry.write_text((FIXTURES / "dry_ssh_minimal.json").read_text(encoding="utf-8"), encoding="utf-8")
+    desc = tmp_path / "description_to_name.json"
+    desc.write_text("{}", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
+    monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
+    monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
+    monkeypatch.setattr(full, "DEFAULT_COMMIT_RATES", "commit_rates.json")
+    monkeypatch.setattr(full, "DEFAULT_DESC_MAP", "description_to_name.json")
+
+    calls = []
+
+    def fake_run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
+        calls.append(list(argv))
+        return True, "ok line", ""
+
+    monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(full.argparse.ArgumentParser, "parse_args", lambda self: _default_ns())
+    with pytest.raises(SystemExit) as exc:
+        full.main()
+    assert exc.value.code == 0
+
+    services = next(c for c in calls if c[1] == "zabbix_provider_services.py")
+    assert services[2:4] == ["--parent-service", "Uplinks providers"]
+    assert "-f" not in services
+    assert "--legacy-commit-rates-fallback" not in services
+    assert not (tmp_path / "commit_rates.json").exists()
 
 
 def test_main_auto_all_steps_success(monkeypatch, tmp_path):
@@ -145,7 +186,20 @@ def test_main_auto_all_steps_success(monkeypatch, tmp_path):
 
     circuits = next(c for c in calls if c[1] == "netbox_create_circuits.py")
     assert circuits[2:6] == ["-f", "commit_rates.json", "-d", "dry-ssh.json"]
+    assert "--auto" in circuits
     assert circuits[-2:] == ["--location", "ALA"]
+
+    sync = next(c for c in calls if c[1] == "zabbix_sync_commit_rate.py")
+    assert "-f" in sync
+    assert "--legacy-commit-rates-fallback" in sync
+
+    aggregate = next(c for c in calls if c[1] == "zabbix_provider_aggregate.py")
+    assert "-f" in aggregate
+    assert "--legacy-commit-rates-fallback" in aggregate
+
+    services = next(c for c in calls if c[1] == "zabbix_provider_services.py")
+    assert "-f" in services
+    assert "--legacy-commit-rates-fallback" in services
 
 
 def test_main_location_without_auto_exits(monkeypatch, tmp_path):

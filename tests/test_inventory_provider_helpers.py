@@ -54,8 +54,40 @@ def test_is_uplink_iface_inventory_without_uplink_description():
     inventory_map = {("R1", "ethernet51/1"): "ManualISP"}
     iface = {"name": "Ethernet51/1", "description": "Transit only"}
     assert is_uplink(iface) is False
-    assert is_uplink_iface(iface, hostname="R1", device_iface_to_provider=inventory_map) is True
-    assert is_uplink_iface(iface, hostname="R1", device_iface_to_provider={}) is False
+    assert is_uplink_iface(
+        iface, hostname="R1", device_iface_to_provider=inventory_map, inventory_scoped=True
+    ) is True
+    assert is_uplink_iface(iface, hostname="R1", device_iface_to_provider={}, inventory_scoped=True) is False
+
+
+def test_is_uplink_iface_inventory_mode_ignores_uplink_description():
+    """Out-of-scope dry-ssh iface with Uplink: must not bypass circuit scope."""
+    inventory_map = {("WAW-EQX-7280QR-2", "ethernet23/1"): "Hurricane"}
+    scoped = {
+        "name": "Ethernet23/1",
+        "description": "Uplink: HurricaneE",
+    }
+    out_of_scope = {
+        "name": "Ethernet34/1",
+        "description": "Uplink: Fiord and MSK PING-WIN 3Gbps link",
+    }
+    assert is_uplink_iface(
+        scoped,
+        hostname="WAW-EQX-7280QR-2",
+        device_iface_to_provider=inventory_map,
+        inventory_scoped=True,
+    ) is True
+    assert is_uplink_iface(
+        out_of_scope,
+        hostname="WAW-EQX-7280QR-2",
+        device_iface_to_provider=inventory_map,
+        inventory_scoped=True,
+    ) is False
+
+
+def test_is_uplink_iface_legacy_mode_uses_uplink_description():
+    iface = {"name": "Ethernet34/1", "description": "Uplink: Fiord"}
+    assert is_uplink_iface(iface, hostname="WAW-EQX-7280QR-2", inventory_scoped=False) is True
 
 
 def test_iface_has_inventory_via_aggregate_interface():
@@ -77,6 +109,21 @@ def test_device_iface_map_from_inventory_normalizes_keys():
     }
     mapping = device_iface_provider_map_from_inventory(report, dry_ssh_devices=None)
     assert mapping[("R1", "ethernet51/1")] == "Cogent"
+
+
+def test_expand_inventory_member_et003_to_ae30():
+    """Inventory on physical member maps to logical ae3.0 for Zabbix."""
+    dry_ssh = {
+        "MSK-M9-MX204-2": [
+            {"name": "ae3.0", "physicalInterface": "ae3", "isLogical": True},
+            {"name": "ae3", "isLag": True},
+            {"name": "et-0/0/3", "aggregateInterface": "ae3"},
+        ],
+    }
+    inventory_map = {("MSK-M9-MX204-2", "et-0/0/3"): "Ertelecom"}
+    expanded = expand_provider_map_for_zabbix(inventory_map, dry_ssh)
+    assert expanded[("MSK-M9-MX204-2", "ae3.0")] == "Ertelecom"
+    assert expanded[("MSK-M9-MX204-2", "et-0/0/3")] == "Ertelecom"
 
 
 def test_expand_inventory_mixed_case_member_aggregate_physical_join():

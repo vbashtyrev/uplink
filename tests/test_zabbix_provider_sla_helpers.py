@@ -5,19 +5,18 @@ import json
 from zabbix_provider_sla import (
     _burst_report_rows,
     _default_window,
-    _get_providers_from_limits,
     _iter_burst_links,
     _load_commit_rates,
     _load_events_for_trigger,
 )
 
 
-def test_provider_sla_load_and_limits(tmp_path):
+def test_provider_sla_load_commit_rates(tmp_path):
     path = tmp_path / "cr.json"
     path.write_text(json.dumps({"_provider_limits": {"A": 10, "B": 5}}), encoding="utf-8")
     data, err = _load_commit_rates(str(path))
     assert err is None
-    assert _get_providers_from_limits(data) == ["A", "B"]
+    assert data["_provider_limits"]["A"] == 10
 
 
 def test_burst_report_rows_dedupes_circuit():

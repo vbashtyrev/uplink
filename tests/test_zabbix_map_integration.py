@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from tests.mocks.zabbix_rpc import ZabbixRpcMocker
 from zabbix_map import (
@@ -74,6 +75,7 @@ def test_update_uplinks_map_creates_map(monkeypatch, zabbix_env):
         items,
         desc,
         debug=False,
+        device_iface_to_provider=dry_ssh_minimal_inventory_context()["device_iface_to_provider"],
     )
     assert err is None
     assert sysmapid == "55"

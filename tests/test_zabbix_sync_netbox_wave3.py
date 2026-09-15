@@ -9,8 +9,8 @@ from tests.mocks.netbox_api import MockNetBox, _Record, build_netbox_for_commit_
 from zabbix_sync_commit_rate import (
     _is_netbox_auth_error,
     _macro_name_for_interface,
-    get_commit_rates_from_netbox,
-    interfaces_by_host_from_dry_ssh,
+    commit_rates_from_inventory_report,
+    fetch_uplink_inventory_report,
     is_physical_uplink_iface,
     load_burst_pairs,
     load_dry_ssh,
@@ -25,20 +25,6 @@ def test_is_netbox_auth_error():
 
 def test_macro_names_empty_iface():
     assert "iface" in _macro_name_for_interface("Eth1") or "Eth1" in _macro_name_for_interface("Eth1")
-
-
-def test_interfaces_by_host_physical_only():
-    devices = {
-        "R1": [
-            {"name": "Ethernet1"},
-            {"name": "ae5", "isLag": True},
-            {"name": "ae5.0", "isLogical": True},
-        ],
-    }
-    all_if = interfaces_by_host_from_dry_ssh(devices, physical_only=False)
-    phys = interfaces_by_host_from_dry_ssh(devices, physical_only=True)
-    assert "Ethernet1" in all_if["R1"]
-    assert "ae5" not in phys["R1"]
 
 
 def test_is_physical_uplink_iface():
@@ -58,36 +44,44 @@ def test_load_burst_pairs(tmp_path):
     assert ("H", "Eth1") in pairs
 
 
-def test_get_commit_rates_auth_exit(monkeypatch):
+def test_fetch_inventory_auth_exit(monkeypatch):
     nb = MagicMock()
     nb.circuits.providers.all.side_effect = Exception("403 token expired")
     monkeypatch.setattr(sys, "exit", lambda code=0: (_ for _ in ()).throw(SystemExit(code)))
     with pytest.raises(SystemExit) as exc:
-        get_commit_rates_from_netbox(nb, tag="t", debug=True)
+        fetch_uplink_inventory_report(nb, tag="t", debug=True)
     assert exc.value.code == 1
 
 
-def test_get_commit_rates_auth_on_devices_filter_exit(monkeypatch):
+def test_fetch_inventory_auth_on_devices_filter_exit(monkeypatch):
     nb = build_netbox_for_commit_rates()
     nb.dcim.devices.filter = lambda **kw: (_ for _ in ()).throw(Exception("403 forbidden"))
     monkeypatch.setattr(sys, "exit", lambda code=0: (_ for _ in ()).throw(SystemExit(code)))
     with pytest.raises(SystemExit) as exc:
-        get_commit_rates_from_netbox(nb, tag="uplinks", debug=True)
+        fetch_uplink_inventory_report(nb, tag="border", debug=True)
     assert exc.value.code == 1
 
 
-def test_get_commit_rates_no_cable_debug(capsys):
-    ct = _Record(id=1, term_side="A", cable=None, circuit=_Record(id=2, commit_rate=1000))
-    nb = MockNetBox(devices=[], interfaces=[], cables=[], terminations=[ct], circuits=[ct.circuit])
+def test_fetch_inventory_no_cable_debug(capsys):
+    circuit = _Record(id=2, cid="CKT-2", commit_rate=1000, status="active", provider_id=1)
+    ct = _Record(id=1, term_side="A", cable=None, circuit=circuit, circuit_id=2)
+    nb = MockNetBox(devices=[], interfaces=[], cables=[], terminations=[ct], circuits=[circuit])
     wire_inventory_collector(nb)
-    result = get_commit_rates_from_netbox(nb, tag=None, debug=True)
+    report = fetch_uplink_inventory_report(nb, tag=None, debug=True)
+    result = commit_rates_from_inventory_report(report, debug=True)
     assert result == {}
+    assert len(report.get("incomplete") or []) == 1
+    assert report["incomplete"][0]["reason"] == "no_cable"
     err = capsys.readouterr().err.lower()
-    assert "incomplete" in err or "no_cable" in err or result == {}
+    assert "incomplete" in err
 
 
-def test_get_commit_rates_cable_get_fails():
+def test_fetch_inventory_cable_get_fails():
     nb = build_netbox_for_commit_rates()
     nb.dcim.cables.get = lambda pk: (_ for _ in ()).throw(RuntimeError("fail"))
-    result = get_commit_rates_from_netbox(nb, tag="uplinks", debug=True)
+    report = fetch_uplink_inventory_report(nb, tag="border", debug=True)
+    result = commit_rates_from_inventory_report(report, debug=True)
     assert result == {}
+    assert report["stats"]["read_errors"] >= 1
+    assert report["stats"].get("error") == "partial_read"
+    assert len(report.get("incomplete") or []) >= 1

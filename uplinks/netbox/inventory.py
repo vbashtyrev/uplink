@@ -20,9 +20,15 @@ REASON_NO_INTERFACE = "no_interface"
 REASON_NO_DEVICE = "no_device"
 REASON_NOT_BORDER_DEVICE = "not_border_device"
 REASON_MISSING_COMMIT_RATE = "missing_commit_rate"
+REASON_MISSING_PROVIDER_AGGREGATE_LIMIT = "missing_provider_aggregate_limit"
+REASON_PROVIDER_UNAVAILABLE = "provider_unavailable"
 
 ERROR_AUTH_DENIED = "auth_denied"
 ERROR_PROVIDERS_UNAVAILABLE = "providers_unavailable"
+ERROR_PARTIAL_READ = "partial_read"
+
+UPLINKS_CIRCUIT_LIFECYCLE_FIELD = "uplinks_circuit_lifecycle"
+UPLINKS_LIFECYCLE_ACTIVE = "active"
 
 REASON_LABELS = {
     REASON_NO_TERMINATION_A: "no side-A circuit termination",
@@ -32,6 +38,10 @@ REASON_LABELS = {
     REASON_NO_DEVICE: "interface has no device",
     REASON_NOT_BORDER_DEVICE: "device does not have required tag",
     REASON_MISSING_COMMIT_RATE: "circuit commit_rate is not set",
+    REASON_MISSING_PROVIDER_AGGREGATE_LIMIT: (
+        "FlatAggCap circuit has no commit_rate and provider aggregate_limit_gbps is not set"
+    ),
+    REASON_PROVIDER_UNAVAILABLE: "circuit provider could not be read from NetBox",
 }
 
 
@@ -133,7 +143,61 @@ def _provider_name(provider):
     return getattr(provider, "name", None) or ""
 
 
-def _resolve_provider(nb, circuit):
+def circuit_lifecycle_value(circuit):
+    """Read uplinks_circuit_lifecycle from Circuit custom fields."""
+    custom_fields = getattr(circuit, "custom_fields", None) or {}
+    if isinstance(custom_fields, dict):
+        return _normalize_choice(custom_fields.get(UPLINKS_CIRCUIT_LIFECYCLE_FIELD))
+    return None
+
+
+def circuit_matches_scope(circuit, circuit_scope):
+    """True when circuit_scope is unset or the circuit matches tag/lifecycle filters (fail-closed)."""
+    if not circuit_scope:
+        return True
+    monitor_tag = circuit_scope.get("monitor_tag")
+    if monitor_tag and not _record_has_tag(circuit, monitor_tag):
+        return False
+    lifecycle = circuit_scope.get("lifecycle")
+    if lifecycle is not None:
+        circuit_lifecycle = circuit_lifecycle_value(circuit)
+        expected = str(lifecycle).strip().lower()
+        actual = str(circuit_lifecycle or "").strip().lower()
+        if not actual or actual != expected:
+            return False
+    return True
+
+
+def project_circuit_scope(monitor_tag=None, lifecycle=None):
+    """Project monitoring scope: circuit tag + active uplinks_circuit_lifecycle."""
+    if monitor_tag is None:
+        try:
+            from uplinks_config import NETBOX_MONITOR_TAG as _default_tag
+        except ImportError:
+            _default_tag = "uplinks"
+        monitor_tag = _default_tag
+    if lifecycle is None:
+        lifecycle = UPLINKS_LIFECYCLE_ACTIVE
+    return {"monitor_tag": monitor_tag, "lifecycle": lifecycle}
+
+
+def _resolve_monitor_tag(monitor_tag=None):
+    tag = monitor_tag
+    if tag is None:
+        try:
+            from uplinks_config import NETBOX_MONITOR_TAG as _default_tag
+        except ImportError:
+            _default_tag = None
+        tag = _default_tag
+    return tag
+
+
+def _bump_read_error(stats):
+    if stats is not None:
+        stats["read_errors"] += 1
+
+
+def _resolve_provider(nb, circuit, stats=None):
     provider = getattr(circuit, "provider", None)
     if provider is None:
         provider_id = getattr(circuit, "provider_id", None)
@@ -142,13 +206,15 @@ def _resolve_provider(nb, circuit):
                 provider = nb.circuits.providers.get(provider_id)
             except Exception as e:
                 _raise_if_netbox_auth(e)
+                _bump_read_error(stats)
                 provider = None
     elif not isinstance(provider, str) and getattr(provider, "name", None) is None:
         try:
             provider = nb.circuits.providers.get(provider.id if hasattr(provider, "id") else provider)
         except Exception as e:
             _raise_if_netbox_auth(e)
-            pass
+            _bump_read_error(stats)
+            provider = None
     return provider
 
 
@@ -362,7 +428,7 @@ def _termination_object_type_and_id(term):
     return ot, oid
 
 
-def _port_from_cable(nb, cable_obj, debug=False):
+def _port_from_cable(nb, cable_obj, debug=False, stats=None):
     """Return rear/front port record from cable terminations, or None."""
     a_terms, b_terms = _cable_terminations(cable_obj)
     port_oid = None
@@ -390,13 +456,14 @@ def _port_from_cable(nb, cable_obj, debug=False):
         return endpoint.get(port_oid)
     except Exception as e:
         _raise_if_netbox_auth(e)
+        _bump_read_error(stats)
         if debug:
             label = "rear_ports" if is_rear else "front_ports"
             print("dcim.{}.get({}): {}".format(label, port_oid, e), file=sys.stderr)
         return None
 
 
-def _interface_from_port_paths(nb, port, cable_id, circuit_termination_id, debug=False):
+def _interface_from_port_paths(nb, port, cable_id, circuit_termination_id, debug=False, stats=None):
     """Trace through pass-through port paths() to find terminal dcim.interface."""
     paths_fn = getattr(port, "paths", None)
     if not callable(paths_fn):
@@ -405,6 +472,7 @@ def _interface_from_port_paths(nb, port, cable_id, circuit_termination_id, debug
         path_list = paths_fn()
     except Exception as e:
         _raise_if_netbox_auth(e)
+        _bump_read_error(stats)
         if debug:
             print("{}.paths(): {}".format(getattr(port, "name", port), e), file=sys.stderr)
         return None
@@ -412,6 +480,20 @@ def _interface_from_port_paths(nb, port, cable_id, circuit_termination_id, debug
         return None
     for path_info in path_list:
         if not isinstance(path_info, dict):
+            continue
+        if path_info.get("is_split"):
+            if debug:
+                print(
+                    "skip path on {}: is_split".format(getattr(port, "name", port)),
+                    file=sys.stderr,
+                )
+            continue
+        if "is_complete" in path_info and not path_info.get("is_complete"):
+            if debug:
+                print(
+                    "skip path on {}: is_complete=False".format(getattr(port, "name", port)),
+                    file=sys.stderr,
+                )
             continue
         if not _path_matches_cable_and_termination(path_info, cable_id, circuit_termination_id):
             continue
@@ -421,7 +503,7 @@ def _interface_from_port_paths(nb, port, cable_id, circuit_termination_id, debug
     return None
 
 
-def _interface_from_cable(nb, cable_obj, cable_id=None, circuit_termination_id=None, debug=False):
+def interface_from_cable(nb, cable_obj, cable_id=None, circuit_termination_id=None, debug=False, stats=None):
     """Return interface from cable terminations or traced pass-through port paths()."""
     if cable_id is None:
         cable_id = _record_object_id(cable_obj)
@@ -441,19 +523,20 @@ def _interface_from_cable(nb, cable_obj, cable_id=None, circuit_termination_id=N
             return nb.dcim.interfaces.get(interface_oid)
         except Exception as e:
             _raise_if_netbox_auth(e)
+            _bump_read_error(stats)
             if debug:
                 print("dcim.interfaces.get({}): {}".format(interface_oid, e), file=sys.stderr)
             return None
 
-    port = _port_from_cable(nb, cable_obj, debug=debug)
+    port = _port_from_cable(nb, cable_obj, debug=debug, stats=stats)
     if not port:
         return None
     return _interface_from_port_paths(
-        nb, port, cable_id, circuit_termination_id, debug=debug
+        nb, port, cable_id, circuit_termination_id, debug=debug, stats=stats
     )
 
 
-def _resolve_device(nb, iface):
+def _resolve_device(nb, iface, stats=None):
     device = getattr(iface, "device", None)
     if device is None:
         dev_id = getattr(iface, "device_id", None)
@@ -462,14 +545,33 @@ def _resolve_device(nb, iface):
                 device = nb.dcim.devices.get(dev_id)
             except Exception as e:
                 _raise_if_netbox_auth(e)
+                _bump_read_error(stats)
                 device = None
     elif not isinstance(device, str) and getattr(device, "name", None) is None:
         try:
             device = nb.dcim.devices.get(device.id if hasattr(device, "id") else device)
         except Exception as e:
             _raise_if_netbox_auth(e)
+            _bump_read_error(stats)
             device = None
     return device
+
+
+def is_flat_agg_cap_billing_model(billing_model):
+    """True when billing_model is FlatAggCap (case-insensitive)."""
+    return (billing_model or "").strip().lower() == "flataggcap"
+
+
+def _commit_rate_warnings(circuit, provider):
+    """Warnings for missing per-circuit commit_rate (shared cap exempt on FlatAggCap)."""
+    if _commit_rate_kbps(circuit) is not None:
+        return []
+    billing_model = _billing_model(circuit)
+    if is_flat_agg_cap_billing_model(billing_model):
+        if provider_aggregate_limit_gbps_from_custom_fields(provider) is not None:
+            return []
+        return [REASON_MISSING_PROVIDER_AGGREGATE_LIMIT]
+    return [REASON_MISSING_COMMIT_RATE]
 
 
 def _billing_model(circuit):
@@ -521,9 +623,12 @@ def _complete_entry(base, device_name, interface_name, commit_rate_kbps, billing
     return entry
 
 
-def collect_uplink_inventory(nb, tag="border", debug=False, active_only=True):
+def collect_uplink_inventory(nb, tag="border", debug=False, active_only=True, circuit_scope=None):
     """
     Walk providers -> circuits -> side-A termination -> cable -> interface -> border device.
+
+    When circuit_scope is set (e.g. monitor tag + uplinks_circuit_lifecycle=active), only matching
+    circuits are walked; out-of-scope circuits are omitted from complete/incomplete.
 
     Return dict with keys:
       complete: structurally valid border uplinks (may include warnings)
@@ -532,7 +637,7 @@ def collect_uplink_inventory(nb, tag="border", debug=False, active_only=True):
     """
     result = {"complete": [], "incomplete": [], "stats": {}}
     try:
-        _collect_uplink_inventory_body(nb, tag, debug, active_only, result)
+        _collect_uplink_inventory_body(nb, tag, debug, active_only, circuit_scope, result)
     except NetBoxAuthError as e:
         if debug:
             print("NetBox auth error: {}".format(e), file=sys.stderr)
@@ -544,7 +649,8 @@ def collect_uplink_inventory(nb, tag="border", debug=False, active_only=True):
     return result
 
 
-def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
+def _collect_uplink_inventory_body(nb, tag, debug, active_only, circuit_scope, result):
+    read_errors = 0
     device_ids_by_tag = set()
     if tag:
         try:
@@ -554,6 +660,7 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
                 print("Devices with tag {!r}: {}".format(tag, len(device_ids_by_tag)), file=sys.stderr)
         except Exception as e:
             _raise_if_netbox_auth(e)
+            read_errors += 1
             if debug:
                 print("dcim.devices.filter(tag={}): {}".format(tag, e), file=sys.stderr)
 
@@ -567,15 +674,20 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
             _raise_if_netbox_auth(e2)
             if debug:
                 print("circuits.providers: {}".format(e2), file=sys.stderr)
-            result["stats"]["error"] = ERROR_PROVIDERS_UNAVAILABLE
+            result["stats"] = {
+                "error": ERROR_PROVIDERS_UNAVAILABLE,
+                "read_errors": read_errors,
+            }
             return
 
     stats = {
         "providers": len(providers),
         "circuits_seen": 0,
+        "circuits_in_scope": 0,
         "circuits_active": 0,
         "complete": 0,
         "incomplete": 0,
+        "read_errors": read_errors,
     }
 
     for provider in providers:
@@ -586,13 +698,37 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
             circuits = list(nb.circuits.circuits.filter(provider_id=provider_id))
         except Exception as e:
             _raise_if_netbox_auth(e)
+            stats["read_errors"] += 1
             if debug:
                 print("circuits.filter(provider_id={}): {}".format(provider_id, e), file=sys.stderr)
+            base = {
+                "provider": _provider_name(provider),
+                "circuit_id": "",
+                "circuit_pk": None,
+                "status": "",
+            }
+            result["incomplete"].append(_incomplete_entry(base, REASON_PROVIDER_UNAVAILABLE))
+            stats["incomplete"] += 1
             continue
 
         for circuit in circuits:
             stats["circuits_seen"] += 1
-            base = _base_entry(provider, circuit)
+            if circuit_scope and not circuit_matches_scope(circuit, circuit_scope):
+                continue
+            stats["circuits_in_scope"] += 1
+            circuit_provider = _resolve_provider(nb, circuit, stats)
+            if circuit_provider is None and (
+                getattr(circuit, "provider_id", None) is not None
+                or getattr(circuit, "provider", None) is not None
+            ):
+                base = _base_entry(provider, circuit)
+                result["incomplete"].append(
+                    _incomplete_entry(base, REASON_PROVIDER_UNAVAILABLE)
+                )
+                stats["incomplete"] += 1
+                continue
+            entry_provider = circuit_provider if circuit_provider is not None else provider
+            base = _base_entry(entry_provider, circuit)
             if not _circuit_passes_active_filter(circuit, active_only):
                 continue
             stats["circuits_active"] += 1
@@ -607,6 +743,7 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
                 terminations = list(nb.circuits.circuit_terminations.filter(circuit_id=circuit_pk))
             except Exception as e:
                 _raise_if_netbox_auth(e)
+                _bump_read_error(stats)
                 if debug:
                     print("circuit_terminations.filter(circuit_id={}): {}".format(circuit_pk, e), file=sys.stderr)
                 result["incomplete"].append(_incomplete_entry(base, REASON_NO_TERMINATION_A))
@@ -630,6 +767,7 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
                 cable_obj = nb.dcim.cables.get(cable_id)
             except Exception as e:
                 _raise_if_netbox_auth(e)
+                _bump_read_error(stats)
                 if debug:
                     print("dcim.cables.get({}): {}".format(cable_id, e), file=sys.stderr)
                 cable_obj = None
@@ -639,12 +777,13 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
                 continue
 
             ct_a_id = getattr(ct_a, "id", None)
-            iface = _interface_from_cable(
+            iface = interface_from_cable(
                 nb,
                 cable_obj,
                 cable_id=cable_id,
                 circuit_termination_id=ct_a_id,
                 debug=debug,
+                stats=stats,
             )
             if not iface:
                 result["incomplete"].append(
@@ -659,7 +798,7 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
                 stats["incomplete"] += 1
                 continue
 
-            device = _resolve_device(nb, iface)
+            device = _resolve_device(nb, iface, stats=stats)
             if not device:
                 result["incomplete"].append(
                     _incomplete_entry(
@@ -691,9 +830,7 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
 
             commit_rate_kbps = _commit_rate_kbps(circuit)
             billing_model = _billing_model(circuit)
-            warnings = []
-            if commit_rate_kbps is None:
-                warnings.append(REASON_MISSING_COMMIT_RATE)
+            warnings = _commit_rate_warnings(circuit, entry_provider)
 
             result["complete"].append(
                 _complete_entry(
@@ -707,6 +844,8 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, result):
             )
             stats["complete"] += 1
 
+    if stats["read_errors"] > 0 and "error" not in stats:
+        stats["error"] = ERROR_PARTIAL_READ
     result["stats"] = stats
     if debug:
         print(
@@ -740,8 +879,21 @@ def netbox_client_from_env(debug=False):
         return None
 
 
+def resolve_border_device_tag(tag=None):
+    """Border device tag from argument/env; monitor tag is not a device tag."""
+    if tag is None:
+        resolved = os.environ.get("NETBOX_TAG") or "border"
+    else:
+        resolved = tag
+    resolved = (resolved or "border").strip() or "border"
+    monitor_tag = _resolve_monitor_tag()
+    if monitor_tag and resolved == monitor_tag:
+        return "border"
+    return resolved
+
+
 def netbox_border_tag():
-    return (os.environ.get("NETBOX_TAG") or "border").strip() or "border"
+    return resolve_border_device_tag()
 
 
 def providers_from_complete_inventory(report):
@@ -840,7 +992,7 @@ def collect_provider_slo_percent(nb, debug=False):
     """Provider.name -> slo_percent from NetBox custom fields.
 
     Returns (mapping, error) where error is ERROR_AUTH_DENIED on token/auth failure,
-    or None on success / non-auth read errors (missing custom fields are omitted).
+    ERROR_PARTIAL_READ on other read errors, or None on success (missing custom fields are omitted).
     """
     slo = {}
     try:
@@ -855,7 +1007,7 @@ def collect_provider_slo_percent(nb, debug=False):
             return slo, ERROR_AUTH_DENIED
         if debug:
             print("NetBox: circuits.providers.all(): {}".format(e), file=sys.stderr)
-        return slo, None
+        return slo, ERROR_PARTIAL_READ
     for provider in providers:
         name = getattr(provider, "name", None)
         if not name:
@@ -872,14 +1024,25 @@ def collect_provider_slo_percent(nb, debug=False):
 
 
 def collect_provider_limits_gbps(nb, debug=False):
-    """Provider.name -> aggregate_limit_gbps from NetBox custom fields."""
+    """Provider.name -> aggregate_limit_gbps from NetBox custom fields.
+
+    Returns (mapping, error) where error is ERROR_AUTH_DENIED on token/auth failure,
+    ERROR_PARTIAL_READ on other read errors, or None on success.
+    """
     limits = {}
     try:
         providers = list(nb.circuits.providers.all())
     except Exception as e:
+        if is_netbox_auth_error(e):
+            if debug:
+                print(
+                    "NetBox: circuits.providers.all(): auth denied ({})".format(e),
+                    file=sys.stderr,
+                )
+            return limits, ERROR_AUTH_DENIED
         if debug:
             print("NetBox: circuits.providers.all(): {}".format(e), file=sys.stderr)
-        return limits
+        return limits, ERROR_PARTIAL_READ
     for provider in providers:
         name = getattr(provider, "name", None)
         if not name:
@@ -892,7 +1055,101 @@ def collect_provider_limits_gbps(nb, debug=False):
             "NetBox: aggregate_limit_gbps for: {}".format(", ".join(sorted(limits.keys()))),
             file=sys.stderr,
         )
-    return limits
+    return limits, None
+
+
+def _pick_zabbix_iface_from_aliases(aliases):
+    """Pick Zabbix-facing interface name from inventory/dry-ssh alias set."""
+    if not aliases:
+        return None
+    with_dot = sorted(name for name in aliases if "." in name)
+    for name in with_dot:
+        if name.endswith(".0"):
+            return name
+    if with_dot:
+        return with_dot[0]
+    return sorted(aliases)[0]
+
+
+def _dry_ssh_display_name(dev_name, normalized_iface, dry_ssh_devices):
+    """Return dry-ssh interface name (original casing) matching normalized iface."""
+    if not dry_ssh_devices or not dev_name or not normalized_iface:
+        return normalized_iface
+    for entry in dry_ssh_devices.get(dev_name) or []:
+        if not isinstance(entry, dict):
+            continue
+        name = (entry.get("name") or "").strip()
+        if name and _normalize_iface_name(name) == normalized_iface:
+            return name
+    return normalized_iface
+
+
+def _zabbix_iface_from_inventory_iface(dev_name, inv_iface, dry_ssh_devices):
+    """Map inventory cable interface to Zabbix macro/trigger name via dry-ssh."""
+    if not dev_name or not inv_iface:
+        return None
+    if not dry_ssh_devices:
+        return (inv_iface or "").strip() or None
+    phys_to_logical = _build_physical_to_logical_normalized(dry_ssh_devices)
+    member_to_aggregate = _build_member_to_aggregate(dry_ssh_devices)
+    aliases = _inventory_alias_ifaces(
+        dev_name,
+        inv_iface,
+        phys_to_logical,
+        member_to_aggregate,
+    )
+    zabbix_norm = _pick_zabbix_iface_from_aliases(aliases)
+    if not zabbix_norm:
+        return (inv_iface or "").strip() or None
+    return _dry_ssh_display_name(dev_name, zabbix_norm, dry_ssh_devices)
+
+
+def expand_burst_pairs_for_zabbix(pairs, dry_ssh_devices, debug=False):
+    """Map inventory (device, iface) Burst pairs to Zabbix logical interface names."""
+    if not dry_ssh_devices:
+        return set(pairs)
+    expanded = set()
+    substituted = []
+    for dev_name, inv_iface in pairs:
+        zabbix_iface = _zabbix_iface_from_inventory_iface(dev_name, inv_iface, dry_ssh_devices)
+        if not zabbix_iface:
+            continue
+        expanded.add((dev_name, zabbix_iface))
+        if _normalize_iface_name(zabbix_iface) != _normalize_iface_name(inv_iface):
+            substituted.append((dev_name, inv_iface, zabbix_iface))
+    if debug and substituted:
+        for dev_name, inv_iface, zabbix_iface in substituted:
+            print(
+                "Burst pair for Zabbix: {} {} -> {}".format(
+                    dev_name, inv_iface, zabbix_iface
+                ),
+                file=sys.stderr,
+            )
+    return expanded
+
+
+def expand_burst_metadata_for_zabbix(meta, dry_ssh_devices, debug=False):
+    """Map inventory Burst metadata keys to Zabbix logical interface names."""
+    if not dry_ssh_devices:
+        return dict(meta)
+    expanded = {}
+    substituted = []
+    for (dev_name, inv_iface), burst_meta in meta.items():
+        zabbix_iface = _zabbix_iface_from_inventory_iface(dev_name, inv_iface, dry_ssh_devices)
+        if not zabbix_iface:
+            continue
+        expanded[(dev_name, zabbix_iface)] = burst_meta
+        if _normalize_iface_name(zabbix_iface) != _normalize_iface_name(inv_iface):
+            substituted.append((dev_name, inv_iface, zabbix_iface))
+    if debug and substituted:
+        for dev_name, inv_iface, zabbix_iface in substituted:
+            print(
+                "Burst metadata for Zabbix: {} {} -> {}".format(
+                    dev_name, inv_iface, zabbix_iface
+                ),
+                file=sys.stderr,
+            )
+    return expanded
 
 
 def _normalize_iface_name(iface_name):
@@ -1030,15 +1287,22 @@ def iface_has_inventory_entry(hostname, iface, device_iface_to_provider=None):
     return False
 
 
-def is_uplink_iface(iface, hostname=None, device_iface_to_provider=None):
-    """Uplink by description, or by complete inventory when hostname is known."""
+def is_uplink_iface(iface, hostname=None, device_iface_to_provider=None, inventory_scoped=False):
+    """
+    Uplink filter for map/dashboard/aggregate.
+
+    When inventory_scoped is True, only interfaces present in scoped inventory count
+    as uplinks (fail-closed; dry-ssh Uplink: alone is ignored).
+    Legacy/generic mode uses description-based is_uplink() when inventory_scoped is False.
+    """
+    if inventory_scoped:
+        if not hostname:
+            return False
+        return iface_has_inventory_entry(hostname, iface, device_iface_to_provider or {})
+
     from generate_commit_rates import is_uplink
 
-    if is_uplink(iface):
-        return True
-    if not hostname:
-        return False
-    return iface_has_inventory_entry(hostname, iface, device_iface_to_provider)
+    return is_uplink(iface)
 
 
 def resolve_provider_name_for_iface(hostname, iface, desc_to_name, device_iface_to_provider=None):
@@ -1057,31 +1321,67 @@ def resolve_provider_name_for_iface(hostname, iface, desc_to_name, device_iface_
     return desc_to_name.get(description, description)
 
 
-def load_uplink_provider_context(dry_ssh_devices, debug=False, border_tag=None):
+def inventory_read_failed(report):
+    """True when the NetBox walk hit a read error (auth, providers, or partial)."""
+    error = (report.get("stats") or {}).get("error")
+    return error in (ERROR_AUTH_DENIED, ERROR_PROVIDERS_UNAVAILABLE, ERROR_PARTIAL_READ)
+
+
+def arm_netbox_incomplete_guard(stats):
+    """Arm Zabbix transport guard from inventory stats.error."""
+    from uplinks.zabbix.client import set_incomplete_netbox_data
+
+    error = (stats or {}).get("error")
+    if error == ERROR_AUTH_DENIED:
+        set_incomplete_netbox_data("authentication refused")
+    elif error == ERROR_PROVIDERS_UNAVAILABLE:
+        set_incomplete_netbox_data("provider list unavailable")
+    else:
+        set_incomplete_netbox_data("partial read")
+
+
+def load_uplink_provider_context(
+    dry_ssh_devices, debug=False, border_tag=None, circuit_scope=True
+):
     """
     Read-only NetBox uplink provider context for map/dashboard/aggregate.
-    Return dict with device_iface_to_provider, providers (set), stats; or None.
+    Return dict with device_iface_to_provider, providers (set), stats, read_error; or None
+    when NetBox is not configured.
+
+    Uses project circuit scope (monitor tag + active lifecycle) by default.
+    Pass circuit_scope=None to audit all circuits.
     """
     nb = netbox_client_from_env(debug=debug)
     if nb is None:
         return None
 
+    scope = project_circuit_scope() if circuit_scope is True else circuit_scope
     tag = border_tag if border_tag is not None else netbox_border_tag()
-    report = collect_uplink_inventory(nb, tag=tag, debug=debug, active_only=True)
+    report = collect_uplink_inventory(
+        nb, tag=tag, debug=debug, active_only=True, circuit_scope=scope
+    )
     stats = report.get("stats") or {}
     error = stats.get("error")
+    read_error = inventory_read_failed(report)
     if error == ERROR_AUTH_DENIED:
         print(
-            "Warning: NetBox authentication failed; falling back to local provider data",
+            "Warning: NetBox authentication failed; scoped inventory unavailable, uplinks are not counted",
             file=sys.stderr,
         )
         if debug:
             print("collect_uplink_inventory: {}".format(error), file=sys.stderr)
-        return None
-    if error == ERROR_PROVIDERS_UNAVAILABLE:
+    elif error == ERROR_PROVIDERS_UNAVAILABLE:
         if debug:
-            print("NetBox: providers unavailable; falling back to local provider data", file=sys.stderr)
-        return None
+            print(
+                "NetBox: scoped inventory unavailable; uplinks are not counted",
+                file=sys.stderr,
+            )
+    elif error == ERROR_PARTIAL_READ:
+        print(
+            "Warning: NetBox inventory is incomplete ({} read error(s)); "
+            "deletions are disabled and the run will fail".format(stats.get("read_errors", 0)),
+            file=sys.stderr,
+        )
 
     return {
         "device_iface_to_provider": device_iface_provider_map_from_inventory(
@@ -1089,6 +1389,7 @@ def load_uplink_provider_context(dry_ssh_devices, debug=False, border_tag=None):
         ),
         "providers": providers_from_complete_inventory(report),
         "stats": stats,
+        "read_error": read_error,
     }
 
 
@@ -1169,7 +1470,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     nb = _get_nb()
-    report = collect_uplink_inventory(nb, tag=args.tag, debug=args.debug)
+    border_tag = resolve_border_device_tag(args.tag)
+    report = collect_uplink_inventory(
+        nb,
+        tag=border_tag,
+        debug=args.debug,
+        circuit_scope=project_circuit_scope(),
+    )
     stats = report.get("stats") or {}
     auth_error = stats.get("error") == ERROR_AUTH_DENIED
     providers_error = stats.get("error") == ERROR_PROVIDERS_UNAVAILABLE
@@ -1189,7 +1496,14 @@ def main(argv=None):
             print("Error: NetBox providers unavailable", file=sys.stderr)
         print(format_inventory_text(report, dry_run=args.dry_run))
 
-    if auth_error or providers_error:
+    if inventory_read_failed(report):
+        if stats.get("error") == ERROR_PARTIAL_READ:
+            print(
+                "Error: NetBox inventory is incomplete ({} read error(s))".format(
+                    stats.get("read_errors", 0)
+                ),
+                file=sys.stderr,
+            )
         return 1
     incomplete = len(report.get("incomplete") or [])
     return 1 if incomplete else 0

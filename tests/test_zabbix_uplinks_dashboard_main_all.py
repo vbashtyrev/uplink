@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from uplinks_config import UPLINKS_AGGREGATE_HOST_PREFIX
 from zabbix_uplinks_dashboard import AGGREGATE_ITEM_KEY_IN, AGGREGATE_ITEM_KEY_OUT
@@ -89,9 +90,7 @@ def test_main_all_dashboards(monkeypatch, zabbix_env, capsys):
         "Uplink: Hurricane LAG": "Hurricane",
     }
     with patch.object(mod, "load_description_map", return_value=desc_map):
-        with patch.object(
-            mod, "_get_providers_from_netbox", return_value=["Hurricane"]
-        ):
+        with patch.object(mod, "load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()):
             monkeypatch.setattr(
                 sys,
                 "argv",
