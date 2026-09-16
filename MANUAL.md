@@ -107,7 +107,7 @@ python netbox_uplinks_inventory.py --json --dry-run > netbox_inventory.json
 
 python uplinks_stats.py --fetch --json --inventory-file netbox_inventory.json > dry-ssh.json
 
-python netbox_checks.py -f dry-ssh.json --all --no-tx-power --mt-ref --existing-only --apply
+python netbox_checks.py -f dry-ssh.json --all --no-tx-power --scope-to-file --mt-ref --existing-only --apply
 
 python zabbix_sync_commit_rate.py -d dry-ssh.json --create-link-triggers
 

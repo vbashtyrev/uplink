@@ -535,7 +535,14 @@ def main():
     # 2. NetBox checks (optional apply; plan mode is read-only preview)
     if _plan_mode(args) or not args.no_netbox_apply:
         netbox_checks_argv = [
-            python, "netbox_checks.py", "-f", dry_ssh_path, "--all", "--no-tx-power", "--mt-ref",
+            python,
+            "netbox_checks.py",
+            "-f",
+            dry_ssh_path,
+            "--all",
+            "--no-tx-power",
+            "--mt-ref",
+            "--scope-to-file",
         ]
         if _plan_mode(args):
             netbox_checks_argv.append("--existing-only")
@@ -550,13 +557,13 @@ def main():
             netbox_checks_mode = "--existing-only --apply"
         if _plan_mode(args):
             log(
-                "Step 2: NetBox - read-only preview (netbox_checks.py -f {} --all --no-tx-power --mt-ref --existing-only) ...".format(
+                "Step 2: NetBox - read-only preview (netbox_checks.py -f {} --all --no-tx-power --mt-ref --scope-to-file --existing-only) ...".format(
                     dry_ssh_path
                 )
             )
         else:
             log(
-                "Step 2: NetBox - reconciliation and application (netbox_checks.py -f {} --all --no-tx-power --mt-ref {}) ...".format(
+                "Step 2: NetBox - reconciliation and application (netbox_checks.py -f {} --all --no-tx-power --mt-ref --scope-to-file {}) ...".format(
                     dry_ssh_path, netbox_checks_mode
                 )
             )

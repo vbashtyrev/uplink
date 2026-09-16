@@ -55,4 +55,5 @@ def test_main_with_netbox_apply(monkeypatch, tmp_path):
             full.main()
     assert exc.value.code == 0
     assert any("netbox_checks" in s for s in steps)
+    assert any("--scope-to-file" in s for s in steps)
     assert any("--existing-only" in s for s in steps)

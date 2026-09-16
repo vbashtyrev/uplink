@@ -76,7 +76,7 @@ python run_uplinks_full.py --auto
   в локальный `netbox_inventory.json`
 - Шаг 1: `uplinks_stats.py --fetch --json --inventory-file netbox_inventory.json`
   → `dry-ssh.json` только для найденных устройств
-- Шаг 2: `netbox_checks.py --all --no-tx-power --mt-ref --existing-only --apply` — сверка и
+- Шаг 2: `netbox_checks.py --all --no-tx-power --scope-to-file --mt-ref --existing-only --apply` — сверка и
   обновление только уже существующих интерфейсов
 - Шаг 3: сводка по цепочкам NetBox (по данным шага 0, без повторного чтения)
 - Шаг 5: `zabbix_sync_commit_rate.py` — макросы и триггеры
@@ -360,7 +360,7 @@ python netbox_uplinks_inventory.py --json --dry-run > netbox_inventory.json
 
 python uplinks_stats.py --fetch --json --inventory-file netbox_inventory.json > dry-ssh.json
 
-python netbox_checks.py -f dry-ssh.json --all --no-tx-power --mt-ref --existing-only --apply
+python netbox_checks.py -f dry-ssh.json --all --no-tx-power --scope-to-file --mt-ref --existing-only --apply
 
 python zabbix_sync_commit_rate.py -d dry-ssh.json
 # и с триггерами Burst:

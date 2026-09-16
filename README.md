@@ -80,7 +80,7 @@ python run_uplinks_full.py --auto
    `uplinks_stats.py --fetch --json` → опрос по SSH → **`dry-ssh.json`** (устройство → список uplink-интерфейсов с полями из show interfaces). При полном прогоне список устройств берётся из шага 0 через **`--inventory-file`**.
 
 2. **Сверка и обновление NetBox (интерфейсы)**  
-   `netbox_checks.py -f dry-ssh.json` → сравнение с NetBox → таблица расхождений или **`--apply`** для записи в NetBox (description, type, speed, duplex, MAC, MTU, IP, LAG и т.д.). При полном прогоне (**run_uplinks_full.py**) шаг 2 вызывается с **`--all --no-tx-power --mt-ref --existing-only --apply`**: обновляются только уже существующие объекты, новые интерфейсы, MAC- и IP-записи не создаются. Мощность передатчика в обычную сверку не входит.
+   `netbox_checks.py -f dry-ssh.json` → сравнение с NetBox → таблица расхождений или **`--apply`** для записи в NetBox (description, type, speed, duplex, MAC, MTU, IP, LAG и т.д.). При полном прогоне (**run_uplinks_full.py**) шаг 2 вызывается с **`--all --no-tx-power --scope-to-file --mt-ref --existing-only --apply`**: обновляются только уже существующие объекты текущей области, устройства NetBox вне файла опроса не считаются расхождением, новые интерфейсы, MAC- и IP-записи не создаются. Мощность передатчика в обычную сверку не входит.
 
    При необходимости: **`netbox_interface_types.py`** → `netbox_interface_types.json` для приведения типов (`--mt-ref`).
 
@@ -356,6 +356,7 @@ python uplinks_stats.py --report
 | `--mac` | Сверка physicalAddress (файл) и mac_address (NetBox) |
 | `--mtu` | Сверка mtu (файл vs NetBox) |
 | `--tx-power` | Сверка txPower (файл) и tx_power (NetBox) |
+| `--scope-to-file` | Считать только устройства из входного файла; устройства с тегом `border` вне текущей области не показывать как расхождение |
 | `--forwarding-model` | Сверка forwardingModel (файл) и mode (NetBox). В NetBox: `routed` → mode=null, `bridged` → mode=tagged |
 | `--ip-address` | Сверка IPv4/IPv6 (файл: ipv4_addresses, ipv6_addresses, ip_vrf) и привязанных к интерфейсу в NetBox (с учётом VRF) |
 | `--lag` | Сверка LAG / Related Interfaces: aggregateInterface (файл) и lag (NetBox) у физических интерфейсов — членов LAG |

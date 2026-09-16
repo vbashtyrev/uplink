@@ -710,6 +710,12 @@ def main():
         default="all",
         help="Platform in NetBox: arista, juniper or all (default - all)",
     )
+    g_in.add_argument(
+        "--scope-to-file",
+        action="store_true",
+        dest="scope_to_file",
+        help="Limit NetBox device scope to hostnames present in the input JSON (devices keys)",
+    )
     # --- Checks (which fields to check) ---
     g_checks = parser.add_argument_group("Checks (which fields to check)")
     g_checks.add_argument(
@@ -936,6 +942,9 @@ def main():
     except Exception as e:
         print("Error accessing NetBox: {}.".format(netbox_error_message(e)), file=sys.stderr)
         return 1
+    if args.scope_to_file:
+        file_device_set = set(file_devices)
+        nb_devices = [d for d in nb_devices if d.name in file_device_set]
     nb_names = [d.name for d in nb_devices]
     nb_by_name = {d.name: d for d in nb_devices}
 
