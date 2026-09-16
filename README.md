@@ -80,7 +80,7 @@ python run_uplinks_full.py --auto
    `uplinks_stats.py --fetch --json` → опрос по SSH → **`dry-ssh.json`** (устройство → список uplink-интерфейсов с полями из show interfaces). При полном прогоне список устройств берётся из шага 0 через **`--inventory-file`**.
 
 2. **Сверка и обновление NetBox (интерфейсы)**  
-   `netbox_checks.py -f dry-ssh.json` → сравнение с NetBox → таблица расхождений или **`--apply`** для записи в NetBox (description, type, speed, duplex, MAC, MTU, IP, LAG и т.д.). При полном прогоне (**run_uplinks_full.py**) шаг 2 вызывается с **`--all --mt-ref --existing-only --apply`**: обновляются только уже существующие объекты, новые интерфейсы, MAC- и IP-записи не создаются.
+   `netbox_checks.py -f dry-ssh.json` → сравнение с NetBox → таблица расхождений или **`--apply`** для записи в NetBox (description, type, speed, duplex, MAC, MTU, IP, LAG и т.д.). При полном прогоне (**run_uplinks_full.py**) шаг 2 вызывается с **`--all --no-tx-power --mt-ref --existing-only --apply`**: обновляются только уже существующие объекты, новые интерфейсы, MAC- и IP-записи не создаются. Мощность передатчика в обычную сверку не входит.
 
    При необходимости: **`netbox_interface_types.py`** → `netbox_interface_types.json` для приведения типов (`--mt-ref`).
 
@@ -360,7 +360,8 @@ python uplinks_stats.py --report
 | `--ip-address` | Сверка IPv4/IPv6 (файл: ipv4_addresses, ipv6_addresses, ip_vrf) и привязанных к интерфейсу в NetBox (с учётом VRF) |
 | `--lag` | Сверка LAG / Related Interfaces: aggregateInterface (файл) и lag (NetBox) у физических интерфейсов — членов LAG |
 | `--parent` | Сверка Parent interface: aggregateInterface (файл) и parent (NetBox) у логических интерфейсов (ae5.0 → ae5) |
-| `--all` | Включить все проверки сразу (intname, description, mediatype, bandwidth, duplex, mac, mtu, tx-power, forwarding-model, ip-address, lag, parent) |
+| `--all` | Включить все обычные проверки сразу (intname, description, mediatype, bandwidth, duplex, mac, mtu, forwarding-model, ip-address, lag, parent). `tx-power` не входит |
+| `--no-tx-power` | Явно исключить мощность передатчика из сверки; имеет приоритет над `--tx-power` |
 
 Без `--mt-ref` при `--mediatype` выводится предупреждение: значения не приводятся к одному формату, расхождения могут быть из-за разного написания.
 

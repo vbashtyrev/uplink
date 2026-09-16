@@ -77,6 +77,7 @@ def test_main_human_mode_all_steps_success(monkeypatch, tmp_path):
     assert "netbox_create_circuits.py" not in scripts
 
     netbox_checks = next(c for c in calls if c[1] == "netbox_checks.py")
+    assert "--no-tx-power" in netbox_checks
     assert "--existing-only" in netbox_checks
     assert "--auto" not in netbox_checks
 
@@ -181,6 +182,7 @@ def test_main_auto_all_steps_success(monkeypatch, tmp_path):
     assert "netbox_uplinks_inventory.py" not in scripts
 
     netbox_checks = next(c for c in calls if c[1] == "netbox_checks.py")
+    assert "--no-tx-power" in netbox_checks
     assert "--auto" in netbox_checks
     assert "--existing-only" not in netbox_checks
 

@@ -768,6 +768,12 @@ def main():
         help="txPower (file) / tx_power (Netbox)",
     )
     g_checks.add_argument(
+        "--no-tx-power",
+        action="store_true",
+        dest="no_tx_power",
+        help="Exclude tx_power checks (overrides --tx-power when both are given)",
+    )
+    g_checks.add_argument(
         "--forwarding-model",
         action="store_true",
         dest="forwarding_model",
@@ -793,7 +799,7 @@ def main():
         "--all",
         action="store_true",
         dest="all_checks",
-        help="Enable all checks at once",
+        help="Enable all checks at once (except tx_power; use --tx-power for diagnostics)",
     )
     # --- Conclusion ---
     g_out = parser.add_argument_group("Conclusion")
@@ -859,7 +865,6 @@ def main():
         args.duplex = True
         args.mac = True
         args.mtu = True
-        args.tx_power = True
         args.forwarding_model = True
         args.ip_address = True
         args.lag = True
@@ -878,7 +883,6 @@ def main():
         args.duplex = True
         args.mac = True
         args.mtu = True
-        args.tx_power = True
         args.forwarding_model = True
         args.ip_address = True
         args.lag = True
@@ -897,7 +901,6 @@ def main():
         args.duplex = True
         args.mac = True
         args.mtu = True
-        args.tx_power = True
         args.forwarding_model = True
         args.ip_address = True
         args.lag = True
@@ -905,6 +908,8 @@ def main():
         args.show_change = True
         # Don't hide columns without discrepancies if user explicitly requests --show-change
         args.hide_no_diff_cols = not show_change_requested
+    if args.no_tx_power:
+        args.tx_power = False
 
     url = os.environ.get("NETBOX_URL")
     token = os.environ.get("NETBOX_TOKEN")
@@ -1368,12 +1373,13 @@ def main():
                             create_data["mtu"] = int(mtu_raw)
                         except (TypeError, ValueError):
                             pass
-                    txp_raw = entry.get("txPower")
-                    if txp_raw is not None:
-                        try:
-                            create_data["tx_power"] = int(round(float(txp_raw)))
-                        except (TypeError, ValueError):
-                            pass
+                    if args.tx_power:
+                        txp_raw = entry.get("txPower")
+                        if txp_raw is not None:
+                            try:
+                                create_data["tx_power"] = int(round(float(txp_raw)))
+                            except (TypeError, ValueError):
+                                pass
                     fwd_raw = (entry.get("forwardingModel") or "").strip()
                     if fwd_raw:
                         mode_val = _fwd_file_to_netbox_mode(fwd_raw)

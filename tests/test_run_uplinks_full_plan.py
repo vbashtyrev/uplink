@@ -89,6 +89,7 @@ def test_plan_success_no_mutating_zabbix_scripts(monkeypatch, tmp_path):
     assert scripts.count("zabbix_uplinks_plan.py") == 1
 
     netbox_checks = next(c for c in calls if c[1] == "netbox_checks.py")
+    assert "--no-tx-power" in netbox_checks
     assert "--apply" not in netbox_checks
     assert "--existing-only" in netbox_checks
 
