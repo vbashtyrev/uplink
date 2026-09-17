@@ -23,6 +23,7 @@ from zabbix_map import (
 from uplinks.netbox.inventory import (
     arm_netbox_incomplete_guard,
     is_uplink_iface,
+    lag_member_superseded_in_scoped,
     load_inventory_report,
     scoped_devices_from_inventory_report,
     load_uplink_provider_context,
@@ -50,6 +51,7 @@ def _build_edges(
     desc_to_name,
     device_iface_to_provider=None,
     inventory_scoped=False,
+    netbox_relations=None,
 ):
     """Build per-(host, provider) edge list similar to zabbix_map."""
     edges_raw = []
@@ -72,6 +74,15 @@ def _build_edges(
                 desc_to_name,
                 device_iface_to_provider=device_iface_to_provider,
             )
+            if inventory_scoped and lag_member_superseded_in_scoped(
+                hostname,
+                iface_name,
+                isp,
+                devices,
+                device_iface_to_provider=device_iface_to_provider,
+                netbox_relations=netbox_relations,
+            ):
+                continue
             key_norm = _normalize_interface_name(iface_name)
             rec = items_by_host_iface.get((hostname, key_norm), {})
             itemid_in = rec.get("itemid_in") or ""
@@ -715,6 +726,7 @@ def main():
     inventory_scoped = not args.legacy_provider_filter
     inventory_read_error = False
     inv_ctx = None
+    netbox_relations = None
     if not args.legacy_provider_filter:
         inv_ctx = load_uplink_provider_context(
             devices,
@@ -723,6 +735,7 @@ def main():
         )
         if inv_ctx is not None:
             device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
+            netbox_relations = inv_ctx.get("netbox_interface_relations")
             inventory_read_error = bool(inv_ctx.get("read_error"))
             if inventory_read_error:
                 arm_netbox_incomplete_guard(inv_ctx.get("stats"))
@@ -762,6 +775,7 @@ def main():
         desc_to_name,
         device_iface_to_provider=device_iface_to_provider,
         inventory_scoped=inventory_scoped,
+        netbox_relations=netbox_relations,
     )
     if inventory_read_error:
         print(

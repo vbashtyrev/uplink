@@ -1517,6 +1517,42 @@ def iface_has_inventory_entry(hostname, iface, device_iface_to_provider=None):
     return False
 
 
+def lag_member_superseded_in_scoped(
+    hostname,
+    iface_name,
+    isp,
+    devices,
+    device_iface_to_provider=None,
+    netbox_relations=None,
+):
+    """
+    True when a LAG member should be omitted from dashboard edges because a related
+    aggregate/logical interface is already in scoped inventory with the same provider.
+    """
+    if not netbox_relations:
+        return False
+    member_to_aggregate = netbox_relations.get("member_to_aggregate") or {}
+    iface_norm = _normalize_iface_name(iface_name)
+    if (hostname, iface_norm) not in member_to_aggregate:
+        return False
+    aliases = _inventory_alias_ifaces_netbox(hostname, iface_norm, netbox_relations)
+    superseding = aliases - {iface_norm}
+    preferred = _pick_zabbix_iface_from_aliases(superseding)
+    if not preferred:
+        return False
+    scoped_norms = {
+        _normalize_iface_name((entry.get("name") or "").strip())
+        for entry in (devices.get(hostname) or [])
+        if isinstance(entry, dict) and (entry.get("name") or "").strip()
+    }
+    if preferred not in scoped_norms:
+        return False
+    preferred_provider = _provider_map_get(
+        device_iface_to_provider or {}, hostname, preferred
+    )
+    return bool(preferred_provider) and preferred_provider == isp
+
+
 def is_uplink_iface(iface, hostname=None, device_iface_to_provider=None, inventory_scoped=False):
     """
     Uplink filter for map/dashboard/aggregate.

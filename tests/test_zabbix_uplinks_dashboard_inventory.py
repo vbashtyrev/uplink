@@ -124,6 +124,98 @@ def test_build_edges_excludes_out_of_scope_uplink_description():
     assert edges[0][3] == "Hurricane"
 
 
+def _frn_lag_netbox_relations():
+    return {
+        "member_to_aggregate": {("FRN-MX-1", "et-0/0/3"): "ae5"},
+        "parent_children": {("FRN-MX-1", "ae5"): {"ae5.0"}},
+        "display_names": {
+            ("FRN-MX-1", "et-0/0/3"): "et-0/0/3",
+            ("FRN-MX-1", "ae5"): "ae5",
+            ("FRN-MX-1", "ae5.0"): "ae5.0",
+        },
+    }
+
+
+def test_build_edges_excludes_lag_member_when_logical_in_scoped():
+    devices = {
+        "FRN-MX-1": [
+            {"name": "et-0/0/3"},
+            {"name": "ae5.0", "isLogical": True},
+        ],
+    }
+    items = {
+        ("FRN-MX-1", "et-0/0/3"): {"itemid_in": "1", "itemid_out": "2"},
+        ("FRN-MX-1", "ae5.0"): {"itemid_in": "3", "itemid_out": "4"},
+    }
+    inventory_map = {
+        ("FRN-MX-1", "et-0/0/3"): "Hurricane",
+        ("FRN-MX-1", "ae5.0"): "Hurricane",
+    }
+    edges = _build_edges(
+        devices,
+        {"FRN-MX-1": "101"},
+        items,
+        {},
+        device_iface_to_provider=inventory_map,
+        inventory_scoped=True,
+        netbox_relations=_frn_lag_netbox_relations(),
+    )
+    assert len(edges) == 1
+    assert edges[0][2] == "ae5.0"
+    assert edges[0][3] == "Hurricane"
+
+
+def test_build_edges_keeps_lag_member_without_logical_in_scoped():
+    devices = {
+        "FRN-MX-1": [
+            {"name": "et-0/0/3"},
+        ],
+    }
+    items = {
+        ("FRN-MX-1", "et-0/0/3"): {"itemid_in": "1", "itemid_out": "2"},
+    }
+    inventory_map = {("FRN-MX-1", "et-0/0/3"): "Hurricane"}
+    edges = _build_edges(
+        devices,
+        {"FRN-MX-1": "101"},
+        items,
+        {},
+        device_iface_to_provider=inventory_map,
+        inventory_scoped=True,
+        netbox_relations=_frn_lag_netbox_relations(),
+    )
+    assert len(edges) == 1
+    assert edges[0][2] == "et-0/0/3"
+
+
+def test_build_edges_keeps_lag_member_when_logical_has_different_provider():
+    devices = {
+        "FRN-MX-1": [
+            {"name": "et-0/0/3"},
+            {"name": "ae5.0", "isLogical": True},
+        ],
+    }
+    items = {
+        ("FRN-MX-1", "et-0/0/3"): {"itemid_in": "1", "itemid_out": "2"},
+        ("FRN-MX-1", "ae5.0"): {"itemid_in": "3", "itemid_out": "4"},
+    }
+    inventory_map = {
+        ("FRN-MX-1", "et-0/0/3"): "Hurricane",
+        ("FRN-MX-1", "ae5.0"): "Cogent",
+    }
+    edges = _build_edges(
+        devices,
+        {"FRN-MX-1": "101"},
+        items,
+        {},
+        device_iface_to_provider=inventory_map,
+        inventory_scoped=True,
+        netbox_relations=_frn_lag_netbox_relations(),
+    )
+    assert len(edges) == 2
+    assert {e[2] for e in edges} == {"et-0/0/3", "ae5.0"}
+
+
 def test_build_edges_skips_non_uplink_without_inventory():
     devices = {
         "ALA-KZT-7280TR-1": [
@@ -291,3 +383,120 @@ def test_main_inventory_unavailable_excludes_fiord(monkeypatch, zabbix_env, tmp_
     captured = capsys.readouterr()
     assert "Fiord" not in captured.out
     assert "Fiord" not in captured.err
+
+
+def test_main_inventory_file_wires_netbox_relations_to_build_edges(
+    monkeypatch, zabbix_env, tmp_path, capsys
+):
+    """Regression: --inventory-file main() passes netbox_interface_relations to _build_edges."""
+    import zabbix_uplinks_dashboard as mod
+
+    relations = _frn_lag_netbox_relations()
+    inv_ctx = {
+        "device_iface_to_provider": {
+            ("FRN-MX-1", "et-0/0/3"): "Hurricane",
+            ("FRN-MX-1", "ae5.0"): "Hurricane",
+        },
+        "providers": {"Hurricane"},
+        "netbox_interface_relations": relations,
+        "stats": {},
+        "read_error": False,
+    }
+
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "FRN-MX-1",
+                        "interface": "et-0/0/3",
+                        "provider": "Hurricane",
+                    },
+                    {
+                        "device": "FRN-MX-1",
+                        "interface": "ae5.0",
+                        "provider": "Hurricane",
+                    },
+                ],
+                "incomplete": [],
+                "stats": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    desc = tmp_path / "desc.json"
+    desc.write_text("{}", encoding="utf-8")
+
+    items = [
+        {
+            "itemid": "1",
+            "hostid": "102",
+            "name": "Interface et-0/0/3: Bits received",
+            "key_": 'net.if.in["et-0/0/3"]',
+        },
+        {
+            "itemid": "2",
+            "hostid": "102",
+            "name": "Interface et-0/0/3: Bits sent",
+            "key_": 'net.if.out["et-0/0/3"]',
+        },
+        {
+            "itemid": "3",
+            "hostid": "102",
+            "name": "Interface ae5.0: Bits received",
+            "key_": 'net.if.in["ae5.0"]',
+        },
+        {
+            "itemid": "4",
+            "hostid": "102",
+            "name": "Interface ae5.0: Bits sent",
+            "key_": 'net.if.out["ae5.0"]',
+        },
+    ]
+    mocker = (
+        build_standard_zabbix_mocker(
+            hosts=[{"hostid": "102", "host": "FRN-MX-1", "name": "FRN-MX-1"}],
+            items=items,
+        )
+        .on("dashboard.get", lambda p: [])
+        .on("dashboard.create", lambda p: {"dashboardids": ["1"]})
+    )
+    mocker.activate(monkeypatch)
+
+    build_edges_kwargs = []
+    build_edges_results = []
+    real_build_edges = mod._build_edges
+
+    def _spy_build_edges(*args, **kwargs):
+        build_edges_kwargs.append(kwargs)
+        result = real_build_edges(*args, **kwargs)
+        build_edges_results.append(result)
+        return result
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "zabbix_uplinks_dashboard.py",
+            "--inventory-file",
+            str(inv),
+            "-m",
+            str(desc),
+            "--no-cache",
+            "--dashboard-by-location",
+            "",
+            "--dashboard-by-provider",
+            "",
+        ],
+    )
+    with patch.object(mod, "load_uplink_provider_context", return_value=inv_ctx):
+        with patch.object(mod, "_build_edges", side_effect=_spy_build_edges):
+            mod.main()
+
+    assert len(build_edges_kwargs) == 1
+    assert build_edges_kwargs[0]["netbox_relations"] == relations
+    assert build_edges_kwargs[0]["inventory_scoped"] is True
+    assert len(build_edges_results[0]) == 1
+    assert build_edges_results[0][0][2] == "ae5.0"
+    assert "dashboard" in capsys.readouterr().out.lower()
