@@ -31,8 +31,10 @@ from uplinks.netbox.inventory import (
     arm_netbox_incomplete_guard,
     collect_provider_limits_gbps,
     is_uplink_iface,
+    load_inventory_report,
     load_uplink_provider_context,
     resolve_provider_name_for_iface,
+    scoped_devices_from_inventory_report,
 )
 from uplinks_config import (
     THRESHOLD_PERCENT_WARN,
@@ -77,12 +79,16 @@ def _get_netbox_client(debug=False):
         return None
 
 
-def _load_netbox_aggregate_context(dry_ssh_devices, debug=False):
+def _load_netbox_aggregate_context(dry_ssh_devices, debug=False, inventory_report=None):
     """
     Read-only NetBox inventory for provider aggregates.
     Return dict with device_iface_to_provider, providers, provider_limits_gbps, stats, read_error; or None.
     """
-    ctx = load_uplink_provider_context(dry_ssh_devices, debug=debug)
+    ctx = load_uplink_provider_context(
+        dry_ssh_devices,
+        debug=debug,
+        inventory_report=inventory_report,
+    )
     if ctx is None:
         return None
 
@@ -422,6 +428,7 @@ def run(
     prune_triggers_without_limits=True,
     legacy_commit_rates_fallback=False,
     inventory_scoped=True,
+    inventory_file=None,
 ):
     """Create/update provider aggregate hosts with calculated items and limit triggers."""
     ok, err = validate_zabbix_token(url, token, debug=debug)
@@ -438,10 +445,26 @@ def run(
         if not isinstance(provider_limits, dict):
             provider_limits = {}
 
-    data, err = load_devices_json(dry_ssh_path)
-    if err:
-        return None, err
-    devices = data["devices"]
+    inventory_report = None
+    if inventory_file:
+        try:
+            inventory_report = load_inventory_report(inventory_file)
+        except (OSError, json.JSONDecodeError) as e:
+            return None, "failed to read inventory file {}: {}".format(inventory_file, e)
+        inv_ctx = load_uplink_provider_context(inventory_report=inventory_report, debug=debug)
+        device_iface_to_provider = {}
+        if inv_ctx:
+            device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
+        devices = scoped_devices_from_inventory_report(
+            inventory_report, device_iface_to_provider
+        )
+        if not devices:
+            return None, "No devices in scoped inventory"
+    else:
+        data, err = load_devices_json(dry_ssh_path)
+        if err:
+            return None, err
+        devices = data["devices"]
     desc_to_name = load_description_map(desc_map_path)
 
     hostnames = set(devices.keys())
@@ -485,7 +508,8 @@ def run(
             )
 
     if not host_id_by_name:
-        return None, "There are no hosts from dry-ssh.json in Zabbix"
+        source = "inventory" if inventory_file else "dry-ssh.json"
+        return None, "There are no hosts from {} in Zabbix".format(source)
 
     # We load items only for hosts that actually exist in Zabbix.
     # fetch_zabbix_hosts_and_items requires that all hostnames be found.
@@ -501,7 +525,11 @@ def run(
         if cache_path:
             save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
 
-    nb_ctx = _load_netbox_aggregate_context(devices, debug=debug)
+    nb_ctx = _load_netbox_aggregate_context(
+        devices,
+        debug=debug,
+        inventory_report=inventory_report,
+    )
     device_iface_to_provider = {}
     providers_from_inventory = set()
     netbox_limits_gbps = {}
@@ -605,7 +633,13 @@ def main():
         description="Create Uplinks {Provider} hosts with total traffic and triggers by _provider_limits.",
     )
     parser.add_argument("-f", "--commit-rates", default=DEFAULT_COMMIT_RATES, help="Path to commit_rates.json")
-    parser.add_argument("-d", "--dry-ssh", default=DEFAULT_INPUT, help="Path to dry-ssh.json")
+    parser.add_argument("-d", "--dry-ssh", default=None, help="Legacy path to dry-ssh.json")
+    parser.add_argument(
+        "--inventory-file",
+        default=None,
+        metavar="FILE",
+        help="Scoped inventory JSON from netbox_uplinks_inventory.py --json",
+    )
     parser.add_argument("-m", "--description-map", default=DESCRIPTION_MAP_FILE, help="File description_to_name.json")
     parser.add_argument("--no-cache", action="store_true", help="Do not use Zabbix cache")
     parser.add_argument(
@@ -630,21 +664,27 @@ def main():
     if not url or not token:
         print("Set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
         sys.exit(1)
+    dry_ssh_path = args.dry_ssh or (DEFAULT_INPUT if os.path.isfile(DEFAULT_INPUT) else None)
+    if not args.inventory_file and not dry_ssh_path:
+        print("Provide --inventory-file or -d dry-ssh.json", file=sys.stderr)
+        sys.exit(1)
+    cache_base = args.inventory_file or dry_ssh_path or "."
     cache_path = None if args.no_cache else os.path.join(
-        os.path.dirname(os.path.abspath(args.dry_ssh)) if args.dry_ssh else ".",
+        os.path.dirname(os.path.abspath(cache_base)) if cache_base else ".",
         ZABBIX_CACHE_FILE,
     )
     done, err = run(
         url,
         token,
         args.commit_rates,
-        args.dry_ssh,
+        dry_ssh_path,
         args.description_map,
         cache_path,
         debug=args.debug,
         prune_triggers_without_limits=(not args.keep_triggers_without_limits),
         legacy_commit_rates_fallback=args.legacy_commit_rates_fallback,
         inventory_scoped=(not args.legacy_provider_filter),
+        inventory_file=args.inventory_file,
     )
     if not done:
         if err:

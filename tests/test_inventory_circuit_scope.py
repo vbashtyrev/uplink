@@ -1,11 +1,10 @@
-"""Project circuit scope: monitor tag + uplinks_circuit_lifecycle=active."""
+"""Project circuit scope: Circuit type Uplink + built-in status Active."""
 
 import sys
 from unittest.mock import MagicMock, patch
 
 from tests.mocks.netbox_api import MockNetBox, _Record, add_project_circuit_scope
 from uplinks.netbox import inventory as inv
-from uplinks_config import NETBOX_MONITOR_TAG
 
 
 def _scoped_circuit(**overrides):
@@ -59,8 +58,6 @@ def _build_scoped_inventory_nb(provider=None, circuit=None, device=None, iface=N
             out = circuits
             if "provider_id" in kwargs:
                 out = [c for c in out if c.provider_id == kwargs["provider_id"]]
-            if "tag" in kwargs:
-                out = [c for c in out if getattr(c, "tag", None) == kwargs["tag"]]
             return out
 
         def get(self, pk):
@@ -81,7 +78,7 @@ def _build_scoped_inventory_nb(provider=None, circuit=None, device=None, iface=N
     return nb
 
 
-def test_collect_scope_includes_active_tagged_complete():
+def test_collect_scope_includes_active_uplink_type_complete():
     nb = _build_scoped_inventory_nb()
     scope = inv.project_circuit_scope()
     report = inv.collect_uplink_inventory(nb, tag="border", circuit_scope=scope)
@@ -90,7 +87,7 @@ def test_collect_scope_includes_active_tagged_complete():
     assert report["incomplete"] == []
 
 
-def test_collect_scope_reports_incomplete_for_active_tagged():
+def test_collect_scope_reports_incomplete_for_active_uplink_type():
     provider = _Record(id=1, name="Cogent")
     circuit = _scoped_circuit()
     ct = _Record(id=1, term_side="A", cable=None, circuit=circuit, circuit_id=circuit.id)
@@ -103,26 +100,31 @@ def test_collect_scope_reports_incomplete_for_active_tagged():
     assert report["incomplete"][0]["reason"] == inv.REASON_NO_CABLE
 
 
-def test_circuit_uplinks_tag_excluded_when_lifecycle_not_active():
-    """Circuit tag uplinks without active lifecycle is out of project scope."""
+def test_circuit_wrong_type_excluded_from_scope():
     device = _Record(id=1, name="R1", tag="border")
     iface = _Record(id=10, name="Eth1", device=device, device_id=1)
-    provider = _Record(id=1, name="TaggedISP")
+    provider = _Record(id=1, name="OtherISP")
 
-    for lifecycle in ("review", "archived", None):
-        custom_fields = (
-            {"uplinks_circuit_lifecycle": lifecycle} if lifecycle is not None else {}
-        )
-        circuit = _Record(
-            id=100,
-            cid="CKT-1",
-            provider_id=provider.id,
-            provider=provider.id,
-            commit_rate=10000000,
-            status="active",
-            tag=NETBOX_MONITOR_TAG,
-            custom_fields=custom_fields,
-        )
+    for type_name, type_slug in (("Internet", "internet"), ("Transit", "transit"), (None, None)):
+        if type_name is None:
+            circuit = _Record(
+                id=100,
+                cid="CKT-1",
+                provider_id=provider.id,
+                provider=provider.id,
+                commit_rate=10000000,
+                status="active",
+            )
+        else:
+            circuit = _Record(
+                id=100,
+                cid="CKT-1",
+                provider_id=provider.id,
+                provider=provider.id,
+                commit_rate=10000000,
+                status="active",
+                type=_Record(name=type_name, slug=type_slug),
+            )
         ct = _Record(
             id=1,
             term_side="A",
@@ -169,49 +171,79 @@ def test_circuit_uplinks_tag_excluded_when_lifecycle_not_active():
         assert report["incomplete"] == []
 
 
-def test_one_provider_active_and_review_circuits_only_active_in_scope():
-    """Single provider: active circuit in scope; review circuit omitted."""
+def test_circuit_inactive_status_excluded_from_active_only():
+    provider = _Record(id=1, name="Cogent")
+    circuit = add_project_circuit_scope(
+        _Record(
+            id=100,
+            cid="CKT-PLANNED",
+            provider_id=1,
+            provider=1,
+            commit_rate=1000,
+            status="planned",
+        )
+    )
+    nb = _build_scoped_inventory_nb(provider=provider, circuit=circuit)
+    scope = inv.project_circuit_scope()
+    report = inv.collect_uplink_inventory(nb, tag="border", circuit_scope=scope, active_only=True)
+    assert report["complete"] == []
+    assert report["incomplete"] == []
+
+
+def test_circuit_uplink_type_name_normalized():
+    circuit = _Record(
+        id=100,
+        cid="CKT-1",
+        status="active",
+        type=_Record(name=" Uplink ", slug="uplink"),
+    )
+    scope = inv.project_circuit_scope()
+    assert inv.circuit_matches_scope(circuit, scope) is True
+
+    circuit.type = _Record(name="UPLINK", slug="uplink")
+    assert inv.circuit_matches_scope(circuit, scope) is True
+
+
+def test_one_provider_active_and_non_uplink_only_uplink_in_scope():
     provider = _Record(id=1, name="Cogent")
     device = _Record(id=1, name="R1", tag="border")
     iface_active = _Record(id=10, name="Eth1", device=device, device_id=1)
-    iface_review = _Record(id=11, name="Eth2", device=device, device_id=1)
+    iface_other = _Record(id=11, name="Eth2", device=device, device_id=1)
 
-    active_circuit = add_project_circuit_scope(
+    uplink_circuit = add_project_circuit_scope(
         _Record(
             id=100,
-            cid="CKT-ACTIVE",
+            cid="CKT-UPLINK",
             provider_id=1,
             provider=1,
             commit_rate=1000,
             status="active",
         )
     )
-    review_circuit = add_project_circuit_scope(
-        _Record(
-            id=101,
-            cid="CKT-REVIEW",
-            provider_id=1,
-            provider=1,
-            commit_rate=1000,
-            status="active",
-        ),
-        lifecycle="review",
+    other_circuit = _Record(
+        id=101,
+        cid="CKT-INTERNET",
+        provider_id=1,
+        provider=1,
+        commit_rate=1000,
+        status="active",
+        type=_Record(name="Internet", slug="internet"),
     )
-    circuits = [active_circuit, review_circuit]
+    circuits = [uplink_circuit, other_circuit]
 
     ct_active = _Record(
         id=1,
         term_side="A",
         cable=_Record(id=50),
-        circuit=active_circuit,
-        circuit_id=active_circuit.id,
+        circuit=uplink_circuit,
+        circuit_id=uplink_circuit.id,
     )
-    ct_review = _Record(
+    ct_other = _Record(
         id=2,
         term_side="A",
         cable=None,
-        circuit=review_circuit,
-        circuit_id=review_circuit.id,
+        circuit=other_circuit,
+        circuit_id=other_circuit.id,
     )
     cable = _Record(
         id=50,
@@ -243,9 +275,9 @@ def test_one_provider_active_and_review_circuits_only_active_in_scope():
 
     nb = MockNetBox(
         devices=[device],
-        interfaces=[iface_active, iface_review],
+        interfaces=[iface_active, iface_other],
         cables=[cable],
-        terminations=[ct_active, ct_review],
+        terminations=[ct_active, ct_other],
         circuits=circuits,
     )
     nb.circuits.providers = _Providers()
@@ -254,7 +286,7 @@ def test_one_provider_active_and_review_circuits_only_active_in_scope():
     scope = inv.project_circuit_scope()
     report = inv.collect_uplink_inventory(nb, tag="border", circuit_scope=scope)
     assert len(report["complete"]) == 1
-    assert report["complete"][0]["circuit_id"] == "CKT-ACTIVE"
+    assert report["complete"][0]["circuit_id"] == "CKT-UPLINK"
     assert report["incomplete"] == []
 
 
@@ -278,17 +310,15 @@ def test_collect_without_scope_audits_all_circuits():
 
 
 def test_main_ignores_out_of_scope_incomplete(monkeypatch, netbox_env, capsys):
-    provider = _Record(id=1, name="ReviewISP")
-    circuit = add_project_circuit_scope(
-        _Record(
-            id=100,
-            cid="CKT-1",
-            provider_id=provider.id,
-            provider=provider.id,
-            commit_rate=1000,
-            status="active",
-        ),
-        lifecycle="review",
+    provider = _Record(id=1, name="InternetISP")
+    circuit = _Record(
+        id=100,
+        cid="CKT-1",
+        provider_id=provider.id,
+        provider=provider.id,
+        commit_rate=1000,
+        status="active",
+        type=_Record(name="Internet", slug="internet"),
     )
     ct = _Record(id=1, term_side="A", cable=None, circuit=circuit, circuit_id=circuit.id)
     nb = _build_scoped_inventory_nb(provider=provider, circuit=circuit, ct=ct, cable=None)
@@ -313,7 +343,7 @@ def test_main_in_scope_incomplete_exit_code(monkeypatch, netbox_env, capsys):
     assert "INCOMPLETE" in capsys.readouterr().out
 
 
-def test_providers_from_complete_inventory_scoped_active_tagged_only(monkeypatch):
+def test_providers_from_complete_inventory_scoped_uplink_only(monkeypatch):
     from tests.mocks.netbox_api import build_netbox_for_commit_rates
 
     nb = build_netbox_for_commit_rates(
@@ -323,44 +353,37 @@ def test_providers_from_complete_inventory_scoped_active_tagged_only(monkeypatch
         device_tag="border",
         tag_device=True,
     )
-    review_circuit = add_project_circuit_scope(
-        _Record(
-            id=200,
-            cid="CKT-REVIEW",
-            provider_id=nb.circuits.providers._providers[0].id,
-            provider=nb.circuits.providers._providers[0].id,
-            commit_rate=1000,
-            status="active",
-        ),
-        lifecycle="review",
+    other_circuit = _Record(
+        id=200,
+        cid="CKT-INTERNET",
+        provider_id=nb.circuits.providers._providers[0].id,
+        provider=nb.circuits.providers._providers[0].id,
+        commit_rate=1000,
+        status="active",
+        type=_Record(name="Internet", slug="internet"),
     )
-    archived_circuit = add_project_circuit_scope(
-        _Record(
-            id=201,
-            cid="CKT-ARCHIVED",
-            provider_id=nb.circuits.providers._providers[0].id,
-            provider=nb.circuits.providers._providers[0].id,
-            commit_rate=1000,
-            status="active",
-        ),
-        lifecycle="archived",
-    )
-    nb.circuits.circuits._items.extend([review_circuit, archived_circuit])
+    nb.circuits.circuits._items.append(other_circuit)
 
     report = inv.collect_uplink_inventory(nb, tag="border", circuit_scope=inv.project_circuit_scope())
     names = inv.providers_from_complete_inventory(report)
 
     assert names == {"ActiveISP"}
+    assert report["stats"]["providers_in_scope"] == 1
 
 
-def test_physical_iface_maps_to_logical_for_zabbix():
-    """Cable on member iface; Zabbix macros use logical ae5.0 via dry-ssh mapping."""
-    dry_ssh = {
-        "FRN-MX-1": [
-            {"name": "ae5.0", "physicalInterface": "ae5", "isLogical": True},
-            {"name": "ae5", "isLag": True},
-            {"name": "et-0/0/3", "aggregateInterface": "ae5"},
-        ],
+def test_physical_iface_maps_to_logical_via_netbox_relations():
+    """Cable on LAG member; provider map expands to logical unit via NetBox lag/parent."""
+    lag = _Record(id=20, name="ae5")
+    logical = _Record(id=21, name="ae5.0", parent=lag)
+    member = _Record(id=22, name="et-0/0/3", lag=lag)
+    relations = {
+        "member_to_aggregate": {("FRN-MX-1", "et-0/0/3"): "ae5"},
+        "parent_children": {("FRN-MX-1", "ae5"): {"ae5.0"}},
+        "display_names": {
+            ("FRN-MX-1", "et-0/0/3"): "et-0/0/3",
+            ("FRN-MX-1", "ae5"): "ae5",
+            ("FRN-MX-1", "ae5.0"): "ae5.0",
+        },
     }
     report = {
         "complete": [
@@ -372,8 +395,106 @@ def test_physical_iface_maps_to_logical_for_zabbix():
             },
         ],
     }
-    mapping = inv.device_iface_provider_map_from_inventory(report, dry_ssh_devices=dry_ssh)
+    mapping = inv.device_iface_provider_map_from_inventory(
+        report, netbox_relations=relations
+    )
     assert mapping[("FRN-MX-1", "ae5.0")] == "Hurricane"
+    assert mapping[("FRN-MX-1", "et-0/0/3")] == "Hurricane"
+
+
+def test_netbox_relations_skips_nonzero_units_when_unit0_missing():
+    """LAG children ae5.1/ae5.32767 without ae5.0 must not map to dotted units."""
+    relations = {
+        "member_to_aggregate": {},
+        "parent_children": {
+            ("FRN-MX-1", "ae5"): {"ae5.1", "ae5.32767"},
+        },
+        "display_names": {
+            ("FRN-MX-1", "ae5"): "ae5",
+            ("FRN-MX-1", "ae5.1"): "ae5.1",
+            ("FRN-MX-1", "ae5.32767"): "ae5.32767",
+        },
+    }
+    report = {
+        "complete": [
+            {
+                "provider": "Hurricane",
+                "device": "FRN-MX-1",
+                "interface": "ae5",
+                "circuit_id": "CKT-1",
+            },
+        ],
+    }
+    mapping = inv.device_iface_provider_map_from_inventory(
+        report, netbox_relations=relations
+    )
+    assert mapping[("FRN-MX-1", "ae5")] == "Hurricane"
+    assert ("FRN-MX-1", "ae5.0") not in mapping
+    assert ("FRN-MX-1", "ae5.1") not in mapping
+    assert ("FRN-MX-1", "ae5.32767") not in mapping
+
+    burst_report = {
+        "complete": [
+            {
+                "provider": "Hurricane",
+                "device": "FRN-MX-1",
+                "interface": "ae5",
+                "circuit_id": "CKT-1",
+                "billing_model": "Burst",
+            },
+        ],
+    }
+    pairs = inv.burst_pairs_from_inventory(burst_report)
+    expanded = inv.expand_burst_pairs_for_zabbix(pairs, netbox_relations=relations)
+    assert expanded == {("FRN-MX-1", "ae5")}
+
+
+def test_netbox_relations_picks_single_logical_unit_not_all_children():
+    """LAG with ae5.0/ae5.1/ae5.32767 expands only preferred Zabbix unit (.0)."""
+    relations = {
+        "member_to_aggregate": {},
+        "parent_children": {
+            ("FRN-MX-1", "ae5"): {"ae5.0", "ae5.1", "ae5.32767"},
+        },
+        "display_names": {
+            ("FRN-MX-1", "ae5"): "ae5",
+            ("FRN-MX-1", "ae5.0"): "ae5.0",
+            ("FRN-MX-1", "ae5.1"): "ae5.1",
+            ("FRN-MX-1", "ae5.32767"): "ae5.32767",
+        },
+    }
+    report = {
+        "complete": [
+            {
+                "provider": "Hurricane",
+                "device": "FRN-MX-1",
+                "interface": "ae5",
+                "circuit_id": "CKT-1",
+            },
+        ],
+    }
+    mapping = inv.device_iface_provider_map_from_inventory(
+        report, netbox_relations=relations
+    )
+    assert mapping[("FRN-MX-1", "ae5")] == "Hurricane"
+    assert mapping[("FRN-MX-1", "ae5.0")] == "Hurricane"
+    assert ("FRN-MX-1", "ae5.1") not in mapping
+    assert ("FRN-MX-1", "ae5.32767") not in mapping
+
+
+def test_expand_without_netbox_relations_fails_closed_no_logical_alias():
+    report = {
+        "complete": [
+            {
+                "provider": "Hurricane",
+                "device": "FRN-MX-1",
+                "interface": "et-0/0/3",
+                "circuit_id": "CKT-1",
+            },
+        ],
+    }
+    mapping = inv.device_iface_provider_map_from_inventory(report)
+    assert ("FRN-MX-1", "ae5.0") not in mapping
     assert mapping[("FRN-MX-1", "et-0/0/3")] == "Hurricane"
 
 
@@ -387,16 +508,3 @@ def test_collect_scope_is_read_only():
             endpoint.update = MagicMock(side_effect=AssertionError("update must not be called"))
     scope = inv.project_circuit_scope()
     inv.collect_uplink_inventory(nb, tag="border", circuit_scope=scope, debug=True)
-
-
-def test_circuit_lifecycle_comparison_ignores_case_and_spaces():
-    scope = inv.project_circuit_scope()
-    for lifecycle_value in (" Active ", "ACTIVE"):
-        circuit = _Record(
-            id=100,
-            cid="CKT-1",
-            status="active",
-            tag=NETBOX_MONITOR_TAG,
-            custom_fields={"uplinks_circuit_lifecycle": lifecycle_value},
-        )
-        assert inv.circuit_matches_scope(circuit, scope) is True

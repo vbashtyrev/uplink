@@ -3,7 +3,6 @@
 
 ```bash
 cp urls.env.example urls.env
-python run_uplinks_full.py --refresh
 ```
 
 ---
@@ -13,10 +12,10 @@ python run_uplinks_full.py --refresh
 ```bash
 python run_uplinks_full.py
 
-python run_uplinks_full.py --refresh
-
-python run_uplinks_full.py --no-fetch
-python run_uplinks_full.py --from-file
+# Legacy SSH path only:
+python run_uplinks_full.py --refresh --auto
+python run_uplinks_full.py --no-fetch --auto
+python run_uplinks_full.py --from-file --auto
 
 python run_uplinks_full.py --report uplinks_run_report.txt --no-stop-on-error
 
@@ -30,21 +29,20 @@ python run_uplinks_full.py --no-burst-triggers
 Предварительный отчёт без записи в NetBox и Zabbix:
 
 ```bash
-python run_uplinks_full.py --plan --from-file \
+python run_uplinks_full.py --plan \
   --report uplinks_plan_report.txt
 ```
 
-Этот режим использует уже проверенный `dry-ssh.json`, запускает проверку
-интерфейсов без `--apply` и отдельно читает текущие объекты Zabbix. Новый
-опрос оборудования выполняется обычным запуском или через `--refresh`.
+Этот режим читает NetBox inventory и текущие объекты Zabbix. Опрос устройств,
+`dry-ssh.json` и сверка интерфейсов в него не входят.
 
-Обязателен `--from-file` или `--no-fetch`; совмещать с `--auto` нельзя. Отчёт
-пишется в `run_logs/<дата>_zabbix_plan.json`. Карты, дашборды, сервисы и
+Совмещать с `--auto` нельзя. Отчёт пишется в
+`run_logs/<дата>_zabbix_plan.json`. Карты, дашборды, сервисы и
 триггеры Burst в отчёте помечены `not_evaluated` — они не сравниваются.
 Отдельно тот же отчёт даёт `zabbix_uplinks_plan.py`:
 
 ```bash
-python zabbix_uplinks_plan.py -d dry-ssh.json \
+python zabbix_uplinks_plan.py \
   --inventory-file netbox_inventory.json \
   --text uplinks_plan_report.txt -o uplinks_plan_report.json
 ```
@@ -54,12 +52,10 @@ python zabbix_uplinks_plan.py -d dry-ssh.json \
 не вызывается, а проверка интерфейсов выполняется в режиме
 `--existing-only`.
 
-Область мониторинга определяется на уровне отдельных Circuit: нужен тег
-`uplinks` и поле `uplinks_circuit_lifecycle=active`. Один Provider может
-иметь одновременно активный Circuit и Circuit в `review`. Физический
-интерфейс используется для проверки кабеля в NetBox, а если он входит в
-логическое объединение, в Zabbix используется имя логического интерфейса
-например `ae5.0`.
+Область мониторинга определяется на уровне Circuit: тип `Uplink`, встроенный
+статус `Active` и полная цепочка до устройства с тегом `border`. Если
+физический интерфейс входит в логическое объединение, связь с логическим
+интерфейсом берётся из NetBox.
 
 Переходный старый путь доступен только явно:
 
@@ -74,19 +70,14 @@ python run_uplinks_full.py --auto
 
 - Шаг 0: `netbox_uplinks_inventory.py --json --dry-run` — чтение цепочек NetBox
   в локальный `netbox_inventory.json`
-- Шаг 1: `uplinks_stats.py --fetch --json --inventory-file netbox_inventory.json`
-  → `dry-ssh.json` только для найденных устройств
-- Шаг 2: `netbox_checks.py --all --no-tx-power --scope-to-file --mt-ref --existing-only --apply` — сверка и
-  обновление только уже существующих интерфейсов
-- Шаг 3: сводка по цепочкам NetBox (по данным шага 0, без повторного чтения)
-- Шаг 5: `zabbix_sync_commit_rate.py` — макросы и триггеры
-- Шаг 6: `zabbix_provider_aggregate.py` — агрегаты провайдеров
-- Шаг 7: `zabbix_map.py --zabbix --update-map` — карта
-- Шаг 8: `zabbix_uplinks_dashboard.py` — дашборды
-- Шаг 9: `zabbix_provider_services.py` — сервисы и SLA
+- Шаг 1: `zabbix_sync_commit_rate.py` — макросы и триггеры
+- Шаг 2: `zabbix_provider_aggregate.py` — агрегаты провайдеров
+- Шаг 3: `zabbix_map.py --zabbix --update-map` — карта
+- Шаг 4: `zabbix_uplinks_dashboard.py` — дашборды
+- Шаг 5: `zabbix_provider_services.py` — сервисы и SLA
 
-В режиме `--plan` выполняются только шаги 0, 2 (без `--apply`), 3 и
-`zabbix_uplinks_plan.py`. Карта, дашборды и сервисы не запускаются.
+В режиме `--plan` выполняются только чтение inventory и
+`zabbix_uplinks_plan.py`. Записи в NetBox и Zabbix не выполняются.
 
 В режиме `--auto` дополнительно выполняются старые шаги
 `generate_commit_rates.py` и `netbox_create_circuits.py --auto`, а шагам 5, 6 и

@@ -48,6 +48,19 @@ def test_run_no_fetch_human_mode(monkeypatch, tmp_path, minimal_dry_ssh, minimal
         calls.append(argv[1] if len(argv) > 1 else str(argv))
         if "uplinks_stats.py" in str(argv):
             return False, "", "should not run"
+        if "netbox_uplinks_inventory.py" in str(argv) and capture_stdout_to_file:
+            import json as _json
+
+            Path(capture_stdout_to_file).write_text(
+                _json.dumps(
+                    {
+                        "complete": [{"device": "ALA-KZT-7280TR-1", "interface": "Eth1", "provider": "P"}],
+                        "incomplete": [],
+                        "stats": {"complete": 1},
+                    }
+                ),
+                encoding="utf-8",
+            )
         return True, "ok", ""
 
     monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
@@ -55,6 +68,7 @@ def test_run_no_fetch_human_mode(monkeypatch, tmp_path, minimal_dry_ssh, minimal
     monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
     monkeypatch.setattr(full, "DEFAULT_COMMIT_RATES", "commit_rates.json")
     monkeypatch.setattr(full, "DEFAULT_DESC_MAP", "description_to_name.json")
+    monkeypatch.setattr(full, "DEFAULT_NETBOX_INVENTORY", "netbox_inventory.json")
     monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
 
     shutil_desc = minimal_desc_map
@@ -80,14 +94,15 @@ def test_run_no_fetch_human_mode(monkeypatch, tmp_path, minimal_dry_ssh, minimal
             timeout=60,
             env_file="urls.env",
             no_env_file=True,
+            netbox_checks=False,
         )
         with pytest.raises(SystemExit) as exc:
             full.main()
         assert exc.value.code == 0
 
     scripts = [c for c in calls if c.endswith(".py")]
-    assert "netbox_checks.py" in scripts
     assert "netbox_uplinks_inventory.py" in scripts
+    assert "netbox_checks.py" not in scripts
     assert "generate_commit_rates.py" not in scripts
     assert "netbox_create_circuits.py" not in scripts
     assert "zabbix_sync_commit_rate.py" in scripts

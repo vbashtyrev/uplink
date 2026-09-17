@@ -18,8 +18,10 @@ from uplinks.data import (
 from uplinks.netbox.inventory import (
     arm_netbox_incomplete_guard,
     is_uplink_iface,
+    load_inventory_report,
     load_uplink_provider_context,
     resolve_provider_name_for_iface,
+    scoped_devices_from_inventory_report,
 )
 from uplinks.zabbix.client import (
     BITS_RECEIVED_NAME,
@@ -866,9 +868,15 @@ def main():
     )
     parser.add_argument(
         "-f", "--file",
-        default=DEFAULT_INPUT,
+        default=None,
         metavar="FILE",
-        help="Path to JSON with devices (default {})".format(DEFAULT_INPUT),
+        help="Legacy JSON with devices (dry-ssh.json)",
+    )
+    parser.add_argument(
+        "--inventory-file",
+        default=None,
+        metavar="FILE",
+        help="Scoped inventory JSON from netbox_uplinks_inventory.py --json",
     )
     parser.add_argument(
         "-m", "--description-map",
@@ -986,13 +994,27 @@ def main():
         print("Map created (or already exists): sysmapid={}".format(sysmapid), file=sys.stderr)
         sys.exit(0)
 
-    data, err = load_devices_json(args.file)
-    if err:
-        print(err, file=sys.stderr)
-        sys.exit(1)
-
     desc_to_name = load_description_map(args.description_map)
-    devices = data["devices"]
+    inventory_report = None
+    if args.inventory_file:
+        try:
+            inventory_report = load_inventory_report(args.inventory_file)
+        except (OSError, json.JSONDecodeError) as e:
+            print("failed to read inventory file {}: {}".format(args.inventory_file, e), file=sys.stderr)
+            sys.exit(1)
+        inv_ctx = load_uplink_provider_context(inventory_report=inventory_report, debug=args.debug)
+        expanded_map = (inv_ctx or {}).get("device_iface_to_provider") or {}
+        devices = scoped_devices_from_inventory_report(inventory_report, expanded_map)
+        if not devices:
+            print("No devices in scoped inventory", file=sys.stderr)
+            sys.exit(1)
+    else:
+        dry_ssh_path = args.file or DEFAULT_INPUT
+        data, err = load_devices_json(dry_ssh_path)
+        if err:
+            print(err, file=sys.stderr)
+            sys.exit(1)
+        devices = data["devices"]
     if args.host:
         if args.host not in devices:
             print("Host {!r} not found in devices. Available: {}".format(
@@ -1008,7 +1030,11 @@ def main():
     inventory_scoped = not args.legacy_provider_filter
     inventory_read_error = False
     if use_zabbix and not args.legacy_provider_filter:
-        inv_ctx = load_uplink_provider_context(devices, debug=args.debug)
+        inv_ctx = load_uplink_provider_context(
+            devices,
+            debug=args.debug,
+            inventory_report=inventory_report,
+        )
         if inv_ctx is not None:
             device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
             inventory_read_error = bool(inv_ctx.get("read_error"))
@@ -1022,7 +1048,11 @@ def main():
             print("For --zabbix, --create-map and --update-map set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
             sys.exit(1)
         hostnames = set(devices.keys())
-        cache_path = os.path.join(os.path.dirname(os.path.abspath(args.file)) if args.file else ".", ZABBIX_CACHE_FILE)
+        cache_base = args.inventory_file or args.file or DEFAULT_INPUT
+        cache_path = os.path.join(
+            os.path.dirname(os.path.abspath(cache_base)) if cache_base else ".",
+            ZABBIX_CACHE_FILE,
+        )
         host_id_by_name = None
         items_by_host_iface = None
         if not args.no_cache:

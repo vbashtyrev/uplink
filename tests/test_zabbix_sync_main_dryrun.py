@@ -61,12 +61,11 @@ def test_main_dry_run_with_util_and_bps(monkeypatch, zabbix_env, netbox_env, tmp
     assert "dry-run" in err
 
 
-def test_main_dry_run_netbox_tag_monitor_alias(monkeypatch, zabbix_env, netbox_env, tmp_path, capsys):
-    """NETBOX_TAG=uplinks (monitor tag) still syncs border-tagged devices with scoped BPS."""
+def test_main_dry_run_uses_border_device_tag(monkeypatch, zabbix_env, netbox_env, tmp_path, capsys):
+    """The configured device tag selects the border device."""
     import zabbix_sync_commit_rate as mod
     from uplinks.zabbix.plan import ZABBIX_MUTATING_METHODS
 
-    from uplinks_config import NETBOX_MONITOR_TAG
 
     cr = tmp_path / "commit_rates.json"
     cr.write_text("{}", encoding="utf-8")
@@ -83,7 +82,7 @@ def test_main_dry_run_netbox_tag_monitor_alias(monkeypatch, zabbix_env, netbox_e
 
     monkeypatch.setattr(mod, "validate_zabbix_token", lambda *a, **k: True)
     monkeypatch.setattr(mod.pynetbox, "api", lambda url, token: nb)
-    monkeypatch.setenv("NETBOX_TAG", NETBOX_MONITOR_TAG)
+    monkeypatch.setenv("NETBOX_TAG", "border")
     monkeypatch.setattr(
         sys,
         "argv",

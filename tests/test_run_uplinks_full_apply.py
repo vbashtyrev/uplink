@@ -1,4 +1,4 @@
-"""run_uplinks_full with netbox apply step."""
+"""run_uplinks_full with optional netbox_checks step."""
 
 import json
 from pathlib import Path
@@ -11,21 +11,29 @@ import run_uplinks_full as full
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-def test_main_with_netbox_apply(monkeypatch, tmp_path):
-    dry = tmp_path / "dry-ssh.json"
-    dry.write_text((FIXTURES / "dry_ssh_minimal.json").read_text(encoding="utf-8"), encoding="utf-8")
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
+def test_main_with_netbox_checks_flag(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
     monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
     monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
     monkeypatch.setattr(full, "DEFAULT_COMMIT_RATES", "commit_rates.json")
+    monkeypatch.setattr(full, "DEFAULT_NETBOX_INVENTORY", "netbox_inventory.json")
 
     steps = []
 
     def fake_run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
         steps.append(" ".join(str(x) for x in argv))
+        if "netbox_uplinks_inventory.py" in argv and capture_stdout_to_file:
+            Path(capture_stdout_to_file).write_text(
+                json.dumps(
+                    {
+                        "complete": [{"device": "h1", "interface": "Eth1", "provider": "P"}],
+                        "incomplete": [],
+                        "stats": {"complete": 1},
+                    }
+                ),
+                encoding="utf-8",
+            )
         return True, "ok", ""
 
     monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
@@ -34,6 +42,7 @@ def test_main_with_netbox_apply(monkeypatch, tmp_path):
         "parse_args",
         lambda self: full.argparse.Namespace(
             auto=False,
+            plan=False,
             no_fetch=True,
             from_file=True,
             refresh=False,
@@ -48,6 +57,7 @@ def test_main_with_netbox_apply(monkeypatch, tmp_path):
             timeout=60,
             env_file="urls.env",
             no_env_file=True,
+            netbox_checks=True,
         ),
     )
     with patch.object(full, "_write_run_report"):

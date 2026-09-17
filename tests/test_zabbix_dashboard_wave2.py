@@ -59,11 +59,14 @@ def test_cache_roundtrip(tmp_path):
 
 
 def test_load_uplink_provider_context_providers(monkeypatch):
-    with patch(
-        "zabbix_uplinks_dashboard.load_uplink_provider_context",
+    import zabbix_uplinks_dashboard as dash
+
+    with patch.object(
+        dash,
+        "load_uplink_provider_context",
         return_value={"providers": {"Cogent", "Hurricane"}, "read_error": False},
     ):
-        ctx = load_uplink_provider_context({}, debug=False)
+        ctx = dash.load_uplink_provider_context({}, debug=False)
     names = sorted(ctx.get("providers") or [])
     assert "Cogent" in names
     assert "Hurricane" in names

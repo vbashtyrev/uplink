@@ -59,8 +59,9 @@ def test_run_cmd_success_and_timeout(tmp_path, monkeypatch):
     assert ok and out_file.read_text() == "file-out"
 
 
-def test_main_fetch_step_writes_dry_ssh(monkeypatch, tmp_path):
+def test_main_auto_fetch_step_writes_dry_ssh(monkeypatch, tmp_path):
     dry = tmp_path / "dry-ssh.json"
+    (tmp_path / "commit_rates.json").write_text("{}", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
     monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
@@ -69,32 +70,25 @@ def test_main_fetch_step_writes_dry_ssh(monkeypatch, tmp_path):
     monkeypatch.setattr(full, "DEFAULT_DESC_MAP", "description_to_name.json")
 
     payload = '{"devices": {"h1": []}}'
-    inventory_payload = json.dumps(
-        {
-            "complete": [{"device": "h1", "interface": "Eth1", "provider": "P"}],
-            "incomplete": [],
-            "stats": {"complete": 1, "incomplete": 0},
-        }
-    )
 
     def fake_run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
-        if "netbox_uplinks_inventory.py" in argv and capture_stdout_to_file:
-            Path(capture_stdout_to_file).write_text(inventory_payload, encoding="utf-8")
-            return True, "", ""
-        return True, payload, ""
+        if "uplinks_stats.py" in argv:
+            return True, payload, ""
+        return True, "ok", ""
 
     monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
     monkeypatch.setattr(
         full.argparse.ArgumentParser,
         "parse_args",
         lambda self: full.argparse.Namespace(
-            auto=False,
+            auto=True,
+            plan=False,
             no_fetch=False,
             from_file=False,
             refresh=True,
             dry_ssh="dry-ssh.json",
             commit_rates="commit_rates.json",
-            no_netbox_apply=True,
+            no_netbox_apply=False,
             no_burst_triggers=False,
             location=None,
             stop_on_error=False,
@@ -103,6 +97,7 @@ def test_main_fetch_step_writes_dry_ssh(monkeypatch, tmp_path):
             timeout=60,
             env_file="urls.env",
             no_env_file=True,
+            netbox_checks=False,
         ),
     )
     with pytest.raises(SystemExit) as exc:
@@ -112,9 +107,10 @@ def test_main_fetch_step_writes_dry_ssh(monkeypatch, tmp_path):
     assert "h1" in dry.read_text(encoding="utf-8")
 
 
-def test_main_cache_skip(monkeypatch, tmp_path, capsys):
+def test_main_auto_cache_skip(monkeypatch, tmp_path, capsys):
     dry = tmp_path / "dry-ssh.json"
     dry.write_text('{"devices": {}}', encoding="utf-8")
+    (tmp_path / "cr.json").write_text("{}", encoding="utf-8")
     import time as time_mod
 
     os.utime(dry, (time_mod.time(), time_mod.time()))
@@ -130,13 +126,14 @@ def test_main_cache_skip(monkeypatch, tmp_path, capsys):
         full.argparse.ArgumentParser,
         "parse_args",
         lambda self: full.argparse.Namespace(
-            auto=False,
+            auto=True,
+            plan=False,
             no_fetch=False,
             from_file=False,
             refresh=False,
             dry_ssh="dry-ssh.json",
             commit_rates="cr.json",
-            no_netbox_apply=True,
+            no_netbox_apply=False,
             no_burst_triggers=False,
             location=None,
             stop_on_error=False,
@@ -145,8 +142,10 @@ def test_main_cache_skip(monkeypatch, tmp_path, capsys):
             timeout=60,
             env_file="urls.env",
             no_env_file=True,
+            netbox_checks=False,
         ),
     )
     with pytest.raises(SystemExit):
         full.main()
-    assert "cache" in capsys.readouterr().out.lower() or "SKIP" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "cache" in out.lower() or "SKIP" in out

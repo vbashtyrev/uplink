@@ -1,8 +1,9 @@
-# Uplinks (NetBox + SSH)
+# Uplinks (NetBox-only)
 
 **Версия 1.1** — мониторинг Burst (`billing_model`), per-link триггеры 90%/100%/SLA breach, сервисы Zabbix и offline‑отчёт SLA (агрегаты + контуры).
 
-Скрипты для сверки и обновления данных интерфейсов в NetBox по данным с устройств (SSH / JSON-файл). Поддерживаются Arista и Juniper.
+Скрипты читают область мониторинга из NetBox и настраивают Zabbix.
+Получение текущих показателей с устройств выполняется другим проектом.
 
 Виртуальное окружение создаётся в `.venv`.
 
@@ -12,18 +13,18 @@
 
 | Скрипт | Описание |
 |--------|----------|
-| `run_uplinks_full.py` | **Один запуск** — полная цепочка: чтение цепочек из NetBox → опрос устройств по SSH → сверка существующих полей интерфейсов → Zabbix (макросы, триггеры, агрегаты, карта, дашборды, сервисы); отчёт о работе и об ошибках. Ключ **`--plan`** даёт предварительный отчёт без записи. См. COMMANDS.md. |
-| `netbox_uplinks_inventory.py` | Только чтение NetBox: обход Provider → Circuit → терминация стороны A → кабель → интерфейс на устройстве с тегом `border`. Показывает полные и неполные цепочки. Ключи: `--tag`, `--json`, `--dry-run`, `--debug`. |
+| `run_uplinks_full.py` | **Один запуск** — чтение полной области из NetBox и настройка Zabbix (макросы, триггеры, агрегаты, карта, дашборды, сервисы); отчёт о работе и ошибках. Ключ **`--plan`** даёт предварительный отчёт без записи. |
+| `netbox_uplinks_inventory.py` | Только чтение NetBox: обход Provider → Circuit → терминация стороны A → кабель → интерфейс на устройстве с тегом `border`. В мониторинг входят только Circuit типа `Uplink` со статусом `Active`. |
 | `zabbix_uplinks_plan.py` | Только чтение: сравнивает текущее состояние Zabbix с тем, что сделал бы обычный запуск, и пишет отчёт. Ничего не создаёт, не меняет и не удаляет. |
 | `uplinks_stats.py` | Сбор данных с устройств по SSH (Arista/Juniper) или отчёт NetBox vs устройство; выход — таблица или JSON (`dry-ssh.json`). |
 | `netbox_checks.py` | Сверка данных из JSON с NetBox (интерфейсы: имя, description, тип, speed, duplex, MAC, MTU, IP, LAG и др.) и при необходимости обновление полей в NetBox. |
 | `netbox_interface_types.py` | Скачивание справочника типов интерфейсов NetBox (value/label) из репозитория в JSON для `--mt-ref`. |
-| `zabbix_map.py` | Таблица uplink'ов по dry-ssh; карта Zabbix (хосты, провайдеры, линки с items Bits in/out). Цвет линка: **приоритет** per-link **100%** (жирная красная) → агрегат провайдера **100%** → per-link **90%** → агрегат **90%** (при наличии соответствующих триггеров в Zabbix). |
+| `zabbix_map.py` | Карта Zabbix по полной области из NetBox (хосты, провайдеры, линки с items Bits in/out). |
 | `zabbix_uplinks_dashboard.py` | Создание/обновление дашборда Zabbix с виджетами-графиками по каждому uplink (Bits received/sent). |
 | `grafana_uplinks_graph.py` | Генерация JSON для панели Node graph в Grafana (узлы — хосты и провайдеры, рёбра — линки); опционально создание дашборда через Grafana API. |
 | `generate_commit_rates.py` | Только для старого режима `--auto`. Генерация `commit_rates.json` по линкам из dry-ssh (провайдер, circuit_id, commit_rate_gbps). При мерже сохраняет дополнительные поля линков (например `billing_model`), служебные ключи **`_provider_limits`**, **`_provider_sla`** и другие `_…`. |
 | `netbox_create_circuits.py` | По умолчанию только ищет в NetBox существующие провайдера, тип контура, контур, Termination A и кабель и сообщает, чего не хватает. Ничего не создаёт и не удаляет. Ключ **`--auto`** включает старое создание и изменение объектов и может заменить существующий кабель. |
-| `zabbix_sync_commit_rate.py` | Макросы **{$UPLINK.BPS.MAX}** / **{$UPLINK.BPS.WARN}** из NetBox (bps). По **`dry-ssh.json`**: **{$UPLINK.UTIL.WARN/CRIT}** и триггеры перегрузки порта (**70%** avg 10m, **85%** avg 5m, формула как в шаблоне Arista in/out vs speed) — только для физических интерфейсов, которые нашлись в цепочке NetBox. Burst: **`--create-link-triggers`** — 90%/100%/SLA breach по commit. **`--no-util-triggers`** отключает util. |
+| `zabbix_sync_commit_rate.py` | Макросы **{$UPLINK.BPS.MAX}** / **{$UPLINK.BPS.WARN}** из NetBox (бит/с), а также Burst-триггеры по commit rate. Область интерфейсов и связь с логическим интерфейсом берутся из NetBox. |
 | `zabbix_provider_aggregate.py` | Хосты `Uplinks {Provider}`: calculated items суммарного трафика и триггеры **90%**, **100%** и **SLA breach** по общему лимиту поставщика из поля NetBox **`aggregate_limit_gbps`**. Тег **`sla=true`** только на триггере **SLA breach**; на 90%/100% — `scripts:automatization` и `provider`. Зависимость 90% от 100% (как в Zabbix: дочерний не в PROBLEM без родителя). |
 | `zabbix_uplinks_cleanup.py` | Очистка артефактов автоматизации в Zabbix: триггеры 90%/100%, старые item'ы порога, карта uplinks, дашборды uplinks (тег `scripts:automatization`). |
 | `zabbix_provider_services.py` | Сервисы и встроенные SLA в Zabbix: **`Uplinks {Provider}`** для активных Circuit и **`Uplinks Burst {circuit_id}`** для Circuit с **`billing_model: Burst`**. Целевое значение SLA берётся из NetBox или `PROJECT_PROVIDER_SLO_PERCENT`; чтение **`_provider_sla`** из `commit_rates.json` возможно только с явным legacy-флагом. Опционально общий родитель **`--parent-service`**. |
@@ -36,20 +37,17 @@
 
 ### Рабочий режим: NetBox-first
 
-В рабочем режиме NetBox является главным источником данных о подключениях:
+В рабочем режиме NetBox является единственным источником постоянных данных о
+подключениях:
 
 ```text
 Provider → Circuit → Termination A → Cable → Interface → Border device
 ```
 
 Провайдера, контур, терминацию и кабель создаёт человек в NetBox.
-Скрипт не создаёт и не удаляет эти объекты. Он читает готовую цепочку,
-получает данные с устройства, обновляет разрешённые поля существующего
-интерфейса и настраивает мониторинг.
-
-Для безопасного обновления интерфейсов полный запуск использует
-`--existing-only`: отсутствующие интерфейсы, MAC-адреса и IP-адреса не
-создаются, а перепривязки не выполняются.
+Скрипт не создаёт и не удаляет эти объекты. Он читает готовую цепочку и
+настраивает мониторинг. Текущие показатели устройств получает другой
+проект.
 
 Проверка цепочек без изменений:
 
@@ -58,8 +56,8 @@ python netbox_uplinks_inventory.py --dry-run
 python netbox_uplinks_inventory.py --json --dry-run
 ```
 
-В мониторинг попадают только активные контуры, у которых кабель доходит до
-интерфейса устройства с тегом `border`.
+В мониторинг попадают только Circuit типа `Uplink` со встроенным статусом
+`Active`, у которых кабель доходит до интерфейса устройства с тегом `border`.
 
 ### Переходный автоматический режим
 
@@ -74,23 +72,14 @@ python run_uplinks_full.py --auto
 старый код может заменить существующий кабель.
 
 0. **Цепочки из NetBox**
-   `netbox_uplinks_inventory.py --json` → **`netbox_inventory.json`** (какие Circuit в области мониторинга и на каких устройствах и интерфейсах они заканчиваются). Этот список задаёт, какие устройства опрашивать дальше.
+   `netbox_uplinks_inventory.py --json --dry-run` → **`netbox_inventory.json`**.
+   Этот inventory задаёт область мониторинга.
 
-1. **Данные с устройств**  
-   `uplinks_stats.py --fetch --json` → опрос по SSH → **`dry-ssh.json`** (устройство → список uplink-интерфейсов с полями из show interfaces). При полном прогоне список устройств берётся из шага 0 через **`--inventory-file`**.
+1. **Синхронизация с Zabbix**
+   По полной области NetBox и Zabbix API выполняются макросы, триггеры,
+   агрегаты, карта, дашборды и сервисы. Файл `dry-ssh.json` не нужен.
 
-2. **Сверка и обновление NetBox (интерфейсы)**  
-   `netbox_checks.py -f dry-ssh.json` → сравнение с NetBox → таблица расхождений или **`--apply`** для записи в NetBox (description, type, speed, duplex, MAC, MTU, IP, LAG и т.д.). При полном прогоне (**run_uplinks_full.py**) шаг 2 вызывается с **`--all --no-tx-power --scope-to-file --mt-ref --existing-only --apply`**: обновляются только уже существующие объекты текущей области, устройства NetBox вне файла опроса не считаются расхождением, новые интерфейсы, MAC- и IP-записи не создаются. Мощность передатчика в обычную сверку не входит.
-
-   При необходимости: **`netbox_interface_types.py`** → `netbox_interface_types.json` для приведения типов (`--mt-ref`).
-
-3. **Визуализация (Zabbix)**  
-   По **`dry-ssh.json`** + Zabbix API:  
-   - **`zabbix_map.py`** — карта uplinks (хосты, провайдеры, линки);  
-   - **`zabbix_uplinks_dashboard.py`** — дашборды с графиками по uplink.  
-   Grafana (**`grafana_uplinks_graph.py`**) — отдельно, не входит в **`run_uplinks_full.py`**.
-
-4. **Синхронизация макросов commit rate в Zabbix**
+2. **Синхронизация макросов commit rate в Zabbix**
    **`zabbix_sync_commit_rate.py`** берёт из цепочек NetBox гарантированную скорость контура (`commit_rate`, в Kbps), переводит в bps и создаёт макросы **{$UPLINK.BPS.MAX:"<интерфейс>"}** и **{$UPLINK.BPS.WARN:"<интерфейс>"}**.
 
    Для контуров, у которых в NetBox поле **`billing_model`** равно **`Burst`**, по флагу **`--create-link-triggers`** создаются/обновляются **три** простых триггера на интерфейс (90%, 100%, SLA breach по **`TRIGGER_DESC_SLA_BREACH_SUFFIX`** и **`SLA_TRIGGER_FUNCTION_PERIOD`** в `uplinks_config.py`). Для остальных схем billing per-link триггеры по умолчанию не создаются — окраска линков на карте идёт с **агрегатных** хостов провайдера.
@@ -99,7 +88,11 @@ python run_uplinks_full.py --auto
    **`zabbix_provider_services.py`** — сервисы и SLA в UI Zabbix (провайдеры + Burst-контуры), цель — NetBox или **`PROJECT_PROVIDER_SLO_PERCENT`**.
    **`zabbix_map.py --update-map`** — привязка триггеров к линкам (per-link и агрегат) с приоритетом цвета, описанным в таблице скриптов.
 
-**Итого:** NetBox (цепочки) → SSH/устройства → `dry-ssh.json` → NetBox (обновление существующих полей интерфейсов) → **zabbix_sync_commit_rate.py** (макросы + util; Burst-link триггеры с `--create-link-triggers`) → **zabbix_provider_aggregate.py** → **`zabbix_map.py --update-map`** → дашборды → **`zabbix_provider_services.py`**. Всё это делает **`run_uplinks_full.py`** одной командой (см. COMMANDS.md). Offline‑отчёт SLA: **`zabbix_provider_sla.py`**.
+**Итого:** NetBox inventory → **`zabbix_sync_commit_rate.py`** →
+**`zabbix_provider_aggregate.py`** → **`zabbix_map.py --update-map`** →
+дашборды → **`zabbix_provider_services.py`**. Всё это делает
+**`run_uplinks_full.py`** одной командой. Offline‑отчёт SLA:
+**`zabbix_provider_sla.py`**.
 
 Файлы `commit_rates.json` и `description_to_name.json` в обычном запуске не читаются. Скрипты **`generate_commit_rates.py`** и **`netbox_create_circuits.py --auto`** нужны только старому пути `--auto`.
 
@@ -122,14 +115,12 @@ python run_uplinks_full.py --auto
 | `aggregate_limit_gbps` | число | Общий лимит поставщика в Гбит/с. Без него у поставщика не будет агрегатных триггеров на 90% и 100%. |
 | `slo_percent` | число | Целевой уровень доступности именно этого поставщика. Если поле пустое, берётся общее значение `PROJECT_PROVIDER_SLO_PERCENT` из `uplinks_config.py`. |
 
-**Circuit (контур, то есть конкретный канал).** Создаётся вручную. Нужны все
-четыре условия сразу:
+**Circuit (канал).** Создаётся вручную. Нужны все условия сразу:
 
 | Что | Значение |
 |-----|----------|
 | Встроенный статус контура | `Active`. Контур в состоянии `Planned`, `Offline`, `Decommissioned` и любом другом пропускается. |
-| Тег | `uplinks` (имя настраивается через `NETBOX_MONITOR_TAG`). Тег ограничен типом объекта `circuits.circuit`. |
-| Поле `uplinks_circuit_lifecycle` типа Selection | `active`. Значения `review` и `archived` исключают контур из мониторинга. Регистр букв не важен. |
+| Тип канала | `Uplink`. Другие типы каналов игнорируются. |
 | Поле `billing_model` типа Selection | Схема расчёта: `Flat`, `Burst`, `95thAggBurst`, `FlatAggCap`. Значение `Burst` включает отдельные триггеры и отдельный сервис на этот канал. |
 | Стандартное поле `commit_rate` | Гарантированная скорость канала в Кбит/с. Не заполняется только при `billing_model=FlatAggCap`, когда лимит общий и хранится у поставщика в `aggregate_limit_gbps`. |
 
@@ -147,27 +138,23 @@ python run_uplinks_full.py --auto
 `NETBOX_TAG`). Это тег устройства, а не контура — не путайте его с тегом
 `uplinks`.
 
-Один поставщик может одновременно иметь канал в мониторинге и канал в
-состоянии `review`. Тег `automatization` остался только у объектов, созданных
-когда-то старым автоматическим режимом, и на область мониторинга не влияет.
+Описание интерфейса не определяет Provider и не включает канал в мониторинг.
+Тег `automatization` не влияет на область мониторинга.
 
 ## Предварительный отчёт перед записью
 
 ```bash
-python run_uplinks_full.py --plan --from-file \
+python run_uplinks_full.py --plan \
   --report uplinks_plan_report.txt
 ```
 
 Режим `--plan` ничего не записывает ни в NetBox, ни в Zabbix. Он читает
-цепочки из NetBox, запускает сверку интерфейсов без `--apply`, читает текущие
-объекты Zabbix и пишет отчёт о предполагаемых изменениях в
+цепочки из NetBox, читает текущие объекты Zabbix и пишет отчёт о предполагаемых изменениях в
 `run_logs/<дата>_zabbix_plan.json` и рядом в текстовом виде.
 
 Ограничения режима:
 
-- обязателен `--from-file` или `--no-fetch`: оборудование не опрашивается,
-  берётся уже собранный `dry-ssh.json`. Для нового опроса нужен обычный
-  запуск или ключ `--refresh`;
+- оборудование не опрашивается и `dry-ssh.json` не нужен;
 - нельзя совмещать с `--auto`;
 - отчёт останавливается с ошибкой, если чтение NetBox прошло не полностью или
   нет ни одной полной цепочки. Отдельные неполные цепочки при успешном чтении
@@ -187,8 +174,7 @@ python run_uplinks_full.py --plan --from-file \
 
 | Ключ | Описание |
 |------|----------|
-| `-d`, `--dry-ssh` | Путь к dry-ssh.json (по умолчанию `dry-ssh.json`) |
-| `--inventory-file` | Взять цепочки из готового файла шага 0 и не обращаться к NetBox повторно |
+| `--inventory-file` | Взять цепочки из готового файла inventory и не обращаться к NetBox повторно |
 | `-o`, `--output` | Записать отчёт в машиночитаемом виде (JSON) в файл |
 | `--text` | Записать краткий текстовый отчёт в файл |
 | `--json` | Вывести отчёт в формате JSON в стандартный вывод |
@@ -199,11 +185,8 @@ python run_uplinks_full.py --plan --from-file \
 
 | Ключ | Описание |
 |------|----------|
-| `--plan` | Предварительный отчёт без записи. Требует `--from-file` или `--no-fetch`, несовместим с `--auto` |
-| `--no-fetch`, `--from-file` | Не опрашивать оборудование, взять готовый `dry-ssh.json` |
-| `--refresh` | Принудительно обновить кэш опроса устройств (иначе используется кэш до 24 часов) |
-| `--dry-ssh FILE` | Путь к `dry-ssh.json` |
-| `--no-netbox-apply` | Пропустить запись в NetBox на шаге сверки интерфейсов |
+| `--plan` | Предварительный отчёт без записи в NetBox и Zabbix |
+| `--netbox-checks` | Отдельно запустить сверку из внешнего файла; не входит в обычный путь |
 | `--no-burst-triggers` | Не создавать триггеры для Burst-контуров |
 | `--report FILE` | Дополнительно записать отчёт о запуске в файл |
 | `--timeout SEC` | Ограничение на один шаг, по умолчанию 600 секунд |
@@ -225,18 +208,15 @@ source .venv/bin/activate   # Linux/macOS
 # Установить зависимости
 pip install -r requirements.txt
 
-# Переменные окружения (обязательные для работы с NetBox и SSH)
+# Переменные окружения для рабочего запуска
 export NETBOX_URL="https://your-netbox.example.com"
 export NETBOX_TOKEN="your-api-token"
-export SSH_PASSWORD="password-for-devices"
 ```
 
 **Опциональные переменные**
 
-- `SSH_USERNAME` — обязательно при `--report` и `--fetch` (по умолчанию не задан, нужно указать явно).
-- `PARALLEL_DEVICES` (по умолчанию `6`), `SSH_HOST_SUFFIX`, `NETBOX_TAG`, `SSH_TIMEOUT`, `SSH_COMMAND_TIMEOUT` (сек).
-- По умолчанию используется `~/.ssh/config`: HostName и User берутся из конфига (как при ручном `ssh DEVICE`). Чтобы отключить — задайте `USE_SSH_CONFIG=0`.
-- При ошибке SSH в лог выводится тип исключения и errno (например `TimeoutError`, `OSError [Errno 51]`), чтобы различать таймаут подключения и отсутствие маршрута.
+- Переменные `SSH_*` нужны только отдельному ручному инструменту
+  `uplinks_stats.py`, не рабочему запуску.
 
 Без активации venv можно вызывать интерпретатор напрямую:
 
@@ -721,7 +701,12 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json --delete-util-triggers
 
 ### 8. `zabbix_provider_aggregate.py` — агрегат по провайдеру в Zabbix
 
-Для схем, где у провайдера общий лимит по всем линкам, лимит хранится в NetBox у Provider в поле **`aggregate_limit_gbps`** (Гбит/с). Скрипт берёт провайдеров из полных цепочек NetBox (тег контура **`NETBOX_MONITOR_TAG`**, по умолчанию `uplinks`) и линки из `dry-ssh.json`, затем создаёт хосты **«Uplinks {Provider}»** в группе **`UPLINKS_AGGREGATE_GROUP`**, с calculated items (сумма Bits in/out по линкам). Для провайдера с лимитом создаются **три** триггера:
+Для схем, где у провайдера общий лимит по всем каналам, лимит хранится в
+NetBox у Provider в поле **`aggregate_limit_gbps`** (Гбит/с). Скрипт берёт
+провайдеров и каналы из полных цепочек NetBox и создаёт хосты
+**«Uplinks {Provider}»** в группе **`UPLINKS_AGGREGATE_GROUP`** с calculated
+items (сумма Bits in/out по каналам). Для провайдера с лимитом создаются
+**три** триггера:
 
 - **90%** и **100%** от лимита — теги **`scripts:automatization`** и **`provider={name}`** (без **`sla=true`**).
 - **SLA breach** — устойчивое превышение 100% за период **`SLA_TRIGGER_FUNCTION_PERIOD`**, дополнительный тег **`sla=true`** — под них подходит сервис **`Uplinks {Provider}`** и SLA в Zabbix.
@@ -873,7 +858,7 @@ python netbox_uplinks_cleanup.py
 | `zabbix_provider_sla.py` | Offline-отчёт SLA по активным Circuit и их триггерам (агрегаты и Burst) |
 | `zabbix_uplinks_cleanup.py` | Очистка: простые триггеры uplinks (включая SLA breach на линках), item'ы порога, карта, дашборды |
 | `netbox_uplinks_cleanup.py` | Откат в NetBox: кабели, terminations, контуры (и при возможности типы/провайдеры) по тегу автоматизации |
-| `uplinks_config.py` | Имя карты/дашбордов, теги триггеров (`scripts`/`automatization`, `sla`/`true`), описания **90%/100%** и **SLA breach** на линке (`TRIGGER_DESC_*`, `TRIGGER_DESC_SLA_BREACH_SUFFIX`), периоды **`TRIGGER_FUNCTION_PERIOD`** (окно max) и **`SLA_TRIGGER_FUNCTION_PERIOD`** (окно min для breach), **`SLA_EFFECTIVE_DATE_UTC`**, макросы, цвета линков, префиксы агрегатных хостов, тег контура для области мониторинга **`NETBOX_MONITOR_TAG`**, тег старых объектов **`NETBOX_AUTOMATION_TAG`** и общий целевой уровень доступности **`PROJECT_PROVIDER_SLO_PERCENT`**. Копия примера: `uplinks_config.example.py`. |
+| `uplinks_config.py` | Имя карты/дашбордов, теги триггеров (`scripts`/`automatization`, `sla`/`true`), описания **90%/100%** и **SLA breach** на линке (`TRIGGER_DESC_*`, `TRIGGER_DESC_SLA_BREACH_SUFFIX`), периоды **`TRIGGER_FUNCTION_PERIOD`** и **`SLA_TRIGGER_FUNCTION_PERIOD`**, макросы, цвета линков, префиксы агрегатных хостов, тег старых объектов **`NETBOX_AUTOMATION_TAG`** и общий целевой уровень доступности **`PROJECT_PROVIDER_SLO_PERCENT`**. Копия примера: `uplinks_config.example.py`. |
 | `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` / дашборде в той же директории, что и файл `-f`, не коммитить |
 | `ROADMAP.md` | Планы доработок (например Tenancy для circuits) |
 | `requirements.txt` | Зависимости: pynetbox, paramiko, requests |

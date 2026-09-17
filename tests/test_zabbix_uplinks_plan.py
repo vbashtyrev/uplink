@@ -200,9 +200,139 @@ def test_build_zabbix_plan_util_triggers_exclude_out_of_scope_dry_ssh(
     assert "Ethernet34/1" not in planned_ifaces
 
 
+def test_format_plan_text_inventory_providers_total_and_in_scope():
+    report = {
+        "inventory": {
+            "complete": [
+                {"provider": "Cogent", "device": "d1", "interface": "eth0"},
+                {"provider": "Hurricane", "device": "d2", "interface": "eth1"},
+            ],
+            "stats": {
+                "providers": 20,
+                "providers_in_scope": 2,
+                "complete": 2,
+                "incomplete": 0,
+            },
+        },
+        "summary": {"create": 0, "update": 0, "unchanged": 0, "delete": 0, "skipped": 0, "not_evaluated": 0},
+        "planned": {
+            "macros": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "util_triggers": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "burst_triggers": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "aggregate_hosts": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "maps": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "dashboards": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "services": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+        },
+    }
+    text = format_plan_text(report)
+    assert "providers_total=20" in text
+    assert "providers_in_scope=2" in text
+
+
+def test_format_plan_text_inventory_providers_in_scope_fallback_from_complete():
+    report = {
+        "inventory": {
+            "complete": [{"provider": "Cogent", "device": "d1", "interface": "eth0"}],
+            "stats": {"providers": 5, "complete": 1, "incomplete": 0},
+        },
+        "summary": {"create": 0, "update": 0, "unchanged": 0, "delete": 0, "skipped": 0, "not_evaluated": 0},
+        "planned": {
+            "macros": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "util_triggers": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "burst_triggers": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "aggregate_hosts": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "maps": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "dashboards": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "services": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+        },
+    }
+    text = format_plan_text(report)
+    assert "providers_total=5" in text
+    assert "providers_in_scope=1" in text
+
+
+def test_format_plan_text_create_details_util_and_aggregate():
+    report = {
+        "inventory": {"stats": {"providers": 1, "providers_in_scope": 1, "complete": 1, "incomplete": 0}},
+        "summary": {"create": 2, "update": 0, "unchanged": 0, "delete": 0, "skipped": 0, "not_evaluated": 0},
+        "planned": {
+            "macros": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "util_triggers": {
+                "create": [
+                    {
+                        "host": "WAW-EQX-7280QR-2",
+                        "interface": "Ethernet23/1",
+                        "triggers": [
+                            "Interface Ethernet23/1: {}".format(TRIGGER_DESC_UTIL_WARN_SUFFIX),
+                            "Interface Ethernet23/1: {}".format(TRIGGER_DESC_UTIL_CRIT_SUFFIX),
+                        ],
+                    }
+                ],
+                "update": [],
+                "unchanged": [],
+                "delete": [],
+                "skipped": [],
+            },
+            "burst_triggers": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "aggregate_hosts": {
+                "create": [{"provider": "Cogent", "host": "Uplinks_Aggregate_Cogent"}],
+                "update": [],
+                "unchanged": [],
+                "delete": [],
+                "skipped": [],
+            },
+            "maps": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "dashboards": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "services": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+        },
+    }
+    text = format_plan_text(report)
+    assert "util_triggers create (1 entries):" in text
+    assert "WAW-EQX-7280QR-2/Ethernet23/1 (2 triggers):" in text
+    assert TRIGGER_DESC_UTIL_WARN_SUFFIX in text
+    assert "aggregate_hosts create (1 entries):" in text
+    assert "provider=Cogent host=Uplinks_Aggregate_Cogent" in text
+
+
+def test_format_plan_text_create_details_util_one_trigger():
+    report = {
+        "inventory": {"stats": {"providers": 1, "providers_in_scope": 1, "complete": 1, "incomplete": 0}},
+        "summary": {"create": 1, "update": 0, "unchanged": 0, "delete": 0, "skipped": 0, "not_evaluated": 0},
+        "planned": {
+            "macros": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "util_triggers": {
+                "create": [
+                    {
+                        "host": "WAW-EQX-7280QR-2",
+                        "interface": "Ethernet23/1",
+                        "triggers": [
+                            "Interface Ethernet23/1: {}".format(TRIGGER_DESC_UTIL_WARN_SUFFIX),
+                        ],
+                    }
+                ],
+                "update": [],
+                "unchanged": [],
+                "delete": [],
+                "skipped": [],
+            },
+            "burst_triggers": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "aggregate_hosts": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "maps": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "dashboards": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+            "services": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
+        },
+    }
+    text = format_plan_text(report)
+    assert "util_triggers create (1 entries):" in text
+    assert "WAW-EQX-7280QR-2/Ethernet23/1 (1 trigger):" in text
+    assert TRIGGER_DESC_UTIL_WARN_SUFFIX in text
+    assert "2 triggers" not in text
+
+
 def test_format_plan_text_burst_triggers_not_evaluated():
     report = {
-        "inventory": {"stats": {"providers": 1, "complete": 1, "incomplete": 0}},
+        "inventory": {"stats": {"providers": 1, "providers_in_scope": 1, "complete": 1, "incomplete": 0}},
         "summary": {"create": 0, "update": 0, "unchanged": 0, "delete": 0, "skipped": 0, "not_evaluated": 4},
         "planned": {
             "macros": {"create": [], "update": [], "unchanged": [], "delete": [], "skipped": []},
@@ -236,7 +366,54 @@ def test_inventory_plan_gate_rejects_partial_read():
     assert "partial read" in detail.lower()
 
 
-def test_build_zabbix_plan_skips_missing_zabbix_host(monkeypatch, zabbix_env, tmp_path):
+def test_build_zabbix_plan_fails_on_relations_read_error(monkeypatch, zabbix_env, netbox_env, tmp_path):
+    dry = tmp_path / "dry-ssh.json"
+    dry.write_text((FIXTURES / "dry_ssh_minimal.json").read_text(encoding="utf-8"), encoding="utf-8")
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "ALA-KZT-7280TR-1",
+                        "interface": "Ethernet51/1",
+                        "provider": "Cogent",
+                        "commit_rate_kbps": 10000,
+                        "billing_model": "Flat",
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    nb = build_netbox_for_commit_rates(
+        device_name="ALA-KZT-7280TR-1",
+        iface_name="Ethernet51/1",
+        device_tag="border",
+    )
+
+    def fail_interfaces_filter(**kwargs):
+        raise RuntimeError("dcim.interfaces.filter unavailable")
+
+    nb.dcim.interfaces.filter = fail_interfaces_filter
+    monkeypatch.setattr("uplinks.zabbix.plan.pynetbox.api", lambda url, token: nb)
+
+    mocker = ZabbixRpcMocker()
+    mocker.on("user.get", lambda p: [{"userid": "1"}])
+    mocker.on("host.get", lambda p: [])
+    mocker.on("trigger.get", lambda p: [])
+    mocker.activate(monkeypatch)
+
+    report, err = build_zabbix_plan(str(dry), inventory_file=str(inv))
+    assert report is None
+    assert err is not None
+    assert "partial read" in err.lower()
+
+
+def test_build_zabbix_plan_skips_missing_zabbix_host(monkeypatch, zabbix_env, netbox_env, tmp_path):
     dry = tmp_path / "dry-ssh.json"
     dry.write_text((FIXTURES / "dry_ssh_minimal.json").read_text(encoding="utf-8"), encoding="utf-8")
     inv = tmp_path / "inventory.json"
@@ -258,6 +435,13 @@ def test_build_zabbix_plan_skips_missing_zabbix_host(monkeypatch, zabbix_env, tm
         ),
         encoding="utf-8",
     )
+
+    nb = build_netbox_for_commit_rates(
+        device_name="MISSING-HOST",
+        iface_name="Ethernet51/1",
+        device_tag="border",
+    )
+    monkeypatch.setattr("uplinks.zabbix.plan.pynetbox.api", lambda url, token: nb)
 
     mocker = ZabbixRpcMocker()
     mocker.on("user.get", lambda p: [{"userid": "1"}])

@@ -1,11 +1,12 @@
 """fetch_uplink_inventory_report: project circuit scope vs border device tag."""
 
+import sys
 from unittest.mock import patch
 
 import zabbix_sync_commit_rate as zsc
-from tests.mocks.netbox_api import build_netbox_for_commit_rates
+from tests.mocks.netbox_api import _Record, build_netbox_for_commit_rates
+from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from uplinks.netbox import inventory as inv
-from uplinks_config import NETBOX_MONITOR_TAG
 from zabbix_sync_commit_rate import KBPS_TO_BPS, commit_rates_from_inventory_report, fetch_uplink_inventory_report
 
 
@@ -21,7 +22,7 @@ def test_fetch_uplink_inventory_report_passes_project_circuit_scope():
 
 
 def test_fetch_does_not_use_monitor_tag_as_device_tag():
-    """Border devices use tag=border even when NETBOX_MONITOR_TAG is uplinks."""
+    """The configured border device tag is passed to the inventory walk."""
     nb = build_netbox_for_commit_rates(
         device_name="ALA-R1",
         iface_name="Ethernet51/1",
@@ -48,35 +49,35 @@ def test_commit_rates_with_border_tag_and_scoped_provider():
     assert result == {("ALA-R1", "Ethernet51/1"): 10000 * KBPS_TO_BPS}
 
 
-def test_monitor_tag_on_device_does_not_match_border_inventory():
-    """Mis-set device tag (monitor tag value) yields empty inventory; border tag works."""
+def test_wrong_device_tag_does_not_match_border_inventory():
+    """A device without the configured border tag is excluded."""
     nb = build_netbox_for_commit_rates(
         device_name="ALA-R1",
         iface_name="Ethernet51/1",
         commit_rate_kbps=10000,
         device_tag="border",
     )
-    report_monitor = fetch_uplink_inventory_report(nb, tag=NETBOX_MONITOR_TAG, debug=False)
+    report_monitor = fetch_uplink_inventory_report(nb, tag="uplinks", debug=False)
     report_border = fetch_uplink_inventory_report(nb, tag="border", debug=False)
     assert commit_rates_from_inventory_report(report_monitor, debug=False) == {}
     assert commit_rates_from_inventory_report(report_border, debug=False) != {}
 
 
-def test_border_device_tag_maps_monitor_tag_to_border():
+def test_border_device_tag_uses_the_configured_device_tag():
     from zabbix_sync_commit_rate import border_device_tag
     from uplinks.netbox.inventory import netbox_border_tag, resolve_border_device_tag
 
-    assert border_device_tag(NETBOX_MONITOR_TAG) == "border"
+    assert border_device_tag("uplinks") == "uplinks"
     assert border_device_tag("border") == "border"
     assert border_device_tag("custom-border") == "custom-border"
-    assert resolve_border_device_tag(NETBOX_MONITOR_TAG) == "border"
+    assert resolve_border_device_tag("uplinks") == "uplinks"
 
 
-def test_netbox_border_tag_maps_monitor_env_to_border(monkeypatch):
+def test_netbox_border_tag_uses_device_tag_env(monkeypatch):
     from uplinks.netbox.inventory import netbox_border_tag
 
-    monkeypatch.setenv("NETBOX_TAG", NETBOX_MONITOR_TAG)
-    assert netbox_border_tag() == "border"
+    monkeypatch.setenv("NETBOX_TAG", "custom-border")
+    assert netbox_border_tag() == "custom-border"
 
 
 def test_util_interfaces_limited_to_scoped_inventory():
@@ -130,7 +131,100 @@ def test_util_interfaces_member_maps_to_physical_juniper():
 def test_out_of_scope_circuit_excluded_even_with_border_device():
     nb = build_netbox_for_commit_rates(device_tag="border")
     circuit = nb.circuits.circuits._items[0]
-    circuit.tag = "other-monitor"
-    circuit.custom_fields = {"uplinks_circuit_lifecycle": "active"}
+    circuit.type = _Record(name="Internet", slug="internet")
     report = fetch_uplink_inventory_report(nb, tag="border", debug=False)
     assert commit_rates_from_inventory_report(report, debug=False) == {}
+
+
+def test_main_netbox_only_does_not_auto_load_dry_ssh(
+    monkeypatch, zabbix_env, netbox_env, tmp_path, capsys
+):
+    """NetBox-only sync must not implicitly read dry-ssh.json from cwd."""
+    import json
+
+    import zabbix_sync_commit_rate as mod
+
+    dry = tmp_path / "dry-ssh.json"
+    dry.write_text(
+        json.dumps(
+            {
+                "devices": {
+                    "WAW-EQX-7280QR-2": [
+                        {
+                            "name": "Ethernet34/1",
+                            "description": "Uplink: Fiord and MSK PING-WIN 3Gbps link",
+                        },
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    inv_path = tmp_path / "inventory.json"
+    inv_path.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "provider": "Hurricane",
+                        "device": "WAW-EQX-7280QR-2",
+                        "interface": "Ethernet23/1",
+                        "circuit_id": "Hurricane-WAW-1",
+                        "commit_rate_kbps": 10000000,
+                        "billing_model": "Fixed",
+                    },
+                ],
+                "incomplete": [],
+                "stats": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    nb = build_netbox_for_commit_rates(
+        device_name="WAW-EQX-7280QR-2",
+        iface_name="Ethernet23/1",
+        provider_name="Hurricane",
+        device_tag="border",
+        tag_device=True,
+    )
+
+    build_standard_zabbix_mocker(
+        hosts=[{"hostid": "102", "host": "WAW-EQX-7280QR-2", "name": "WAW-EQX-7280QR-2"}],
+    ).activate(monkeypatch)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mod, "validate_zabbix_token", lambda *a, **k: True)
+    monkeypatch.setattr(mod.pynetbox, "api", lambda url, token: nb)
+    monkeypatch.setenv("NETBOX_TAG", "border")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "zabbix_sync_commit_rate.py",
+            "--inventory-file",
+            str(inv_path),
+            "--dry-run",
+            "--no-util-triggers",
+        ],
+    )
+    mod.main()
+    err = capsys.readouterr().err
+    assert "Ethernet23/1" in err
+    assert "Ethernet34/1" not in err
+
+
+def test_util_interfaces_from_inventory_without_dry_ssh():
+    from zabbix_sync_commit_rate import util_interfaces_by_host_from_inventory
+
+    report = {
+        "complete": [
+            {
+                "provider": "Hurricane",
+                "device": "WAW-EQX-7280QR-2",
+                "interface": "Ethernet23/1",
+                "circuit_id": "Hurricane-WAW-1",
+            },
+        ],
+    }
+    util_ifaces = util_interfaces_by_host_from_inventory(None, report)
+    assert util_ifaces == {"WAW-EQX-7280QR-2": ["Ethernet23/1"]}

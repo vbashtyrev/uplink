@@ -273,9 +273,9 @@ def _run_pre_ssh_inventory(python, inventory_path, timeout, log, step, debug_log
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Full uplinks chain: collection → NetBox inventory (default) → Zabbix (sync, map, dashboards, services)."
-        " Legacy auto-create path (--auto): commit_rates → NetBox circuits. Report on work and errors."
-        " Update only from corrected dry-ssh.json: --from-file (or --no-fetch).",
+        description="Full uplinks chain: NetBox inventory (default) → Zabbix (sync, map, dashboards, services)."
+        " Legacy auto-create path (--auto): SSH collection → commit_rates → NetBox circuits."
+        " Optional legacy SSH refresh: --from-file / --no-fetch with dry-ssh.json.",
     )
     parser.add_argument(
         "--auto",
@@ -285,17 +285,17 @@ def main():
     parser.add_argument(
         "--no-fetch",
         action="store_true",
-        help="Do not poll devices via SSH; use existing dry-ssh.json",
+        help="Legacy mode: do not poll devices via SSH; use existing dry-ssh.json",
     )
     parser.add_argument(
         "--from-file",
         action="store_true",
-        help="Same as --no-fetch: chain starting from the already correct dry-ssh.json (no SSH fetch)",
+        help="Legacy mode: start from an existing dry-ssh.json (no SSH fetch)",
     )
     parser.add_argument(
         "--refresh",
         action="store_true",
-        help="Refresh step 1 cache: force uplinks_stats.py --fetch --json (ignore cache for 24h)",
+        help="Legacy mode: force uplinks_stats.py --fetch --json",
     )
     parser.add_argument(
         "--dry-ssh",
@@ -312,7 +312,7 @@ def main():
     parser.add_argument(
         "--no-netbox-apply",
         action="store_true",
-        help="Skip step 2 (netbox_checks --apply). Step is executed by default.",
+        help="Skip optional netbox_checks.py; it is not part of the default path.",
     )
     parser.add_argument(
         "--no-burst-triggers",
@@ -364,20 +364,18 @@ def main():
     parser.add_argument(
         "--plan",
         action="store_true",
-        help="Read-only preview: scoped NetBox inventory, netbox_checks without --apply, Zabbix plan report (requires --from-file)",
+        help="Read-only preview: scoped NetBox inventory and Zabbix plan report",
+    )
+    parser.add_argument(
+        "--netbox-checks",
+        action="store_true",
+        help="Run netbox_checks.py (optional; not part of default human path)",
     )
     args = parser.parse_args()
 
     if _plan_mode(args) and args.auto:
         print("Error: --plan cannot be used with --auto.", file=sys.stderr)
         sys.exit(2)
-    if _plan_mode(args) and not (args.no_fetch or args.from_file):
-        print(
-            "Error: --plan requires --from-file or --no-fetch (use validated dry-ssh.json, no SSH fetch).",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
     if args.location and not args.auto:
         print(
             "Error: --location is only supported with --auto (legacy netbox_create_circuits path).",
@@ -446,7 +444,8 @@ def main():
     plan_json_path = os.path.join(logs_dir, "{}_zabbix_plan.json".format(run_ts))
 
     plan_inventory_report = None
-    if _plan_mode(args):
+    human_inventory_ready = False
+    if _plan_mode(args) or (not args.auto):
         plan_inventory_report = _run_plan_inventory(
             python,
             inventory_path,
@@ -459,9 +458,18 @@ def main():
             args.report,
             run_log_path,
         )
+        human_inventory_ready = True
 
-    # 1. Data collection from devices; cache for 24 hours - if there is fresh dry-ssh.json, the step is skipped (workaround: --refresh)
-    if skip_ssh_fetch:
+    # 1. SSH data collection (legacy --auto path only; human mode uses NetBox inventory)
+    if not args.auto:
+        _append_debug(
+            debug_log_path,
+            "Step 1: Data collection",
+            skip_reason="NetBox-first path (inventory drives Zabbix; no SSH fetch)",
+        )
+        log("[SKIP] Step 1: Data collection (NetBox inventory drives Zabbix)")
+        report_lines.append("")
+    elif skip_ssh_fetch:
         if not os.path.isfile(dry_ssh_path):
             _append_debug(debug_log_path, "Step 1: Data collection", skip_reason="--no-fetch/--from-file, file {} not found". format(dry_ssh_path))
             step("Step 1: Skip (--no-fetch / --from-file)", False, "file {} not found". format(dry_ssh_path))
@@ -532,8 +540,9 @@ def main():
                 else:
                     step("Step 1: Data Collection", True, "-> {}".format(dry_ssh_path))
 
-    # 2. NetBox checks (optional apply; plan mode is read-only preview)
-    if _plan_mode(args) or not args.no_netbox_apply:
+    # 2. NetBox checks (optional; not part of default human path)
+    run_netbox_checks = args.auto or getattr(args, "netbox_checks", False)
+    if run_netbox_checks and (_plan_mode(args) or not args.no_netbox_apply):
         netbox_checks_argv = [
             python,
             "netbox_checks.py",
@@ -580,8 +589,9 @@ def main():
             sys.exit(1)
         log("")
     else:
-        _append_debug(debug_log_path, "Step 2: NetBox checks --apply", skip_reason="--no-netbox-apply")
-        log("[SKIP] Step 2: NetBox checks (skipped: --no-netbox-apply)")
+        skip_reason = "--no-netbox-apply" if args.no_netbox_apply else "not requested (default human path)"
+        _append_debug(debug_log_path, "Step 2: NetBox checks", skip_reason=skip_reason)
+        log("[SKIP] Step 2: NetBox checks ({})".format(skip_reason))
         report_lines.append("")
 
     if _plan_mode(args):
@@ -603,8 +613,6 @@ def main():
         plan_argv = [
             python,
             "zabbix_uplinks_plan.py",
-            "-d",
-            dry_ssh_path,
             "--inventory-file",
             inventory_path,
             "-o",
@@ -673,28 +681,31 @@ def main():
             _finish(report_lines, errors, args.report, run_log_path)
             sys.exit(1)
         log("")
-    else:
-        # 3. NetBox uplink inventory (read-only, human/NetBox-first path)
-        log("Step 3: NetBox uplink inventory (netbox_uplinks_inventory.py --dry-run) ...")
-        ok, out, err = run_cmd(
-            [python, "netbox_uplinks_inventory.py", "--dry-run"],
-            cwd=SCRIPT_DIR,
-            timeout=timeout,
-        )
-        _append_debug(debug_log_path, "Step 3: NetBox uplink inventory", stdout=out or "", stderr=err or "", ok=ok)
-        step("Step 3: NetBox uplink inventory", ok, err or ("code != 0" if not ok else ""))
-        if not ok and args.stop_on_error:
-            _finish(report_lines, errors, args.report, run_log_path)
-            sys.exit(1)
-        if out:
-            for line in out.splitlines():
-                log("  {}".format(line))
+    elif human_inventory_ready:
+        log("Step 3: NetBox uplink inventory summary (from step 0) ...")
+        try:
+            inv_summary = format_inventory_text(
+                _load_inventory_report(inventory_path), dry_run=True
+            )
+        except (OSError, json.JSONDecodeError) as e:
+            step("Step 3: NetBox uplink inventory", False, "failed to read {}: {}".format(inventory_path, e))
+            if args.stop_on_error:
+                _finish(report_lines, errors, args.report, run_log_path)
+                sys.exit(1)
+            inv_summary = ""
+        else:
+            step("Step 3: NetBox uplink inventory", True, "")
+            if inv_summary:
+                for line in inv_summary.splitlines():
+                    log("  {}".format(line))
         log("")
 
-    # 5. Zabbix sync: macros from NetBox, util triggers from dry-ssh, Burst link triggers from inventory
-    sync_argv = [python, "zabbix_sync_commit_rate.py", "-d", dry_ssh_path]
+    # 5. Zabbix sync: macros/util/Burst from NetBox inventory (human) or dry-ssh (legacy --auto)
     if args.auto:
+        sync_argv = [python, "zabbix_sync_commit_rate.py", "-d", dry_ssh_path]
         sync_argv.extend(["-f", commit_rates_path, "--legacy-commit-rates-fallback"])
+    else:
+        sync_argv = [python, "zabbix_sync_commit_rate.py", "--inventory-file", inventory_path]
     if not args.no_burst_triggers:
         sync_argv.append("--create-link-triggers")
     sync_detail = " ".join(sync_argv[1:])
@@ -711,9 +722,11 @@ def main():
     log("")
 
     # 6. Zabbix - aggregate hosts Uplinks {Provider} (calculated items + 90%/100%/SLA triggers)
-    agg_argv = [python, "zabbix_provider_aggregate.py", "-d", dry_ssh_path]
     if args.auto:
+        agg_argv = [python, "zabbix_provider_aggregate.py", "-d", dry_ssh_path]
         agg_argv.extend(["-f", commit_rates_path, "--legacy-commit-rates-fallback"])
+    else:
+        agg_argv = [python, "zabbix_provider_aggregate.py", "--inventory-file", inventory_path]
     log(
         "Step 6: Zabbix - aggregate by provider ({}) ...".format(" ".join(agg_argv[1:]))
     )
@@ -733,12 +746,23 @@ def main():
     log("")
 
     # 7. Zabbix map (after aggregate: link colors use per-link and provider aggregate triggers)
-    log("Step 7: Zabbix - map (zabbix_map.py -f {} --zabbix --update-map) ...".format(dry_ssh_path))
-    ok, out, err = run_cmd(
-        [python, "zabbix_map.py", "-f", dry_ssh_path, "--zabbix", "--update-map"],
-        cwd=SCRIPT_DIR,
-        timeout=timeout,
-    )
+    if args.auto:
+        map_argv = [python, "zabbix_map.py", "-f", dry_ssh_path, "--zabbix", "--update-map"]
+        map_log = "Step 7: Zabbix - map (zabbix_map.py -f {} --zabbix --update-map) ...".format(dry_ssh_path)
+    else:
+        map_argv = [
+            python,
+            "zabbix_map.py",
+            "--inventory-file",
+            inventory_path,
+            "--zabbix",
+            "--update-map",
+        ]
+        map_log = "Step 7: Zabbix - map (zabbix_map.py --inventory-file {} --zabbix --update-map) ...".format(
+            os.path.basename(inventory_path)
+        )
+    log(map_log)
+    ok, out, err = run_cmd(map_argv, cwd=SCRIPT_DIR, timeout=timeout)
     _append_debug(debug_log_path, "Step 7: Zabbix map", stdout=out or "", stderr=err or "", ok=ok)
     step("Step 7: Zabbix map", ok, err or ("code != 0" if not ok else ""))
     if not ok and args.stop_on_error:
@@ -750,12 +774,16 @@ def main():
     log("")
 
     # 8. Zabbix dashboards (after aggregate: provider tabs can use aggregate calculated items)
-    log("Step 8: Zabbix - dashboards (zabbix_uplinks_dashboard.py -f {}) ...".format(dry_ssh_path))
-    ok, out, err = run_cmd(
-        [python, "zabbix_uplinks_dashboard.py", "-f", dry_ssh_path],
-        cwd=SCRIPT_DIR,
-        timeout=timeout,
-    )
+    if args.auto:
+        dash_argv = [python, "zabbix_uplinks_dashboard.py", "-f", dry_ssh_path]
+        dash_log = "Step 8: Zabbix - dashboards (zabbix_uplinks_dashboard.py -f {}) ...".format(dry_ssh_path)
+    else:
+        dash_argv = [python, "zabbix_uplinks_dashboard.py", "--inventory-file", inventory_path]
+        dash_log = "Step 8: Zabbix - dashboards (zabbix_uplinks_dashboard.py --inventory-file {}) ...".format(
+            os.path.basename(inventory_path)
+        )
+    log(dash_log)
+    ok, out, err = run_cmd(dash_argv, cwd=SCRIPT_DIR, timeout=timeout)
     _append_debug(debug_log_path, "Step 8: Zabbix dashboard", stdout=out or "", stderr=err or "", ok=ok)
     step("Step 8: Zabbix dashboard", ok, err or ("code != 0" if not ok else ""))
     if not ok and args.stop_on_error:

@@ -10,7 +10,13 @@ from uplinks.netbox.inventory import (
     ERROR_AUTH_DENIED,
     ERROR_PARTIAL_READ,
     ERROR_PROVIDERS_UNAVAILABLE,
+    NetBoxAuthError,
+    collect_netbox_interface_relations,
     collect_uplink_inventory,
+    device_names_from_complete_inventory,
+    enrich_inventory_provider_stats,
+    finalize_inventory_read_stats,
+    map_commit_rates_to_zabbix_ifaces,
     project_circuit_scope,
     providers_from_complete_inventory,
     resolve_border_device_tag,
@@ -75,7 +81,7 @@ def inventory_plan_gate(report):
 
 
 def collect_scoped_inventory(nb, tag, debug=False):
-    """Project inventory: circuit monitor tag + uplinks_circuit_lifecycle=active."""
+    """Project inventory: Circuit type Uplink + built-in status Active."""
     return collect_uplink_inventory(
         nb,
         tag=tag,
@@ -375,9 +381,7 @@ def build_zabbix_plan(
     if not valid:
         return None, auth_err or "Invalid ZABBIX_TOKEN"
 
-    dry_ssh_devices = load_dry_ssh(dry_ssh_path)
-    if not dry_ssh_devices:
-        return None, "dry-ssh not loaded from {}".format(dry_ssh_path)
+    dry_ssh_devices = load_dry_ssh(dry_ssh_path) if dry_ssh_path else None
 
     if inventory_file:
         try:
@@ -398,20 +402,66 @@ def build_zabbix_plan(
             return None, "NetBox client: {}".format(e)
 
         inventory_report = collect_scoped_inventory(nb, tag, debug=debug)
+
+    netbox_relations = None
+    nb_for_relations = None
+    if inventory_file:
+        nb_url = os.environ.get("NETBOX_URL", "").strip()
+        nb_token = os.environ.get("NETBOX_TOKEN", "").strip()
+        if nb_url and nb_token:
+            try:
+                nb_for_relations = pynetbox.api(nb_url, token=nb_token)
+            except Exception:
+                nb_for_relations = None
+    else:
+        nb_for_relations = nb
+    if nb_for_relations is not None:
+        try:
+            device_names = device_names_from_complete_inventory(inventory_report)
+            netbox_relations = collect_netbox_interface_relations(
+                nb_for_relations,
+                device_names,
+                debug=debug,
+                stats=inventory_report.get("stats"),
+            )
+        except NetBoxAuthError:
+            stats = inventory_report.setdefault("stats", {})
+            stats["error"] = ERROR_AUTH_DENIED
+            netbox_relations = None
+        except Exception:
+            stats = inventory_report.setdefault("stats", {})
+            stats["read_errors"] = stats.get("read_errors", 0) + 1
+            netbox_relations = None
+    enrich_inventory_provider_stats(inventory_report)
+    finalize_inventory_read_stats(inventory_report.get("stats"))
     gate_ok, gate_detail = inventory_plan_gate(inventory_report)
     if not gate_ok:
         return None, gate_detail
 
     commit_rates = commit_rates_from_inventory_report(inventory_report, debug=debug)
     if commit_rates:
-        commit_rates = apply_logical_context(commit_rates, dry_ssh_devices, debug=debug)
+        if netbox_relations and (
+            netbox_relations.get("member_to_aggregate")
+            or netbox_relations.get("parent_children")
+        ):
+            commit_rates = map_commit_rates_to_zabbix_ifaces(
+                commit_rates,
+                netbox_relations=netbox_relations,
+                dry_ssh_devices=dry_ssh_devices,
+                debug=debug,
+            )
+        elif dry_ssh_devices:
+            commit_rates = apply_logical_context(commit_rates, dry_ssh_devices, debug=debug)
 
     host_to_iface_bps = {}
     for (dev_name, iface_name), bps in commit_rates.items():
         host_to_iface_bps.setdefault(dev_name, []).append((iface_name, bps))
 
     host_to_util_ifaces = util_interfaces_by_host_from_inventory(
-        dry_ssh_devices, inventory_report, debug=debug
+        dry_ssh_devices,
+        inventory_report,
+        debug=debug,
+        netbox_relations=netbox_relations,
     )
     hostnames = sorted(set(host_to_iface_bps.keys()) | set(host_to_util_ifaces.keys()))
     hostid_by_name, _host_technical = _resolve_hostids(zabbix_url, zabbix_token, hostnames, debug=debug)
@@ -452,7 +502,7 @@ def build_zabbix_plan(
 
     report = {
         "read_only": True,
-        "dry_ssh": os.path.abspath(dry_ssh_path),
+        "dry_ssh": os.path.abspath(dry_ssh_path) if dry_ssh_path else None,
         "inventory": {
             "complete": inventory_report.get("complete") or [],
             "incomplete": inventory_report.get("incomplete") or [],
@@ -499,13 +549,53 @@ def _summarize_plan(planned):
     return summary
 
 
+def _format_section_create_details(section, data):
+    creates = data.get("create") or []
+    if not creates:
+        return []
+    lines = []
+    if section == "util_triggers":
+        lines.append("  util_triggers create ({} entries):".format(len(creates)))
+        for entry in creates:
+            host = entry.get("host") or "?"
+            iface = entry.get("interface") or "?"
+            triggers = entry.get("triggers") or []
+            trigger_count = len(triggers)
+            trigger_label = "trigger" if trigger_count == 1 else "triggers"
+            lines.append(
+                "    {}/{} ({} {}): {}".format(
+                    host,
+                    iface,
+                    trigger_count,
+                    trigger_label,
+                    ", ".join(triggers) if triggers else "(none)",
+                )
+            )
+    elif section == "aggregate_hosts":
+        lines.append("  aggregate_hosts create ({} entries):".format(len(creates)))
+        for entry in creates:
+            lines.append(
+                "    provider={} host={}".format(
+                    entry.get("provider") or "?",
+                    entry.get("host") or "?",
+                )
+            )
+    return lines
+
+
 def format_plan_text(report):
     """Concise human-readable summary."""
     lines = ["Zabbix uplinks plan (read-only)"]
-    stats = (report.get("inventory") or {}).get("stats") or {}
+    inventory = report.get("inventory") or {}
+    stats = inventory.get("stats") or {}
+    providers_total = stats.get("providers", 0)
+    providers_in_scope = stats.get("providers_in_scope")
+    if providers_in_scope is None:
+        providers_in_scope = len(providers_from_complete_inventory(inventory))
     lines.append(
-        "Inventory: providers={}, complete={}, incomplete={}".format(
-            stats.get("providers", 0),
+        "Inventory: providers_total={}, providers_in_scope={}, complete={}, incomplete={}".format(
+            providers_total,
+            providers_in_scope,
             stats.get("complete", 0),
             stats.get("incomplete", 0),
         )
@@ -540,6 +630,7 @@ def format_plan_text(report):
                 NOT_EVALUATED, data.get("reason", "")
             )
         lines.append(line)
+        lines.extend(_format_section_create_details(section, data))
     return "\n".join(lines)
 
 

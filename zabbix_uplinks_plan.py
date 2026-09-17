@@ -18,15 +18,15 @@ def main(argv=None):
     parser.add_argument(
         "-d",
         "--dry-ssh",
-        default="dry-ssh.json",
+        default=None,
         metavar="FILE",
-        help="dry-ssh.json path (default: dry-ssh.json)",
+        help="Legacy dry-ssh.json (optional; inventory-file is preferred)",
     )
     parser.add_argument(
         "--inventory-file",
         default=None,
         metavar="FILE",
-        help="Scoped inventory JSON from netbox_uplinks_inventory.py --json (skip NetBox walk)",
+        help="Scoped inventory JSON from netbox_uplinks_inventory.py --json (required unless NetBox env is set)",
     )
     parser.add_argument(
         "-o",
@@ -50,7 +50,16 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    if not os.path.isfile(args.dry_ssh):
+    if not args.inventory_file and not args.dry_ssh:
+        nb_url = os.environ.get("NETBOX_URL", "").strip()
+        nb_token = os.environ.get("NETBOX_TOKEN", "").strip()
+        if not nb_url or not nb_token:
+            print(
+                "Provide --inventory-file or set NETBOX_URL and NETBOX_TOKEN",
+                file=sys.stderr,
+            )
+            return 1
+    if args.dry_ssh and not os.path.isfile(args.dry_ssh):
         print("dry-ssh file not found: {}".format(args.dry_ssh), file=sys.stderr)
         return 1
 

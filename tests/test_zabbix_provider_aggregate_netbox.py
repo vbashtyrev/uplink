@@ -452,3 +452,223 @@ def test_run_legacy_commit_rates_missing_file_returns_error(tmp_path, monkeypatc
 def test_sanitize_provider_name():
     assert _sanitize_provider_name("Cogent/Level3") == "Cogent Level3"
     assert _sanitize_provider_name("") == ""
+
+
+def _inventory_report_for_provider_limits():
+    return {
+        "complete": [
+            {
+                "provider": "Cogent",
+                "device": "ALA-KZT-7280TR-1",
+                "interface": "Ethernet51/1",
+                "commit_rate_kbps": None,
+                "billing_model": "FlatAggCap",
+            },
+            {
+                "provider": "KZT",
+                "device": "WAW-EQX-7280QR-2",
+                "interface": "Ethernet23/1",
+                "commit_rate_kbps": None,
+                "billing_model": "FlatAggCap",
+            },
+            {
+                "provider": "Piter-IX",
+                "device": "FRN-MX-1",
+                "interface": "ae5.0",
+                "commit_rate_kbps": None,
+                "billing_model": "FlatAggCap",
+            },
+        ],
+        "incomplete": [],
+        "stats": {"complete": 3, "incomplete": 0, "providers": 3},
+    }
+
+
+def _netbox_with_provider_limits():
+    from tests.mocks.netbox_api import MockNetBox, _Filterable, _Providers, _Record
+
+    nb = MockNetBox(
+        devices=[],
+        interfaces=[],
+        cables=[],
+        terminations=[],
+        circuits=[],
+    )
+    nb.circuits.providers = _Providers(
+        [
+            _Record(name="Cogent", custom_fields={"aggregate_limit_gbps": 15}),
+            _Record(name="KZT", custom_fields={"aggregate_limit_gbps": 12}),
+            _Record(name="Piter-IX", custom_fields={"aggregate_limit_gbps": 20}),
+        ]
+    )
+    nb.dcim.interfaces = _Filterable([])
+    return nb
+
+
+def test_run_inventory_file_loads_provider_limits_from_netbox(tmp_path, monkeypatch):
+    """--inventory-file path must still read aggregate_limit_gbps from NetBox."""
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(json.dumps(_inventory_report_for_provider_limits()), encoding="utf-8")
+    desc_map = tmp_path / "description_to_name.json"
+    desc_map.write_text("{}", encoding="utf-8")
+    missing_cr = tmp_path / "missing_commit_rates.json"
+
+    host_items = {
+        "ALA-KZT-7280TR-1": "101",
+        "WAW-EQX-7280QR-2": "102",
+        "FRN-MX-1": "103",
+    }
+    items_by_host = {
+        ("ALA-KZT-7280TR-1", "ethernet51/1"): {
+            "bits_in": "net.if.in[51]",
+            "bits_out": "net.if.out[51]",
+        },
+        ("WAW-EQX-7280QR-2", "ethernet23/1"): {
+            "bits_in": "net.if.in[23]",
+            "bits_out": "net.if.out[23]",
+        },
+        ("FRN-MX-1", "ae5.0"): {
+            "bits_in": "net.if.in[ae5]",
+            "bits_out": "net.if.out[ae5]",
+        },
+    }
+
+    def fake_fetch(url, token, hostnames, debug=False):
+        h = {k: host_items[k] for k in hostnames if k in host_items}
+        i = {k: v for k, v in items_by_host.items() if k[0] in h}
+        return h, i, None
+
+    ensure_calls = []
+
+    def fake_ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, limit_bps, debug=False):
+        ensure_calls.append((provider, limit_bps))
+        return None
+
+    mocker = (
+        ZabbixRpcMocker()
+        .on("user.get", lambda p: [{"userid": "1"}])
+        .on("hostgroup.get", lambda p: [{"groupid": "2"}])
+        .on(
+            "host.get",
+            lambda p: [
+                {"hostid": host_items[h], "host": h, "name": h}
+                for h in (p.get("filter", {}).get("host") or [])
+                if h in host_items
+            ],
+        )
+        .on("host.create", lambda p: {"hostids": ["999"]})
+        .on("item.get", lambda p: [])
+        .on("item.create", lambda p: {"itemids": ["i1"]})
+        .on("item.update", lambda p: True)
+        .on("trigger.get", lambda p: [])
+        .on("trigger.create", lambda p: {"triggerids": ["t1"]})
+        .on("trigger.update", lambda p: True)
+    )
+    mocker.activate(monkeypatch)
+
+    nb = _netbox_with_provider_limits()
+    with patch("zabbix_provider_aggregate.pynetbox.api", return_value=nb):
+        monkeypatch.setenv("NETBOX_URL", "https://nb.example")
+        monkeypatch.setenv("NETBOX_TOKEN", "tok")
+        with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
+            with patch.object(agg, "_ensure_triggers", side_effect=fake_ensure_triggers):
+                done, err = agg.run(
+                    "https://z.example/api_jsonrpc.php",
+                    "token",
+                    str(missing_cr),
+                    None,
+                    str(desc_map),
+                    cache_path=None,
+                    inventory_file=str(inventory),
+                )
+
+    assert err is None
+    assert done
+    limits_by_provider = {provider: limit_bps for provider, limit_bps in ensure_calls}
+    assert limits_by_provider["Cogent"] == 15 * 1e9
+    assert limits_by_provider["KZT"] == 12 * 1e9
+    assert limits_by_provider["Piter-IX"] == 20 * 1e9
+
+
+def test_run_inventory_file_limits_read_error_skips_trigger_cleanup(tmp_path, monkeypatch):
+    """Partial provider-limit read must fail closed and skip trigger deletions."""
+    inventory = tmp_path / "inventory.json"
+    inventory.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "provider": "Cogent",
+                        "device": "ALA-KZT-7280TR-1",
+                        "interface": "Ethernet51/1",
+                        "commit_rate_kbps": None,
+                        "billing_model": "FlatAggCap",
+                    },
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    desc_map = tmp_path / "description_to_name.json"
+    desc_map.write_text("{}", encoding="utf-8")
+    missing_cr = tmp_path / "missing_commit_rates.json"
+
+    deleted = []
+
+    def fake_fetch(url, token, hostnames, debug=False):
+        return (
+            {"ALA-KZT-7280TR-1": "101"},
+            {("ALA-KZT-7280TR-1", "ethernet51/1"): {"bits_in": "net.if.in[51]", "bits_out": ""}},
+            None,
+        )
+
+    mocker = (
+        ZabbixRpcMocker()
+        .on("user.get", lambda p: [{"userid": "1"}])
+        .on("hostgroup.get", lambda p: [{"groupid": "2"}])
+        .on(
+            "host.get",
+            lambda p: [{"hostid": "101", "host": "ALA-KZT-7280TR-1", "name": "ALA-KZT-7280TR-1"}],
+        )
+        .on("host.create", lambda p: {"hostids": ["999"]})
+        .on("item.get", lambda p: [])
+        .on("item.create", lambda p: {"itemids": ["i1"]})
+        .on("item.update", lambda p: True)
+        .on(
+            "trigger.get",
+            lambda p: [{"triggerid": "old1", "description": "Provider aggregate traffic >= 90%"}]
+            if "Provider aggregate" in str(p.get("search", {}))
+            else [],
+        )
+        .on("trigger.delete", lambda p: deleted.extend(p) or True)
+    )
+    mocker.activate(monkeypatch)
+
+    nb = _netbox_with_provider_limits()
+
+    class _BrokenProviders:
+        def all(self):
+            raise RuntimeError("providers unavailable")
+
+    nb.circuits.providers = _BrokenProviders()
+
+    with patch("zabbix_provider_aggregate.pynetbox.api", return_value=nb):
+        monkeypatch.setenv("NETBOX_URL", "https://nb.example")
+        monkeypatch.setenv("NETBOX_TOKEN", "tok")
+        with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
+            done, err = agg.run(
+                "https://z.example/api_jsonrpc.php",
+                "token",
+                str(missing_cr),
+                None,
+                str(desc_map),
+                cache_path=None,
+                inventory_file=str(inventory),
+                prune_triggers_without_limits=True,
+            )
+
+    assert done
+    assert err == agg.NETBOX_READ_PARTIAL_MSG
+    assert deleted == []

@@ -27,8 +27,7 @@ ERROR_AUTH_DENIED = "auth_denied"
 ERROR_PROVIDERS_UNAVAILABLE = "providers_unavailable"
 ERROR_PARTIAL_READ = "partial_read"
 
-UPLINKS_CIRCUIT_LIFECYCLE_FIELD = "uplinks_circuit_lifecycle"
-UPLINKS_LIFECYCLE_ACTIVE = "active"
+UPLINK_CIRCUIT_TYPE = "uplink"
 
 REASON_LABELS = {
     REASON_NO_TERMINATION_A: "no side-A circuit termination",
@@ -143,58 +142,71 @@ def _provider_name(provider):
     return getattr(provider, "name", None) or ""
 
 
-def circuit_lifecycle_value(circuit):
-    """Read uplinks_circuit_lifecycle from Circuit custom fields."""
-    custom_fields = getattr(circuit, "custom_fields", None) or {}
-    if isinstance(custom_fields, dict):
-        return _normalize_choice(custom_fields.get(UPLINKS_CIRCUIT_LIFECYCLE_FIELD))
-    return None
+def _normalize_scope_token(value):
+    """Normalize circuit type name/slug (case and surrounding whitespace)."""
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().lower().split())
 
 
-def circuit_matches_scope(circuit, circuit_scope):
-    """True when circuit_scope is unset or the circuit matches tag/lifecycle filters (fail-closed)."""
+def _circuit_type_tokens(circuit, nb=None, stats=None):
+    """Normalized name/slug tokens for circuit.type (fail-closed when type is missing)."""
+    tokens = set()
+    type_obj = getattr(circuit, "type", None)
+    if type_obj is None:
+        type_id = getattr(circuit, "type_id", None)
+        if type_id is not None and nb is not None:
+            try:
+                type_obj = nb.circuits.circuit_types.get(type_id)
+            except Exception as e:
+                _raise_if_netbox_auth(e)
+                _bump_read_error(stats)
+                type_obj = None
+    if isinstance(type_obj, dict):
+        for key in ("name", "slug", "label", "value"):
+            val = type_obj.get(key)
+            if val:
+                tokens.add(_normalize_scope_token(val))
+    elif type_obj is not None:
+        for attr in ("name", "slug"):
+            val = getattr(type_obj, attr, None)
+            if val:
+                tokens.add(_normalize_scope_token(val))
+        choice = _normalize_choice(type_obj)
+        if choice:
+            tokens.add(_normalize_scope_token(choice))
+    return tokens
+
+
+def circuit_matches_scope(circuit, circuit_scope, nb=None, stats=None):
+    """True when circuit_scope is unset or the circuit matches type filters (fail-closed)."""
     if not circuit_scope:
         return True
-    monitor_tag = circuit_scope.get("monitor_tag")
-    if monitor_tag and not _record_has_tag(circuit, monitor_tag):
-        return False
-    lifecycle = circuit_scope.get("lifecycle")
-    if lifecycle is not None:
-        circuit_lifecycle = circuit_lifecycle_value(circuit)
-        expected = str(lifecycle).strip().lower()
-        actual = str(circuit_lifecycle or "").strip().lower()
-        if not actual or actual != expected:
+    circuit_type = circuit_scope.get("circuit_type")
+    if circuit_type is not None:
+        expected = _normalize_scope_token(circuit_type)
+        tokens = _circuit_type_tokens(circuit, nb=nb, stats=stats)
+        if not tokens or expected not in tokens:
             return False
     return True
 
 
-def project_circuit_scope(monitor_tag=None, lifecycle=None):
-    """Project monitoring scope: circuit tag + active uplinks_circuit_lifecycle."""
-    if monitor_tag is None:
-        try:
-            from uplinks_config import NETBOX_MONITOR_TAG as _default_tag
-        except ImportError:
-            _default_tag = "uplinks"
-        monitor_tag = _default_tag
-    if lifecycle is None:
-        lifecycle = UPLINKS_LIFECYCLE_ACTIVE
-    return {"monitor_tag": monitor_tag, "lifecycle": lifecycle}
-
-
-def _resolve_monitor_tag(monitor_tag=None):
-    tag = monitor_tag
-    if tag is None:
-        try:
-            from uplinks_config import NETBOX_MONITOR_TAG as _default_tag
-        except ImportError:
-            _default_tag = None
-        tag = _default_tag
-    return tag
+def project_circuit_scope(circuit_type=None):
+    """Project monitoring scope: Circuit type Uplink (name/slug) + built-in status Active."""
+    if circuit_type is None:
+        circuit_type = UPLINK_CIRCUIT_TYPE
+    return {"circuit_type": circuit_type}
 
 
 def _bump_read_error(stats):
     if stats is not None:
-        stats["read_errors"] += 1
+        stats["read_errors"] = stats.get("read_errors", 0) + 1
+
+
+def finalize_inventory_read_stats(stats):
+    """Set stats.error=partial_read when read_errors occurred (fail-closed gate)."""
+    if stats is not None and stats.get("read_errors", 0) > 0 and "error" not in stats:
+        stats["error"] = ERROR_PARTIAL_READ
 
 
 def _resolve_provider(nb, circuit, stats=None):
@@ -627,8 +639,8 @@ def collect_uplink_inventory(nb, tag="border", debug=False, active_only=True, ci
     """
     Walk providers -> circuits -> side-A termination -> cable -> interface -> border device.
 
-    When circuit_scope is set (e.g. monitor tag + uplinks_circuit_lifecycle=active), only matching
-    circuits are walked; out-of-scope circuits are omitted from complete/incomplete.
+    When circuit_scope is set (e.g. circuit type Uplink), only matching circuits are walked;
+    out-of-scope circuits are omitted from complete/incomplete.
 
     Return dict with keys:
       complete: structurally valid border uplinks (may include warnings)
@@ -713,7 +725,9 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, circuit_scope, r
 
         for circuit in circuits:
             stats["circuits_seen"] += 1
-            if circuit_scope and not circuit_matches_scope(circuit, circuit_scope):
+            if circuit_scope and not circuit_matches_scope(
+                circuit, circuit_scope, nb=nb, stats=stats
+            ):
                 continue
             stats["circuits_in_scope"] += 1
             circuit_provider = _resolve_provider(nb, circuit, stats)
@@ -844,9 +858,9 @@ def _collect_uplink_inventory_body(nb, tag, debug, active_only, circuit_scope, r
             )
             stats["complete"] += 1
 
-    if stats["read_errors"] > 0 and "error" not in stats:
-        stats["error"] = ERROR_PARTIAL_READ
     result["stats"] = stats
+    enrich_inventory_provider_stats(result)
+    finalize_inventory_read_stats(stats)
     if debug:
         print(
             "Inventory: providers={}, circuits_seen={}, active={}, complete={}, incomplete={}".format(
@@ -880,16 +894,12 @@ def netbox_client_from_env(debug=False):
 
 
 def resolve_border_device_tag(tag=None):
-    """Border device tag from argument/env; monitor tag is not a device tag."""
+    """Return the NetBox tag used to identify border devices."""
     if tag is None:
         resolved = os.environ.get("NETBOX_TAG") or "border"
     else:
         resolved = tag
-    resolved = (resolved or "border").strip() or "border"
-    monitor_tag = _resolve_monitor_tag()
-    if monitor_tag and resolved == monitor_tag:
-        return "border"
-    return resolved
+    return (resolved or "border").strip() or "border"
 
 
 def netbox_border_tag():
@@ -904,6 +914,14 @@ def providers_from_complete_inventory(report):
         if provider:
             names.add(provider)
     return names
+
+
+def enrich_inventory_provider_stats(report):
+    """Add providers_in_scope to stats from complete inventory rows."""
+    stats = report.get("stats")
+    if stats is None:
+        return
+    stats["providers_in_scope"] = len(providers_from_complete_inventory(report))
 
 
 def device_names_from_complete_inventory(report):
@@ -1058,6 +1076,179 @@ def collect_provider_limits_gbps(nb, debug=False):
     return limits, None
 
 
+def load_inventory_report(path):
+    """Load inventory JSON report written by netbox_uplinks_inventory.py --json."""
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def collect_netbox_interface_relations(nb, device_names, debug=False, stats=None):
+    """
+    Read lag/parent relations from NetBox dcim.interface for scoped devices.
+    Return dict with member_to_aggregate and parent_children (normalized keys).
+    """
+    relations = {
+        "member_to_aggregate": {},
+        "parent_children": {},
+        "display_names": {},
+    }
+    if not device_names:
+        return relations
+    for dev_name in sorted(device_names):
+        try:
+            ifaces = list(nb.dcim.interfaces.filter(device=dev_name))
+        except Exception as e:
+            _raise_if_netbox_auth(e)
+            _bump_read_error(stats)
+            if debug:
+                print(
+                    "dcim.interfaces.filter(device={}): {}".format(dev_name, e),
+                    file=sys.stderr,
+                )
+            continue
+        for iface in ifaces:
+            name = (getattr(iface, "name", None) or "").strip()
+            if not name:
+                continue
+            name_norm = _normalize_iface_name(name)
+            relations["display_names"][(dev_name, name_norm)] = name
+            lag = getattr(iface, "lag", None)
+            if lag is not None:
+                lag_name = (getattr(lag, "name", None) or "").strip()
+                if lag_name:
+                    lag_norm = _normalize_iface_name(lag_name)
+                    relations["member_to_aggregate"][(dev_name, name_norm)] = lag_norm
+                    relations["display_names"].setdefault((dev_name, lag_norm), lag_name)
+            parent = getattr(iface, "parent", None)
+            if parent is not None:
+                parent_name = (getattr(parent, "name", None) or "").strip()
+                if parent_name:
+                    parent_norm = _normalize_iface_name(parent_name)
+                    relations["parent_children"].setdefault((dev_name, parent_norm), set()).add(
+                        name_norm
+                    )
+                    relations["display_names"].setdefault((dev_name, parent_norm), parent_name)
+    finalize_inventory_read_stats(stats)
+    if debug and relations["member_to_aggregate"]:
+        print(
+            "NetBox interface relations: {} lag members".format(
+                len(relations["member_to_aggregate"])
+            ),
+            file=sys.stderr,
+        )
+    return relations
+
+
+def _inventory_alias_ifaces_netbox(dev_name, inv_iface, netbox_relations):
+    """Expand inventory iface aliases using NetBox lag/parent relations."""
+    inv_norm = _normalize_iface_name(inv_iface)
+    aliases = {inv_norm}
+    member_to_aggregate = (netbox_relations or {}).get("member_to_aggregate") or {}
+    parent_children = (netbox_relations or {}).get("parent_children") or {}
+    aggregate = member_to_aggregate.get((dev_name, inv_norm))
+    if aggregate:
+        aliases.add(aggregate)
+    for anchor in list(aliases):
+        anchor_norm = _normalize_iface_name(anchor)
+        children = parent_children.get((dev_name, anchor_norm), set())
+        if not children:
+            continue
+        picked = _pick_zabbix_iface_from_aliases(children)
+        if picked:
+            aliases.add(_normalize_iface_name(picked))
+    return aliases
+
+
+def expand_provider_map_for_netbox(inventory_map, netbox_relations, debug=False):
+    """Map inventory interfaces to related NetBox names (LAG/logical units)."""
+    result = {}
+    substituted = []
+    for (dev_name, inv_iface), provider in inventory_map.items():
+        if not dev_name or not inv_iface or not provider:
+            continue
+        inv_iface_norm = _normalize_iface_name(inv_iface)
+        alias_ifaces = _inventory_alias_ifaces_netbox(dev_name, inv_iface_norm, netbox_relations)
+        for alias in alias_ifaces:
+            key = _normalize_map_key(dev_name, alias)
+            if key not in result:
+                result[key] = provider
+            if debug and alias != inv_iface_norm:
+                substituted.append((dev_name, inv_iface_norm, alias, provider))
+    if debug and substituted:
+        for dev_name, inv_iface, logical, provider in substituted:
+            print(
+                "NetBox provider map (relations): {} {} -> {} ({})".format(
+                    dev_name, inv_iface, logical, provider
+                ),
+                file=sys.stderr,
+            )
+    return result
+
+
+def map_commit_rates_to_zabbix_ifaces(
+    commit_rates, netbox_relations=None, dry_ssh_devices=None, debug=False
+):
+    """Map inventory (device, physical iface) commit rates to Zabbix-facing interface names."""
+    result = {}
+    substituted = []
+    for (dev_name, iface_name), bps in (commit_rates or {}).items():
+        zabbix_iface = _zabbix_iface_from_inventory_iface(
+            dev_name,
+            iface_name,
+            dry_ssh_devices=dry_ssh_devices,
+            netbox_relations=netbox_relations,
+        )
+        if not zabbix_iface:
+            continue
+        result[(dev_name, zabbix_iface)] = bps
+        if _normalize_iface_name(zabbix_iface) != _normalize_iface_name(iface_name):
+            substituted.append((dev_name, iface_name, zabbix_iface))
+    if debug and substituted:
+        for dev_name, inv_iface, zabbix_iface in substituted:
+            print(
+                "Commit rate for Zabbix: {} {} -> {}".format(
+                    dev_name, inv_iface, zabbix_iface
+                ),
+                file=sys.stderr,
+            )
+    return result
+
+
+def scoped_devices_from_inventory_report(report, expanded_provider_map=None):
+    """
+    Build dry-ssh-like devices dict from complete inventory rows.
+    When expanded_provider_map is set, include alias interfaces (e.g. ae5.0).
+    """
+    devices = {}
+    display_by_norm = {}
+    for row in report.get("complete") or []:
+        dev = (row.get("device") or "").strip()
+        iface = (row.get("interface") or "").strip()
+        if not dev or not iface:
+            continue
+        iface_norm = _normalize_iface_name(iface)
+        display_by_norm[(dev, iface_norm)] = iface
+        devices.setdefault(dev, [])
+        if not any(_normalize_iface_name(e.get("name")) == iface_norm for e in devices[dev]):
+            devices[dev].append({"name": iface})
+
+    if expanded_provider_map:
+        for (dev, iface_norm), _provider in expanded_provider_map.items():
+            if not dev or not iface_norm:
+                continue
+            display = display_by_norm.get((dev, iface_norm)) or iface_norm
+            devices.setdefault(dev, [])
+            if any(_normalize_iface_name(e.get("name")) == iface_norm for e in devices[dev]):
+                continue
+            entry = {"name": display}
+            if "." in display and display.lower().startswith("ae"):
+                entry["isLogical"] = True
+            elif display.lower().startswith("ae") and "." not in display:
+                entry["isLag"] = True
+            devices[dev].append(entry)
+    return devices
+
+
 def _pick_zabbix_iface_from_aliases(aliases):
     """Pick Zabbix-facing interface name from inventory/dry-ssh alias set."""
     if not aliases:
@@ -1066,9 +1257,10 @@ def _pick_zabbix_iface_from_aliases(aliases):
     for name in with_dot:
         if name.endswith(".0"):
             return name
-    if with_dot:
-        return with_dot[0]
-    return sorted(aliases)[0]
+    without_dot = sorted(name for name in aliases if "." not in name)
+    if without_dot:
+        return without_dot[0]
+    return None
 
 
 def _dry_ssh_display_name(dev_name, normalized_iface, dry_ssh_devices):
@@ -1084,10 +1276,30 @@ def _dry_ssh_display_name(dev_name, normalized_iface, dry_ssh_devices):
     return normalized_iface
 
 
-def _zabbix_iface_from_inventory_iface(dev_name, inv_iface, dry_ssh_devices):
-    """Map inventory cable interface to Zabbix macro/trigger name via dry-ssh."""
+def _zabbix_iface_display_name(dev_name, iface_norm, netbox_relations=None, dry_ssh_devices=None):
+    """Resolve normalized iface name to display casing from NetBox or dry-ssh."""
+    if netbox_relations:
+        display = (netbox_relations.get("display_names") or {}).get((dev_name, iface_norm))
+        if display:
+            return display
+    return _dry_ssh_display_name(dev_name, iface_norm, dry_ssh_devices)
+
+
+def _zabbix_iface_from_inventory_iface(
+    dev_name, inv_iface, dry_ssh_devices=None, netbox_relations=None
+):
+    """Map inventory cable interface to Zabbix macro/trigger name via NetBox or dry-ssh."""
     if not dev_name or not inv_iface:
         return None
+    inv_norm = _normalize_iface_name(inv_iface)
+    if netbox_relations:
+        aliases = _inventory_alias_ifaces_netbox(dev_name, inv_norm, netbox_relations)
+        zabbix_norm = _pick_zabbix_iface_from_aliases(aliases)
+        if zabbix_norm:
+            return _zabbix_iface_display_name(
+                dev_name, zabbix_norm, netbox_relations=netbox_relations, dry_ssh_devices=dry_ssh_devices
+            )
+        return (inv_iface or "").strip() or None
     if not dry_ssh_devices:
         return (inv_iface or "").strip() or None
     phys_to_logical = _build_physical_to_logical_normalized(dry_ssh_devices)
@@ -1104,14 +1316,21 @@ def _zabbix_iface_from_inventory_iface(dev_name, inv_iface, dry_ssh_devices):
     return _dry_ssh_display_name(dev_name, zabbix_norm, dry_ssh_devices)
 
 
-def expand_burst_pairs_for_zabbix(pairs, dry_ssh_devices, debug=False):
+def expand_burst_pairs_for_zabbix(
+    pairs, dry_ssh_devices=None, netbox_relations=None, debug=False
+):
     """Map inventory (device, iface) Burst pairs to Zabbix logical interface names."""
-    if not dry_ssh_devices:
+    if not dry_ssh_devices and not netbox_relations:
         return set(pairs)
     expanded = set()
     substituted = []
     for dev_name, inv_iface in pairs:
-        zabbix_iface = _zabbix_iface_from_inventory_iface(dev_name, inv_iface, dry_ssh_devices)
+        zabbix_iface = _zabbix_iface_from_inventory_iface(
+            dev_name,
+            inv_iface,
+            dry_ssh_devices=dry_ssh_devices,
+            netbox_relations=netbox_relations,
+        )
         if not zabbix_iface:
             continue
         expanded.add((dev_name, zabbix_iface))
@@ -1128,14 +1347,21 @@ def expand_burst_pairs_for_zabbix(pairs, dry_ssh_devices, debug=False):
     return expanded
 
 
-def expand_burst_metadata_for_zabbix(meta, dry_ssh_devices, debug=False):
+def expand_burst_metadata_for_zabbix(
+    meta, dry_ssh_devices=None, netbox_relations=None, debug=False
+):
     """Map inventory Burst metadata keys to Zabbix logical interface names."""
-    if not dry_ssh_devices:
+    if not dry_ssh_devices and not netbox_relations:
         return dict(meta)
     expanded = {}
     substituted = []
     for (dev_name, inv_iface), burst_meta in meta.items():
-        zabbix_iface = _zabbix_iface_from_inventory_iface(dev_name, inv_iface, dry_ssh_devices)
+        zabbix_iface = _zabbix_iface_from_inventory_iface(
+            dev_name,
+            inv_iface,
+            dry_ssh_devices=dry_ssh_devices,
+            netbox_relations=netbox_relations,
+        )
         if not zabbix_iface:
             continue
         expanded[(dev_name, zabbix_iface)] = burst_meta
@@ -1258,7 +1484,9 @@ def expand_provider_map_for_zabbix(inventory_map, dry_ssh_devices, debug=False):
     return result
 
 
-def device_iface_provider_map_from_inventory(report, dry_ssh_devices=None, debug=False):
+def device_iface_provider_map_from_inventory(
+    report, dry_ssh_devices=None, netbox_relations=None, debug=False
+):
     """Build (device, interface) -> provider from complete inventory rows."""
     inventory_map = {}
     for row in report.get("complete") or []:
@@ -1267,6 +1495,8 @@ def device_iface_provider_map_from_inventory(report, dry_ssh_devices=None, debug
         provider = (row.get("provider") or "").strip()
         if device_name and iface_name and provider:
             inventory_map[_normalize_map_key(device_name, iface_name)] = provider
+    if netbox_relations is not None:
+        return expand_provider_map_for_netbox(inventory_map, netbox_relations, debug=debug)
     if dry_ssh_devices is not None:
         return expand_provider_map_for_zabbix(inventory_map, dry_ssh_devices, debug=debug)
     return inventory_map
@@ -1341,14 +1571,18 @@ def arm_netbox_incomplete_guard(stats):
 
 
 def load_uplink_provider_context(
-    dry_ssh_devices, debug=False, border_tag=None, circuit_scope=True
+    dry_ssh_devices=None,
+    debug=False,
+    border_tag=None,
+    circuit_scope=True,
+    inventory_report=None,
 ):
     """
     Read-only NetBox uplink provider context for map/dashboard/aggregate.
     Return dict with device_iface_to_provider, providers (set), stats, read_error; or None
     when NetBox is not configured.
 
-    Uses project circuit scope (monitor tag + active lifecycle) by default.
+    Uses project circuit scope (Circuit type Uplink + status Active) by default.
     Pass circuit_scope=None to audit all circuits.
     """
     nb = netbox_client_from_env(debug=debug)
@@ -1357,10 +1591,18 @@ def load_uplink_provider_context(
 
     scope = project_circuit_scope() if circuit_scope is True else circuit_scope
     tag = border_tag if border_tag is not None else netbox_border_tag()
-    report = collect_uplink_inventory(
-        nb, tag=tag, debug=debug, active_only=True, circuit_scope=scope
+    if inventory_report is not None:
+        report = inventory_report
+    else:
+        report = collect_uplink_inventory(
+            nb, tag=tag, debug=debug, active_only=True, circuit_scope=scope
+        )
+    device_names = device_names_from_complete_inventory(report)
+    netbox_relations = collect_netbox_interface_relations(
+        nb, device_names, debug=debug, stats=report.get("stats")
     )
     stats = report.get("stats") or {}
+    finalize_inventory_read_stats(stats)
     error = stats.get("error")
     read_error = inventory_read_failed(report)
     if error == ERROR_AUTH_DENIED:
@@ -1385,9 +1627,14 @@ def load_uplink_provider_context(
 
     return {
         "device_iface_to_provider": device_iface_provider_map_from_inventory(
-            report, dry_ssh_devices, debug=debug
+            report,
+            dry_ssh_devices=dry_ssh_devices,
+            netbox_relations=netbox_relations,
+            debug=debug,
         ),
         "providers": providers_from_complete_inventory(report),
+        "netbox_interface_relations": netbox_relations,
+        "inventory_report": report,
         "stats": stats,
         "read_error": read_error,
     }

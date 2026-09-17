@@ -27,14 +27,13 @@ def _plan_ns(**overrides):
         timeout=60,
         env_file="urls.env",
         no_env_file=True,
+        netbox_checks=False,
     )
     base.update(overrides)
     return full.argparse.Namespace(**base)
 
 
 def _setup_tmp(monkeypatch, tmp_path):
-    dry = tmp_path / "dry-ssh.json"
-    dry.write_text((FIXTURES / "dry_ssh_minimal.json").read_text(encoding="utf-8"), encoding="utf-8")
     (tmp_path / "commit_rates.json").write_text("{}", encoding="utf-8")
     (tmp_path / "description_to_name.json").write_text("{}", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
@@ -44,7 +43,6 @@ def _setup_tmp(monkeypatch, tmp_path):
     monkeypatch.setattr(full, "DEFAULT_COMMIT_RATES", "commit_rates.json")
     monkeypatch.setattr(full, "DEFAULT_DESC_MAP", "description_to_name.json")
     monkeypatch.setattr(full, "DEFAULT_NETBOX_INVENTORY", "netbox_inventory.json")
-    return dry
 
 
 def test_plan_success_no_mutating_zabbix_scripts(monkeypatch, tmp_path):
@@ -75,6 +73,7 @@ def test_plan_success_no_mutating_zabbix_scripts(monkeypatch, tmp_path):
 
     scripts = [c[1] for c in calls if len(c) > 1]
     assert "uplinks_stats.py" not in scripts
+    assert "netbox_checks.py" not in scripts
     mutating_zabbix_scripts = frozenset(
         {
             "zabbix_sync_commit_rate.py",
@@ -88,16 +87,9 @@ def test_plan_success_no_mutating_zabbix_scripts(monkeypatch, tmp_path):
         assert mut not in scripts
     assert scripts.count("zabbix_uplinks_plan.py") == 1
 
-    netbox_checks = next(c for c in calls if c[1] == "netbox_checks.py")
-    assert "--no-tx-power" in netbox_checks
-    assert "--scope-to-file" in netbox_checks
-    assert "--apply" not in netbox_checks
-    assert "--existing-only" in netbox_checks
-
     plan = next(c for c in calls if c[1] == "zabbix_uplinks_plan.py")
-    assert plan[2:4] == ["-d", "dry-ssh.json"]
     assert "--inventory-file" in plan
-    assert "-f" not in plan
+    assert "-d" not in plan
     assert "--create-link-triggers" in plan
 
     inventory_calls = [c for c in calls if c[1] == "netbox_uplinks_inventory.py"]
@@ -146,39 +138,6 @@ def test_plan_rejects_auto_before_work(monkeypatch, tmp_path):
         full.main()
     assert exc.value.code == 2
     assert calls == []
-
-
-def test_plan_rejects_from_file_auto_before_work(monkeypatch, tmp_path):
-    _setup_tmp(monkeypatch, tmp_path)
-    calls = []
-
-    def fake_run_cmd(*args, **kwargs):
-        calls.append(args)
-        return True, "", ""
-
-    monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
-    monkeypatch.setattr(
-        full.argparse.ArgumentParser,
-        "parse_args",
-        lambda self: _plan_ns(auto=True, from_file=True, no_fetch=True),
-    )
-    with pytest.raises(SystemExit) as exc:
-        full.main()
-    assert exc.value.code == 2
-    assert calls == []
-
-
-def test_plan_requires_from_file(monkeypatch, tmp_path):
-    _setup_tmp(monkeypatch, tmp_path)
-    monkeypatch.setattr(full, "run_cmd", lambda *a, **k: (True, "", ""))
-    monkeypatch.setattr(
-        full.argparse.ArgumentParser,
-        "parse_args",
-        lambda self: _plan_ns(no_fetch=False, from_file=False),
-    )
-    with pytest.raises(SystemExit) as exc:
-        full.main()
-    assert exc.value.code == 2
 
 
 def test_plan_fails_on_incomplete_inventory(monkeypatch, tmp_path):

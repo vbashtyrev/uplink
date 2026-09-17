@@ -64,10 +64,6 @@ UPLINK_VRF_NAME = "internet"
 # Not used to select what is monitored; only for legacy cleanup.
 NETBOX_AUTOMATION_TAG = TRIGGER_TAG_VALUE
 
-# NetBox Circuit tag that defines the monitoring scope
-# (inventory, sync, aggregate, map, dashboard).
-NETBOX_MONITOR_TAG = "uplinks"
-
 # Shared target SLA for all providers when Provider has no slo_percent in NetBox.
 PROJECT_PROVIDER_SLO_PERCENT = 99.95
 

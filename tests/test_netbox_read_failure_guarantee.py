@@ -121,6 +121,16 @@ def _healthy_inventory_report():
     }
 
 
+def _burst_partial_inventory_report():
+    report = _partial_inventory_report()
+    report["complete"][0]["billing_model"] = "Burst"
+    return report
+
+
+def _trigger_writes(mocker):
+    return [m for m in _method_names(mocker) if m in ("trigger.create", "trigger.update")]
+
+
 def _host_get_alakzt():
     def host_get(params):
         filt = params.get("filter") or {}
@@ -811,6 +821,116 @@ def test_map_default_create_skips_writes_on_read_failure(
 # ---------------------------------------------------------------------------
 # Layer 3 — positive controls on healthy NetBox reads
 # ---------------------------------------------------------------------------
+
+
+def test_sync_partial_read_blocks_util_trigger_writes(
+    monkeypatch, zabbix_env, netbox_env, tmp_path
+):
+    """Partial NetBox read must not create/update utilization triggers."""
+    import zabbix_sync_commit_rate as mod
+
+    failure_report = _partial_inventory_report()
+    cr = tmp_path / "commit_rates.json"
+    cr.write_text("{}", encoding="utf-8")
+    mocker = _build_guarantee_mocker(
+        hosts=[{"hostid": HOST_ID, "host": HOST, "name": HOST}],
+        items=_items_alakzt(),
+    ).activate(monkeypatch)
+    _disarm_guard(monkeypatch, mod)
+
+    monkeypatch.setattr(mod, "validate_zabbix_token", lambda *a, **k: True)
+    monkeypatch.setattr(mod.pynetbox, "api", lambda url, token: MagicMock())
+    monkeypatch.setattr(mod, "fetch_uplink_inventory_report", lambda *a, **k: failure_report)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["zabbix_sync_commit_rate.py", "-d", str(DRY_SSH), "-f", str(cr)],
+    )
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 1
+    assert _trigger_writes(mocker) == []
+
+
+def test_sync_partial_read_blocks_burst_trigger_writes(
+    monkeypatch, zabbix_env, netbox_env, tmp_path
+):
+    """Partial NetBox read must not create/update Burst link triggers."""
+    import zabbix_sync_commit_rate as mod
+
+    failure_report = _burst_partial_inventory_report()
+    cr = tmp_path / "commit_rates.json"
+    cr.write_text("{}", encoding="utf-8")
+    mocker = _build_guarantee_mocker(
+        hosts=[{"hostid": HOST_ID, "host": HOST, "name": HOST}],
+        items=_items_alakzt(),
+    ).activate(monkeypatch)
+    _disarm_guard(monkeypatch, mod)
+
+    monkeypatch.setattr(mod, "validate_zabbix_token", lambda *a, **k: True)
+    monkeypatch.setattr(mod.pynetbox, "api", lambda url, token: MagicMock())
+    monkeypatch.setattr(mod, "fetch_uplink_inventory_report", lambda *a, **k: failure_report)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "zabbix_sync_commit_rate.py",
+            "-d",
+            str(DRY_SSH),
+            "-f",
+            str(cr),
+            "--create-link-triggers",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 1
+    assert _trigger_writes(mocker) == []
+
+
+def test_sync_skip_blocks_macro_delete_on_relations_read_failure(
+    monkeypatch, zabbix_env, netbox_env, tmp_path
+):
+    """Relations read_errors must arm fail-closed gate before macro replacement."""
+    import zabbix_sync_commit_rate as mod
+
+    nb = build_netbox_for_commit_rates(
+        device_name=HOST,
+        iface_name="Ethernet51/1",
+        device_tag="border",
+        provider_name="Cogent",
+    )
+    inv_report = _healthy_inventory_report()
+    inv_path = tmp_path / "inventory.json"
+    inv_path.write_text(json.dumps(inv_report), encoding="utf-8")
+
+    def fail_interfaces_filter(**kwargs):
+        raise RuntimeError("dcim.interfaces.filter unavailable")
+
+    nb.dcim.interfaces.filter = fail_interfaces_filter
+
+    mocker = _build_guarantee_mocker(
+        hosts=[{"hostid": HOST_ID, "host": HOST, "name": HOST}],
+        items=_items_alakzt(),
+    ).activate(monkeypatch)
+    _disarm_guard(monkeypatch, mod)
+
+    monkeypatch.setattr(mod, "validate_zabbix_token", lambda *a, **k: True)
+    monkeypatch.setattr(mod.pynetbox, "api", lambda url, token: nb)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "zabbix_sync_commit_rate.py",
+            "--inventory-file",
+            str(inv_path),
+            "--no-util-triggers",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 1
+    assert "usermacro.delete" not in _method_names(mocker)
 
 
 def test_positive_sync_deletes_stale_bps_macros(monkeypatch, zabbix_env, netbox_env, tmp_path):

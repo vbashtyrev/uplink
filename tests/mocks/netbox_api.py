@@ -109,15 +109,9 @@ class MockNetBox:
         self.circuits = _Circuits(terminations, circuits)
 
 
-def add_project_circuit_scope(circuit, monitor_tag="uplinks", lifecycle="active"):
-    """Tag circuit for project monitoring scope (tag + uplinks_circuit_lifecycle)."""
-    circuit.tag = monitor_tag
-    custom_fields = getattr(circuit, "custom_fields", None) or {}
-    if not isinstance(custom_fields, dict):
-        custom_fields = {}
-    custom_fields = dict(custom_fields)
-    custom_fields["uplinks_circuit_lifecycle"] = lifecycle
-    circuit.custom_fields = custom_fields
+def add_project_circuit_scope(circuit, circuit_type_name="Uplink", circuit_type_slug="uplink"):
+    """Mark circuit in project monitoring scope (Circuit type Uplink)."""
+    circuit.type = _Record(name=circuit_type_name, slug=circuit_type_slug)
     return circuit
 
 
@@ -182,6 +176,7 @@ def build_netbox_for_commit_rates(
         commit_rate=commit_rate_kbps,
         status=circuit_status,
         custom_fields=circuit_custom_fields or {},
+        type=_Record(name="Uplink", slug="uplink"),
     )
     ct = _Record(
         id=ct_id,
