@@ -365,6 +365,7 @@ def test_main_inventory_unavailable_excludes_fiord(monkeypatch, zabbix_env, tmp_
         "argv",
         [
             "zabbix_uplinks_dashboard.py",
+            "--legacy-dry-ssh",
             "-f",
             str(dry),
             "-m",

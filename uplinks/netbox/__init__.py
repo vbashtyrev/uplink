@@ -1,1 +1,1 @@
-"""NetBox automation: interface checks, circuits, cleanup."""
+"""NetBox inventory and manual interface checks."""

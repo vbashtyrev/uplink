@@ -16,7 +16,6 @@ def test_main_with_netbox_checks_flag(monkeypatch, tmp_path):
     monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
     monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
     monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
-    monkeypatch.setattr(full, "DEFAULT_COMMIT_RATES", "commit_rates.json")
     monkeypatch.setattr(full, "DEFAULT_NETBOX_INVENTORY", "netbox_inventory.json")
 
     steps = []
@@ -41,16 +40,10 @@ def test_main_with_netbox_checks_flag(monkeypatch, tmp_path):
         full.argparse.ArgumentParser,
         "parse_args",
         lambda self: full.argparse.Namespace(
-            auto=False,
             plan=False,
-            no_fetch=True,
-            from_file=True,
-            refresh=False,
             dry_ssh="dry-ssh.json",
-            commit_rates="commit_rates.json",
             no_netbox_apply=False,
             no_burst_triggers=False,
-            location=None,
             stop_on_error=False,
             no_stop_on_error=True,
             report=None,

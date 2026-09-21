@@ -11,7 +11,8 @@
 ## NetBox
 
 - [ ] ~~**Tenancy для circuits**~~ — отложено (по необходимости)
-- [x] Пакетная структура: `netbox_checks`, `netbox_create_circuits` → `uplinks/netbox/`
+- [x] Пакетная структура: ручная проверка NetBox (`netbox_checks`) находится
+  в `uplinks/netbox/`; автоматическое создание Circuit и Cable удалено
 
 ## Общие данные
 
@@ -31,3 +32,12 @@
 
 - [ ] Решить судьбу экспериментов MapGL / business charts (были в ветке `feature/grafana-uplinks`, не влиты в main)
 - [x] `grafana_uplinks_graph.py` вне `run_uplinks_full.py` — осознанно; см. COMMANDS.md / README
+
+## Завершённая миграция NetBox-only
+
+- [x] Удалён режим `run_uplinks_full.py --auto`.
+- [x] Удалены генерация `commit_rates.json`, автоматическое создание Circuit
+  и Cable, а также NetBox cleanup.
+- [x] Полный запуск использует только inventory из NetBox.
+- [x] Сбор данных по SSH и сверка интерфейсов остаются отдельными ручными
+  инструментами и не входят в рабочий запуск.

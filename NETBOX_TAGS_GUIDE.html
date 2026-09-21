@@ -63,25 +63,24 @@
   <ol>
     <li>Создать или найти Provider.</li>
     <li>Создать Circuit со статусом <code>Active</code>.</li>
-    <li>Добавить тег <code>uplinks</code>.</li>
-    <li>Заполнить <code>uplinks_circuit_lifecycle=active</code>, <code>billing_model</code> и скорость.</li>
+    <li>Выбрать тип Circuit <code>Uplink</code> и статус <code>Active</code>.</li>
+    <li>Заполнить <code>billing_model</code> и скорость, если они нужны для расчётов.</li>
     <li>Создать терминацию стороны A и проложить кабель до интерфейса устройства.</li>
     <li>Проверить, что конечное устройство имеет тег <code>border</code>.</li>
   </ol>
   <p>После этого проверить цепочку без изменений:</p>
   <pre>python netbox_uplinks_inventory.py --json --dry-run &gt; netbox_inventory.json</pre>
-  <p><b>Не используйте <code>--auto</code></b> для обычного добавления канала.</p>
+  <p>Автоматическое создание Circuit и Cable удалено. Создавайте эти объекты вручную в NetBox.</p>
 
   <h2>7. Как убрать канал из мониторинга</h2>
-  <p>Рекомендуемый способ:</p>
-  <pre>uplinks_circuit_lifecycle = review</pre>
-  <p>Также можно снять тег <code>uplinks</code>. Удалять Circuit или кабель для обычного отключения мониторинга не нужно.</p>
+  <p>Измените встроенный статус Circuit с <code>Active</code> на другой статус,
+  например <code>Offline</code> или <code>Decommissioned</code>. Удалять Circuit
+  или кабель для отключения мониторинга не нужно.</p>
 
   <h2>8. Имена тегов в настройках</h2>
-  <pre>NETBOX_MONITOR_TAG=uplinks
-NETBOX_TAG=border
-NETBOX_AUTOMATION_TAG=automatization</pre>
-  <p class="small"><code>NETBOX_MONITOR_TAG</code> — тег Circuit для мониторинга. <code>NETBOX_TAG</code> — тег конечного устройства. <code>NETBOX_AUTOMATION_TAG</code> — старый служебный тег автоматического режима.</p>
+  <pre>NETBOX_TAG=border</pre>
+  <p class="small"><code>NETBOX_TAG</code> — тег конечного устройства, до которого
+  должна доходить кабельная цепочка Circuit.</p>
 
   <h2>Источники</h2>
   <p class="small">NetBox Documentation: Tags — https://netbox.readthedocs.io/en/stable/models/extras/tag/<br>

@@ -16,7 +16,9 @@ from uplinks.netbox.inventory import (
     device_names_from_complete_inventory,
     enrich_inventory_provider_stats,
     finalize_inventory_read_stats,
+    load_inventory_report,
     map_commit_rates_to_zabbix_ifaces,
+    netbox_interface_relations_from_report,
     project_circuit_scope,
     providers_from_complete_inventory,
     resolve_border_device_tag,
@@ -385,8 +387,7 @@ def build_zabbix_plan(
 
     if inventory_file:
         try:
-            with open(inventory_file, "r", encoding="utf-8") as f:
-                inventory_report = json.load(f)
+            inventory_report = load_inventory_report(inventory_file)
         except (OSError, json.JSONDecodeError) as e:
             return None, "failed to read inventory file {}: {}".format(inventory_file, e)
     else:
@@ -403,35 +404,36 @@ def build_zabbix_plan(
 
         inventory_report = collect_scoped_inventory(nb, tag, debug=debug)
 
-    netbox_relations = None
+    netbox_relations = netbox_interface_relations_from_report(inventory_report)
     nb_for_relations = None
-    if inventory_file:
-        nb_url = os.environ.get("NETBOX_URL", "").strip()
-        nb_token = os.environ.get("NETBOX_TOKEN", "").strip()
-        if nb_url and nb_token:
+    if netbox_relations is None:
+        if inventory_file:
+            nb_url = os.environ.get("NETBOX_URL", "").strip()
+            nb_token = os.environ.get("NETBOX_TOKEN", "").strip()
+            if nb_url and nb_token:
+                try:
+                    nb_for_relations = pynetbox.api(nb_url, token=nb_token)
+                except Exception:
+                    nb_for_relations = None
+        else:
+            nb_for_relations = nb
+        if nb_for_relations is not None:
             try:
-                nb_for_relations = pynetbox.api(nb_url, token=nb_token)
+                device_names = device_names_from_complete_inventory(inventory_report)
+                netbox_relations = collect_netbox_interface_relations(
+                    nb_for_relations,
+                    device_names,
+                    debug=debug,
+                    stats=inventory_report.get("stats"),
+                )
+            except NetBoxAuthError:
+                stats = inventory_report.setdefault("stats", {})
+                stats["error"] = ERROR_AUTH_DENIED
+                netbox_relations = None
             except Exception:
-                nb_for_relations = None
-    else:
-        nb_for_relations = nb
-    if nb_for_relations is not None:
-        try:
-            device_names = device_names_from_complete_inventory(inventory_report)
-            netbox_relations = collect_netbox_interface_relations(
-                nb_for_relations,
-                device_names,
-                debug=debug,
-                stats=inventory_report.get("stats"),
-            )
-        except NetBoxAuthError:
-            stats = inventory_report.setdefault("stats", {})
-            stats["error"] = ERROR_AUTH_DENIED
-            netbox_relations = None
-        except Exception:
-            stats = inventory_report.setdefault("stats", {})
-            stats["read_errors"] = stats.get("read_errors", 0) + 1
-            netbox_relations = None
+                stats = inventory_report.setdefault("stats", {})
+                stats["read_errors"] = stats.get("read_errors", 0) + 1
+                netbox_relations = None
     enrich_inventory_provider_stats(inventory_report)
     finalize_inventory_read_stats(inventory_report.get("stats"))
     gate_ok, gate_detail = inventory_plan_gate(inventory_report)

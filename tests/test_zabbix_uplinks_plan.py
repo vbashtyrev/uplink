@@ -484,6 +484,11 @@ def test_build_zabbix_plan_util_trigger_delete_stale_only(monkeypatch, zabbix_en
                 ],
                 "incomplete": [],
                 "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+                "netbox_interface_relations": {
+                    "member_to_aggregate": [],
+                    "parent_children": [],
+                    "display_names": [],
+                },
             }
         ),
         encoding="utf-8",
@@ -576,3 +581,77 @@ def test_build_zabbix_plan_from_inventory_file_without_netbox(monkeypatch, zabbi
     report, err = build_zabbix_plan(str(dry), inventory_file=str(inv))
     assert err is None
     assert report["inventory"]["stats"]["complete"] == 1
+
+
+def test_build_zabbix_plan_from_inventory_file_uses_embedded_relations(
+    monkeypatch, zabbix_env, tmp_path
+):
+    from uplinks.netbox import inventory as inv_mod
+
+    dry = tmp_path / "dry-ssh.json"
+    dry.write_text((FIXTURES / "dry_ssh_minimal.json").read_text(encoding="utf-8"), encoding="utf-8")
+    relations = {
+        "member_to_aggregate": {("FRN-MX-1", "et-0/0/3"): "ae5"},
+        "parent_children": {("FRN-MX-1", "ae5"): {"ae5.0"}},
+        "display_names": {
+            ("FRN-MX-1", "et-0/0/3"): "et-0/0/3",
+            ("FRN-MX-1", "ae5"): "ae5",
+            ("FRN-MX-1", "ae5.0"): "ae5.0",
+        },
+    }
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "FRN-MX-1",
+                        "interface": "et-0/0/3",
+                        "provider": "Hurricane",
+                        "commit_rate_kbps": 10000,
+                        "billing_model": "Flat",
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+                "netbox_interface_relations": inv_mod.serialize_netbox_interface_relations(
+                    relations
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def host_get(params):
+        filt = params.get("filter") or {}
+        names = filt.get("host") or filt.get("name") or []
+        if "FRN-MX-1" in names:
+            return [{"hostid": "102", "host": "FRN-MX-1", "name": "FRN-MX-1"}]
+        return []
+
+    mocker = ZabbixRpcMocker()
+    mocker.on("user.get", lambda p: [{"userid": "1"}])
+    mocker.on("host.get", host_get)
+    mocker.on("usermacro.get", lambda p: [])
+    mocker.on("trigger.get", lambda p: [])
+    mocker.activate(monkeypatch)
+
+    monkeypatch.delenv("NETBOX_URL", raising=False)
+    monkeypatch.delenv("NETBOX_TOKEN", raising=False)
+
+    def fail_netbox(*args, **kwargs):
+        raise AssertionError("NetBox client must not be created when relations are embedded")
+
+    monkeypatch.setattr("uplinks.zabbix.plan.pynetbox.api", fail_netbox)
+    monkeypatch.setattr(
+        "uplinks.zabbix.plan.collect_netbox_interface_relations",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("collect_netbox_interface_relations must not be called")
+        ),
+    )
+
+    report, err = build_zabbix_plan(str(dry), inventory_file=str(inv))
+    assert err is None
+    macro_hosts = {row["host"]: row for row in report["planned"]["macros"]["create"]}
+    assert "FRN-MX-1" in macro_hosts
+    assert macro_hosts["FRN-MX-1"]["interface"] == "ae5.0"

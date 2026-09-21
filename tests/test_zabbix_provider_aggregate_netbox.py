@@ -669,6 +669,64 @@ def test_run_inventory_file_limits_read_error_skips_trigger_cleanup(tmp_path, mo
                 prune_triggers_without_limits=True,
             )
 
-    assert done
+    assert not done
     assert err == agg.NETBOX_READ_PARTIAL_MSG
     assert deleted == []
+
+
+def test_run_read_error_skips_all_zabbix_writes_including_host_create(
+    tmp_path, monkeypatch
+):
+    """Regression: provider read_error must not create aggregate hosts or write to Zabbix."""
+    desc_map = tmp_path / "description_to_name.json"
+    desc_map.write_text("{}", encoding="utf-8")
+    nb_ctx = {
+        "device_iface_to_provider": {
+            ("ALA-KZT-7280TR-1", "ethernet51/1"): "Cogent",
+        },
+        "providers": {"Cogent"},
+        "provider_limits_gbps": {"Cogent": 10},
+        "stats": {"error": "partial_read", "read_errors": 1},
+        "read_error": True,
+    }
+
+    host_created = []
+
+    def fake_fetch(url, token, hostnames, debug=False):
+        return (
+            {"ALA-KZT-7280TR-1": "101"},
+            {("ALA-KZT-7280TR-1", "ethernet51/1"): {"bits_in": "net.if.in[51]", "bits_out": ""}},
+            None,
+        )
+
+    mocker = (
+        ZabbixRpcMocker()
+        .on("user.get", lambda p: [{"userid": "1"}])
+        .on("hostgroup.get", lambda p: [{"groupid": "2"}])
+        .on(
+            "host.get",
+            lambda p: [{"hostid": "101", "host": "ALA-KZT-7280TR-1", "name": "ALA-KZT-7280TR-1"}],
+        )
+        .on("host.create", lambda p: host_created.append(p) or {"hostids": ["999"]})
+        .on("item.get", lambda p: [])
+        .on("item.create", lambda p: {"itemids": ["i1"]})
+        .on("item.update", lambda p: True)
+        .on("trigger.get", lambda p: [])
+    )
+    mocker.activate(monkeypatch)
+
+    with patch.object(agg, "_load_netbox_aggregate_context", return_value=nb_ctx):
+        with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
+            done, err = agg.run(
+                "https://z.example/api_jsonrpc.php",
+                "token",
+                str(tmp_path / "missing.json"),
+                str(FIXTURES / "dry_ssh_minimal.json"),
+                str(desc_map),
+                cache_path=None,
+            )
+
+    assert not done
+    assert err == agg.NETBOX_READ_PARTIAL_MSG
+    assert host_created == []
+    assert [method for method, _ in mocker.calls if method == "item.create"] == []

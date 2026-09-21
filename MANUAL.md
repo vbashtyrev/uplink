@@ -56,13 +56,8 @@ python netbox_uplinks_inventory.py --json --dry-run
   `zabbix_provider_aggregate.py` и `zabbix_uplinks_dashboard.py` — отбирать
   интерфейсы по тексту `Uplink:` в описании вместо области мониторинга NetBox.
 
-Старый автоматический путь доступен только явно:
-
-```bash
-python run_uplinks_full.py --auto
-```
-
-Не запускайте `--auto` на рабочем NetBox: старый код может заменить кабель.
+Старый автоматический путь удалён. Provider, Circuit, Termination и Cable
+создаются вручную в NetBox.
 
 
 ---
@@ -126,8 +121,7 @@ python zabbix_provider_services.py --parent-service 'Uplinks providers'
 
 ```bash
 python run_uplinks_full.py --plan --report uplinks_plan_report.txt
-python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json --dry-run
-python zabbix_sync_commit_rate.py -d dry-ssh.json --dry-run
+python zabbix_uplinks_plan.py --inventory-file netbox_inventory.json
 ```
 
 Ключ `--dry-run` у `zabbix_sync_commit_rate.py` нельзя совмещать с
@@ -147,11 +141,7 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json --create-link-triggers
 
 ---
 
-Работа по одной площадке. У полного запуска ключ `--location` допустим только
-вместе с `--auto`; у проверки контуров он работает и без записи:
-
-```bash
-python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json --location ALA
-```
+Работа по одной площадке выполняется фильтрацией данных в NetBox. Отдельного
+ключа `--location` в полном запуске нет.
 
 ---

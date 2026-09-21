@@ -493,17 +493,30 @@ def _interface_from_port_paths(nb, port, cable_id, circuit_termination_id, debug
     for path_info in path_list:
         if not isinstance(path_info, dict):
             continue
-        if path_info.get("is_split"):
+        if path_info.get("is_split") is not False:
             if debug:
                 print(
-                    "skip path on {}: is_split".format(getattr(port, "name", port)),
+                    "skip path on {}: is_split={}".format(
+                        getattr(port, "name", port), path_info.get("is_split")
+                    ),
                     file=sys.stderr,
                 )
             continue
-        if "is_complete" in path_info and not path_info.get("is_complete"):
+        if path_info.get("is_active") is not True:
             if debug:
                 print(
-                    "skip path on {}: is_complete=False".format(getattr(port, "name", port)),
+                    "skip path on {}: is_active={}".format(
+                        getattr(port, "name", port), path_info.get("is_active")
+                    ),
+                    file=sys.stderr,
+                )
+            continue
+        if path_info.get("is_complete") is not True:
+            if debug:
+                print(
+                    "skip path on {}: is_complete={}".format(
+                        getattr(port, "name", port), path_info.get("is_complete")
+                    ),
                     file=sys.stderr,
                 )
             continue
@@ -1076,10 +1089,156 @@ def collect_provider_limits_gbps(nb, debug=False):
     return limits, None
 
 
+def _empty_netbox_interface_relations():
+    return {
+        "member_to_aggregate": {},
+        "parent_children": {},
+        "display_names": {},
+    }
+
+
+def _netbox_interface_relations_is_serialized(data):
+    """True when relations are JSON-safe lists, not in-memory tuple-key dicts."""
+    if not isinstance(data, dict):
+        return False
+    member = data.get("member_to_aggregate")
+    if member is None:
+        return True
+    return isinstance(member, list)
+
+
+def serialize_netbox_interface_relations(relations):
+    """Convert in-memory relations (tuple keys, set values) to JSON-safe lists."""
+    relations = relations or {}
+    member_rows = []
+    for (dev_name, member_iface), aggregate in sorted(
+        (relations.get("member_to_aggregate") or {}).items()
+    ):
+        member_rows.append(
+            {
+                "device": dev_name,
+                "member": member_iface,
+                "aggregate": aggregate,
+            }
+        )
+    parent_rows = []
+    for (dev_name, parent_iface), children in sorted(
+        (relations.get("parent_children") or {}).items()
+    ):
+        parent_rows.append(
+            {
+                "device": dev_name,
+                "parent": parent_iface,
+                "children": sorted(children or []),
+            }
+        )
+    display_rows = []
+    for (dev_name, iface_norm), display_name in sorted(
+        (relations.get("display_names") or {}).items()
+    ):
+        display_rows.append(
+            {
+                "device": dev_name,
+                "interface": iface_norm,
+                "name": display_name,
+            }
+        )
+    return {
+        "member_to_aggregate": member_rows,
+        "parent_children": parent_rows,
+        "display_names": display_rows,
+    }
+
+
+def deserialize_netbox_interface_relations(data):
+    """Restore in-memory relations from JSON inventory or serialized dict."""
+    if not data:
+        return _empty_netbox_interface_relations()
+    if not _netbox_interface_relations_is_serialized(data):
+        relations = _empty_netbox_interface_relations()
+        for key in ("member_to_aggregate", "parent_children", "display_names"):
+            source = data.get(key) or {}
+            if key == "parent_children":
+                relations[key] = {
+                    pair: set(children or [])
+                    for pair, children in source.items()
+                }
+            else:
+                relations[key] = dict(source)
+        return relations
+
+    relations = _empty_netbox_interface_relations()
+    for row in data.get("member_to_aggregate") or []:
+        dev_name = (row.get("device") or "").strip()
+        member_iface = (row.get("member") or "").strip()
+        aggregate = (row.get("aggregate") or "").strip()
+        if dev_name and member_iface and aggregate:
+            relations["member_to_aggregate"][(dev_name, member_iface)] = aggregate
+    for row in data.get("parent_children") or []:
+        dev_name = (row.get("device") or "").strip()
+        parent_iface = (row.get("parent") or "").strip()
+        children = row.get("children") or []
+        if dev_name and parent_iface:
+            relations["parent_children"][(dev_name, parent_iface)] = {
+                (child or "").strip() for child in children if (child or "").strip()
+            }
+    for row in data.get("display_names") or []:
+        dev_name = (row.get("device") or "").strip()
+        iface_norm = (row.get("interface") or "").strip()
+        display_name = (row.get("name") or "").strip()
+        if dev_name and iface_norm and display_name:
+            relations["display_names"][(dev_name, iface_norm)] = display_name
+    return relations
+
+
+def netbox_interface_relations_from_report(report):
+    """Return in-memory relations embedded in an inventory report, or None."""
+    if not report:
+        return None
+    cached = report.get("_netbox_interface_relations")
+    if cached is not None:
+        return cached
+    raw = report.get("netbox_interface_relations")
+    if raw is None:
+        return None
+    cached = deserialize_netbox_interface_relations(raw)
+    report["_netbox_interface_relations"] = cached
+    return cached
+
+
+def normalize_inventory_report(report):
+    """Deserialize embedded NetBox interface relations after JSON load."""
+    if not report:
+        return report
+    netbox_interface_relations_from_report(report)
+    return report
+
+
+def enrich_inventory_report_with_netbox_relations(report, nb, debug=False):
+    """Attach JSON-safe NetBox interface relations to an inventory report."""
+    device_names = device_names_from_complete_inventory(report)
+    relations = collect_netbox_interface_relations(
+        nb, device_names, debug=debug, stats=report.get("stats")
+    )
+    report["netbox_interface_relations"] = serialize_netbox_interface_relations(relations)
+    report["_netbox_interface_relations"] = relations
+    return relations
+
+
+def inventory_report_json_payload(report, **extra):
+    """Return a JSON-serializable copy of an inventory report."""
+    payload = dict(report)
+    payload.pop("_netbox_interface_relations", None)
+    payload.update(extra)
+    return payload
+
+
 def load_inventory_report(path):
     """Load inventory JSON report written by netbox_uplinks_inventory.py --json."""
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        report = json.load(f)
+    normalize_inventory_report(report)
+    return report
 
 
 def collect_netbox_interface_relations(nb, device_names, debug=False, stats=None):
@@ -1553,22 +1712,26 @@ def lag_member_superseded_in_scoped(
     return bool(preferred_provider) and preferred_provider == isp
 
 
+def _iface_is_uplink_by_description(iface):
+    """True when dry-ssh interface description contains 'Uplink:' (--legacy-dry-ssh only)."""
+    desc = (iface.get("description") or "").strip()
+    return "Uplink:" in desc
+
+
 def is_uplink_iface(iface, hostname=None, device_iface_to_provider=None, inventory_scoped=False):
     """
     Uplink filter for map/dashboard/aggregate.
 
-    When inventory_scoped is True, only interfaces present in scoped inventory count
-    as uplinks (fail-closed; dry-ssh Uplink: alone is ignored).
-    Legacy/generic mode uses description-based is_uplink() when inventory_scoped is False.
+    When inventory_scoped is True (NetBox-first path), only interfaces present in
+    scoped inventory count as uplinks (fail-closed).
+    When inventory_scoped is False (--legacy-dry-ssh), use the Uplink: description marker.
     """
     if inventory_scoped:
         if not hostname:
             return False
         return iface_has_inventory_entry(hostname, iface, device_iface_to_provider or {})
 
-    from generate_commit_rates import is_uplink
-
-    return is_uplink(iface)
+    return _iface_is_uplink_by_description(iface)
 
 
 def resolve_provider_name_for_iface(hostname, iface, desc_to_name, device_iface_to_provider=None):
@@ -1621,22 +1784,32 @@ def load_uplink_provider_context(
     Uses project circuit scope (Circuit type Uplink + status Active) by default.
     Pass circuit_scope=None to audit all circuits.
     """
-    nb = netbox_client_from_env(debug=debug)
-    if nb is None:
-        return None
-
     scope = project_circuit_scope() if circuit_scope is True else circuit_scope
     tag = border_tag if border_tag is not None else netbox_border_tag()
     if inventory_report is not None:
         report = inventory_report
+        netbox_relations = netbox_interface_relations_from_report(report)
+        if netbox_relations is None:
+            nb = netbox_client_from_env(debug=debug)
+            if nb is None:
+                return None
+            device_names = device_names_from_complete_inventory(report)
+            netbox_relations = collect_netbox_interface_relations(
+                nb, device_names, debug=debug, stats=report.get("stats")
+            )
     else:
+        nb = netbox_client_from_env(debug=debug)
+        if nb is None:
+            return None
         report = collect_uplink_inventory(
             nb, tag=tag, debug=debug, active_only=True, circuit_scope=scope
         )
-    device_names = device_names_from_complete_inventory(report)
-    netbox_relations = collect_netbox_interface_relations(
-        nb, device_names, debug=debug, stats=report.get("stats")
-    )
+        netbox_relations = netbox_interface_relations_from_report(report)
+        if netbox_relations is None:
+            device_names = device_names_from_complete_inventory(report)
+            netbox_relations = collect_netbox_interface_relations(
+                nb, device_names, debug=debug, stats=report.get("stats")
+            )
     stats = report.get("stats") or {}
     finalize_inventory_read_stats(stats)
     error = stats.get("error")
@@ -1760,14 +1933,17 @@ def main(argv=None):
         debug=args.debug,
         circuit_scope=project_circuit_scope(),
     )
+    enrich_inventory_report_with_netbox_relations(report, nb, debug=args.debug)
     stats = report.get("stats") or {}
     auth_error = stats.get("error") == ERROR_AUTH_DENIED
     providers_error = stats.get("error") == ERROR_PROVIDERS_UNAVAILABLE
 
     if args.json:
-        payload = dict(report)
-        payload["dry_run"] = bool(args.dry_run)
-        payload["read_only"] = True
+        payload = inventory_report_json_payload(
+            report,
+            dry_run=bool(args.dry_run),
+            read_only=True,
+        )
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         if auth_error:

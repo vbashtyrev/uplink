@@ -5,7 +5,10 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
+from tests.mocks.inventory_scope import (
+    dry_ssh_minimal_inventory_context,
+    write_dry_ssh_minimal_inventory,
+)
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from tests.mocks.zabbix_rpc import ZabbixRpcMocker
 from tests.mocks.netbox_full import NetBoxTestEnvironment
@@ -92,10 +95,7 @@ def test_create_or_update_dashboard_update(monkeypatch):
 def test_main_uses_cache(monkeypatch, zabbix_env, tmp_path, capsys):
     import zabbix_uplinks_dashboard as mod
 
-    dry = tmp_path / "dry.json"
-    dry.write_text((FIXTURES / "dry_ssh_minimal.json").read_text(encoding="utf-8"), encoding="utf-8")
-    desc = tmp_path / "desc.json"
-    desc.write_text('{"Uplink: Cogent 10G": "Cogent", "Uplink: Hurricane": "Hurricane"}', encoding="utf-8")
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
     from zabbix_uplinks_dashboard import ZABBIX_CACHE_FILE
 
     cache = tmp_path / ZABBIX_CACHE_FILE
@@ -147,10 +147,8 @@ def test_main_uses_cache(monkeypatch, zabbix_env, tmp_path, capsys):
         "argv",
         [
             "zabbix_uplinks_dashboard.py",
-            "-f",
-            str(dry),
-            "-m",
-            str(desc),
+            "--inventory-file",
+            str(inv),
             "--dashboard-by-location",
             "",
             "--dashboard-by-provider",

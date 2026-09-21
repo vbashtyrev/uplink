@@ -7,8 +7,8 @@ import os
 import sys
 
 from env_urls import load_env_file_if_present
+from uplinks.data import resolve_uplink_cli_input
 from zabbix_map import (
-    DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
     ZABBIX_CACHE_FILE,
     load_devices_json,
@@ -692,6 +692,11 @@ def main():
     parser.add_argument("--no-show-threshold", action="store_true",
                         help="Do not draw trigger thresholds (Simple triggers) on graphs")
     parser.add_argument(
+        "--legacy-dry-ssh",
+        action="store_true",
+        help="Use legacy dry-ssh.json input (-f/--file) instead of --inventory-file",
+    )
+    parser.add_argument(
         "--legacy-provider-filter",
         action="store_true",
         help="Use description-based uplink filter instead of NetBox circuit scope (legacy)",
@@ -700,13 +705,23 @@ def main():
     args = parser.parse_args()
     show_threshold = not args.no_show_threshold
 
-    desc_to_name = load_description_map(args.description_map)
+    input_mode, input_path, input_err = resolve_uplink_cli_input(
+        inventory_file=args.inventory_file,
+        dry_ssh_file=args.file,
+        legacy_dry_ssh=args.legacy_dry_ssh,
+    )
+    if input_err:
+        print(input_err, file=sys.stderr)
+        sys.exit(1)
+
+    desc_to_name = {}
     inventory_report = None
-    if args.inventory_file:
+    inv_ctx = None
+    if input_mode == "inventory":
         try:
-            inventory_report = load_inventory_report(args.inventory_file)
+            inventory_report = load_inventory_report(input_path)
         except (OSError, json.JSONDecodeError) as e:
-            print("failed to read inventory file {}: {}".format(args.inventory_file, e), file=sys.stderr)
+            print("failed to read inventory file {}: {}".format(input_path, e), file=sys.stderr)
             sys.exit(1)
         inv_ctx = load_uplink_provider_context(inventory_report=inventory_report, debug=args.debug)
         expanded_map = (inv_ctx or {}).get("device_iface_to_provider") or {}
@@ -715,8 +730,8 @@ def main():
             print("No devices in scoped inventory", file=sys.stderr)
             sys.exit(1)
     else:
-        dry_ssh_path = args.file or DEFAULT_INPUT
-        data, err = load_devices_json(dry_ssh_path)
+        desc_to_name = load_description_map(args.description_map)
+        data, err = load_devices_json(input_path)
         if err:
             print(err, file=sys.stderr)
             sys.exit(1)
@@ -725,14 +740,14 @@ def main():
     device_iface_to_provider = {}
     inventory_scoped = not args.legacy_provider_filter
     inventory_read_error = False
-    inv_ctx = None
     netbox_relations = None
     if not args.legacy_provider_filter:
-        inv_ctx = load_uplink_provider_context(
-            devices,
-            debug=args.debug,
-            inventory_report=inventory_report,
-        )
+        if inv_ctx is None:
+            inv_ctx = load_uplink_provider_context(
+                devices,
+                debug=args.debug,
+                inventory_report=inventory_report,
+            )
         if inv_ctx is not None:
             device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
             netbox_relations = inv_ctx.get("netbox_interface_relations")
@@ -746,7 +761,7 @@ def main():
         sys.exit(1)
 
     hostnames = set(devices.keys())
-    cache_base = args.inventory_file or args.file or DEFAULT_INPUT
+    cache_base = args.inventory_file or args.file
     cache_path = os.path.join(
         os.path.dirname(os.path.abspath(cache_base)) if cache_base else ".",
         ZABBIX_CACHE_FILE,

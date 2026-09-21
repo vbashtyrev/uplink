@@ -32,6 +32,7 @@ from uplinks.netbox.inventory import (
     inventory_read_failed,
     is_netbox_auth_error,
     load_inventory_report,
+    netbox_interface_relations_from_report,
     map_commit_rates_to_zabbix_ifaces,
     project_circuit_scope,
     resolve_border_device_tag,
@@ -1356,9 +1357,6 @@ def main():
     nb_url = os.environ.get("NETBOX_URL")
     nb_token = os.environ.get("NETBOX_TOKEN")
     tag = border_device_tag()
-    if not nb_url or not nb_token:
-        print("Set NETBOX_URL and NETBOX_TOKEN", file=sys.stderr)
-        sys.exit(1)
 
     zabbix_url, zabbix_token = _get_zabbix_url_token()
     if not zabbix_url or not zabbix_token:
@@ -1379,19 +1377,34 @@ def main():
     dry_ssh_path = getattr(args, "dry_ssh", None)
     dry_ssh_devices = load_dry_ssh(dry_ssh_path) if dry_ssh_path else None
 
-    nb = pynetbox.api(nb_url, token=nb_token)
     if args.inventory_file:
         try:
             inventory_report = load_inventory_report(args.inventory_file)
         except (OSError, json.JSONDecodeError) as e:
             print("failed to read inventory file {}: {}".format(args.inventory_file, e), file=sys.stderr)
             sys.exit(1)
+        netbox_relations = netbox_interface_relations_from_report(inventory_report)
+        if netbox_relations is None:
+            if not nb_url or not nb_token:
+                print("Set NETBOX_URL and NETBOX_TOKEN", file=sys.stderr)
+                sys.exit(1)
+            nb = pynetbox.api(nb_url, token=nb_token)
+            device_names = device_names_from_complete_inventory(inventory_report)
+            netbox_relations = collect_netbox_interface_relations(
+                nb, device_names, debug=args.debug, stats=inventory_report.get("stats")
+            )
     else:
+        if not nb_url or not nb_token:
+            print("Set NETBOX_URL and NETBOX_TOKEN", file=sys.stderr)
+            sys.exit(1)
+        nb = pynetbox.api(nb_url, token=nb_token)
         inventory_report = fetch_uplink_inventory_report(nb, tag, debug=args.debug, exit_on_auth=True)
-    device_names = device_names_from_complete_inventory(inventory_report)
-    netbox_relations = collect_netbox_interface_relations(
-        nb, device_names, debug=args.debug, stats=inventory_report.get("stats")
-    )
+        netbox_relations = netbox_interface_relations_from_report(inventory_report)
+        if netbox_relations is None:
+            device_names = device_names_from_complete_inventory(inventory_report)
+            netbox_relations = collect_netbox_interface_relations(
+                nb, device_names, debug=args.debug, stats=inventory_report.get("stats")
+            )
     from uplinks.netbox.inventory import finalize_inventory_read_stats
 
     finalize_inventory_read_stats(inventory_report.get("stats"))

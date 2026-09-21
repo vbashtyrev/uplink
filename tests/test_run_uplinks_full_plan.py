@@ -11,16 +11,10 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 def _plan_ns(**overrides):
     base = dict(
-        auto=False,
         plan=True,
-        no_fetch=True,
-        from_file=True,
-        refresh=False,
         dry_ssh="dry-ssh.json",
-        commit_rates="commit_rates.json",
         no_netbox_apply=False,
         no_burst_triggers=False,
-        location=None,
         stop_on_error=True,
         no_stop_on_error=False,
         report=None,
@@ -34,14 +28,10 @@ def _plan_ns(**overrides):
 
 
 def _setup_tmp(monkeypatch, tmp_path):
-    (tmp_path / "commit_rates.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "description_to_name.json").write_text("{}", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
     monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
     monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
-    monkeypatch.setattr(full, "DEFAULT_COMMIT_RATES", "commit_rates.json")
-    monkeypatch.setattr(full, "DEFAULT_DESC_MAP", "description_to_name.json")
     monkeypatch.setattr(full, "DEFAULT_NETBOX_INVENTORY", "netbox_inventory.json")
 
 
@@ -118,26 +108,6 @@ def test_plan_omits_burst_flag_when_disabled(monkeypatch, tmp_path):
 
     plan_argv = next(c for c in calls if c[1] == "zabbix_uplinks_plan.py")
     assert "--create-link-triggers" not in plan_argv
-
-
-def test_plan_rejects_auto_before_work(monkeypatch, tmp_path):
-    _setup_tmp(monkeypatch, tmp_path)
-    calls = []
-
-    def fake_run_cmd(*args, **kwargs):
-        calls.append(args)
-        return True, "", ""
-
-    monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
-    monkeypatch.setattr(
-        full.argparse.ArgumentParser,
-        "parse_args",
-        lambda self: _plan_ns(auto=True),
-    )
-    with pytest.raises(SystemExit) as exc:
-        full.main()
-    assert exc.value.code == 2
-    assert calls == []
 
 
 def test_plan_fails_on_incomplete_inventory(monkeypatch, tmp_path):

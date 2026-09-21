@@ -975,7 +975,7 @@ def test_pass_through_split_path_skipped():
     assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
 
 
-def test_pass_through_path_without_is_complete_key_succeeds():
+def test_pass_through_path_without_is_complete_key_skipped():
     parts = _valid_odf_paths_result(None)
     paths_result = [
         {
@@ -987,7 +987,7 @@ def test_pass_through_path_without_is_complete_key_succeeds():
             "path": [parts["segment"]],
         }
     ]
-    nb, rear_port = _build_odf_inventory_nb(
+    nb, _rear_port = _build_odf_inventory_nb(
         paths_result=paths_result,
         border_iface=parts["border_iface"],
         ct=parts["ct"],
@@ -997,9 +997,9 @@ def test_pass_through_path_without_is_complete_key_succeeds():
         front_port=parts["front_port"],
     )
     report = inv.collect_uplink_inventory(nb, tag="border")
-    assert len(report["complete"]) == 1
-    assert report["complete"][0]["interface"] == "Ethernet23/1"
-    rear_port.paths.assert_called_once()
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
 
 
 def test_auth_mid_walk_clears_partial_results():
@@ -1096,3 +1096,321 @@ def test_incomplete_row_when_provider_circuits_query_fails():
     assert len(report["incomplete"]) == 1
     assert report["incomplete"][0]["provider"] == "Cogent"
     assert report["incomplete"][0]["reason"] == inv.REASON_PROVIDER_UNAVAILABLE
+
+
+def _frn_lag_relations():
+    return {
+        "member_to_aggregate": {("FRN-MX-1", "et-0/0/3"): "ae5"},
+        "parent_children": {("FRN-MX-1", "ae5"): {"ae5.0"}},
+        "display_names": {
+            ("FRN-MX-1", "et-0/0/3"): "et-0/0/3",
+            ("FRN-MX-1", "ae5"): "ae5",
+            ("FRN-MX-1", "ae5.0"): "ae5.0",
+        },
+    }
+
+
+def test_pass_through_inactive_path_skipped():
+    parts = _valid_odf_paths_result(None)
+    paths_result = [
+        {
+            "id": 1,
+            "is_active": False,
+            "is_complete": True,
+            "is_split": False,
+            "origin": parts["border_iface"],
+            "destination": parts["ct"],
+            "path": [parts["segment"]],
+        }
+    ]
+    nb, _rear_port = _build_odf_inventory_nb(
+        paths_result=paths_result,
+        border_iface=parts["border_iface"],
+        ct=parts["ct"],
+        cable_to_rear=parts["cable_to_rear"],
+        cable_to_iface=parts["cable_to_iface"],
+        rear_port=parts["rear_port"],
+        front_port=parts["front_port"],
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
+
+
+def test_pass_through_path_without_is_active_key_skipped():
+    parts = _valid_odf_paths_result(None)
+    paths_result = [
+        {
+            "id": 1,
+            "is_complete": True,
+            "is_split": False,
+            "origin": parts["border_iface"],
+            "destination": parts["ct"],
+            "path": [parts["segment"]],
+        }
+    ]
+    nb, _rear_port = _build_odf_inventory_nb(
+        paths_result=paths_result,
+        border_iface=parts["border_iface"],
+        ct=parts["ct"],
+        cable_to_rear=parts["cable_to_rear"],
+        cable_to_iface=parts["cable_to_iface"],
+        rear_port=parts["rear_port"],
+        front_port=parts["front_port"],
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
+
+
+def test_serialize_deserialize_netbox_interface_relations_roundtrip():
+    relations = _frn_lag_relations()
+    encoded = inv.serialize_netbox_interface_relations(relations)
+    json.dumps(encoded)
+    restored = inv.deserialize_netbox_interface_relations(encoded)
+    assert restored == relations
+
+
+def test_load_inventory_report_restores_netbox_relations(tmp_path):
+    relations = _frn_lag_relations()
+    payload = {
+        "complete": [
+            {
+                "provider": "Hurricane",
+                "device": "FRN-MX-1",
+                "interface": "et-0/0/3",
+                "circuit_id": "CKT-1",
+            }
+        ],
+        "incomplete": [],
+        "stats": {},
+        "netbox_interface_relations": inv.serialize_netbox_interface_relations(relations),
+    }
+    path = tmp_path / "inventory.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    report = inv.load_inventory_report(str(path))
+    restored = inv.netbox_interface_relations_from_report(report)
+    assert restored == relations
+    mapping = inv.device_iface_provider_map_from_inventory(
+        report, netbox_relations=restored
+    )
+    assert mapping[("FRN-MX-1", "ae5.0")] == "Hurricane"
+
+
+def test_main_json_includes_serialized_netbox_relations(monkeypatch, netbox_env, capsys):
+    nb = _build_inventory_nb(circuit=_scoped_circuit())
+    with patch.object(inv.pynetbox, "api", lambda url, token: nb):
+        monkeypatch.setattr(sys, "argv", ["netbox_uplinks_inventory.py", "--json"])
+        assert inv.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    relations = payload.get("netbox_interface_relations")
+    assert relations is not None
+    assert isinstance(relations.get("member_to_aggregate"), list)
+    assert isinstance(relations.get("parent_children"), list)
+    assert isinstance(relations.get("display_names"), list)
+    json.dumps(payload)
+
+
+def test_main_json_nonempty_relations_excludes_internal_cache(monkeypatch, netbox_env, capsys):
+    """Regression: tuple-key _netbox_interface_relations must not reach json.dumps."""
+    nb = _build_inventory_nb(circuit=_scoped_circuit())
+    relations = _frn_lag_relations()
+
+    def collect_with_tuple_keys(nb_arg, device_names, debug=False, stats=None):
+        assert nb_arg is nb
+        return relations
+
+    monkeypatch.setattr(inv, "collect_netbox_interface_relations", collect_with_tuple_keys)
+    with patch.object(inv.pynetbox, "api", lambda url, token: nb):
+        monkeypatch.setattr(sys, "argv", ["netbox_uplinks_inventory.py", "--json"])
+        assert inv.main() == 0
+
+    out = capsys.readouterr().out
+    json.dumps(out)
+    payload = json.loads(out)
+    assert "_netbox_interface_relations" not in payload
+    serialized = payload["netbox_interface_relations"]
+    assert serialized["member_to_aggregate"]
+    assert serialized["parent_children"]
+    assert serialized["display_names"]
+    json.dumps(payload)
+    assert inv.deserialize_netbox_interface_relations(serialized) == relations
+
+
+def test_load_uplink_provider_context_uses_embedded_relations(monkeypatch, netbox_env):
+    relations = _frn_lag_relations()
+    report = {
+        "complete": [
+            {
+                "provider": "Hurricane",
+                "device": "FRN-MX-1",
+                "interface": "et-0/0/3",
+                "circuit_id": "CKT-1",
+            }
+        ],
+        "incomplete": [],
+        "stats": {},
+        "netbox_interface_relations": inv.serialize_netbox_interface_relations(relations),
+    }
+    inv.normalize_inventory_report(report)
+
+    def fail_collect(*args, **kwargs):
+        raise AssertionError("collect_netbox_interface_relations must not be called")
+
+    def fail_netbox_client(*args, **kwargs):
+        raise AssertionError("netbox_client_from_env must not be called when relations are embedded")
+
+    monkeypatch.setattr(inv, "collect_netbox_interface_relations", fail_collect)
+    monkeypatch.setattr(inv, "netbox_client_from_env", fail_netbox_client)
+    ctx = inv.load_uplink_provider_context(inventory_report=report)
+    assert ctx is not None
+    assert ctx["netbox_interface_relations"] == relations
+    assert ctx["device_iface_to_provider"][("FRN-MX-1", "ae5.0")] == "Hurricane"
+
+
+def _frn_lag_relations():
+    return {
+        "member_to_aggregate": {("FRN-MX-1", "et-0/0/3"): "ae5"},
+        "parent_children": {("FRN-MX-1", "ae5"): {"ae5.0"}},
+        "display_names": {
+            ("FRN-MX-1", "et-0/0/3"): "et-0/0/3",
+            ("FRN-MX-1", "ae5"): "ae5",
+            ("FRN-MX-1", "ae5.0"): "ae5.0",
+        },
+    }
+
+
+def test_pass_through_inactive_path_skipped():
+    parts = _valid_odf_paths_result(None)
+    paths_result = [
+        {
+            "id": 1,
+            "is_active": False,
+            "is_complete": True,
+            "is_split": False,
+            "origin": parts["border_iface"],
+            "destination": parts["ct"],
+            "path": [parts["segment"]],
+        }
+    ]
+    nb, _rear_port = _build_odf_inventory_nb(
+        paths_result=paths_result,
+        border_iface=parts["border_iface"],
+        ct=parts["ct"],
+        cable_to_rear=parts["cable_to_rear"],
+        cable_to_iface=parts["cable_to_iface"],
+        rear_port=parts["rear_port"],
+        front_port=parts["front_port"],
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
+
+
+def test_pass_through_path_without_is_active_key_skipped():
+    parts = _valid_odf_paths_result(None)
+    paths_result = [
+        {
+            "id": 1,
+            "is_complete": True,
+            "is_split": False,
+            "origin": parts["border_iface"],
+            "destination": parts["ct"],
+            "path": [parts["segment"]],
+        }
+    ]
+    nb, _rear_port = _build_odf_inventory_nb(
+        paths_result=paths_result,
+        border_iface=parts["border_iface"],
+        ct=parts["ct"],
+        cable_to_rear=parts["cable_to_rear"],
+        cable_to_iface=parts["cable_to_iface"],
+        rear_port=parts["rear_port"],
+        front_port=parts["front_port"],
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
+
+
+def test_serialize_deserialize_netbox_interface_relations_roundtrip():
+    relations = _frn_lag_relations()
+    encoded = inv.serialize_netbox_interface_relations(relations)
+    json.dumps(encoded)
+    restored = inv.deserialize_netbox_interface_relations(encoded)
+    assert restored == relations
+
+
+def test_load_inventory_report_restores_netbox_relations(tmp_path):
+    relations = _frn_lag_relations()
+    payload = {
+        "complete": [
+            {
+                "provider": "Hurricane",
+                "device": "FRN-MX-1",
+                "interface": "et-0/0/3",
+                "circuit_id": "CKT-1",
+            }
+        ],
+        "incomplete": [],
+        "stats": {},
+        "netbox_interface_relations": inv.serialize_netbox_interface_relations(relations),
+    }
+    path = tmp_path / "inventory.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    report = inv.load_inventory_report(str(path))
+    restored = inv.netbox_interface_relations_from_report(report)
+    assert restored == relations
+    mapping = inv.device_iface_provider_map_from_inventory(
+        report, netbox_relations=restored
+    )
+    assert mapping[("FRN-MX-1", "ae5.0")] == "Hurricane"
+
+
+def test_main_json_includes_serialized_netbox_relations(monkeypatch, netbox_env, capsys):
+    nb = _build_inventory_nb(circuit=_scoped_circuit())
+    with patch.object(inv.pynetbox, "api", lambda url, token: nb):
+        monkeypatch.setattr(sys, "argv", ["netbox_uplinks_inventory.py", "--json"])
+        assert inv.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    relations = payload.get("netbox_interface_relations")
+    assert relations is not None
+    assert isinstance(relations.get("member_to_aggregate"), list)
+    assert isinstance(relations.get("parent_children"), list)
+    assert isinstance(relations.get("display_names"), list)
+    json.dumps(payload)
+
+
+def test_load_uplink_provider_context_uses_embedded_relations(monkeypatch, netbox_env):
+    relations = _frn_lag_relations()
+    report = {
+        "complete": [
+            {
+                "provider": "Hurricane",
+                "device": "FRN-MX-1",
+                "interface": "et-0/0/3",
+                "circuit_id": "CKT-1",
+            }
+        ],
+        "incomplete": [],
+        "stats": {},
+        "netbox_interface_relations": inv.serialize_netbox_interface_relations(relations),
+    }
+    inv.normalize_inventory_report(report)
+
+    def fail_collect(*args, **kwargs):
+        raise AssertionError("collect_netbox_interface_relations must not be called")
+
+    def fail_netbox_client(*args, **kwargs):
+        raise AssertionError("netbox_client_from_env must not be called when relations are embedded")
+
+    monkeypatch.setattr(inv, "collect_netbox_interface_relations", fail_collect)
+    monkeypatch.setattr(inv, "netbox_client_from_env", fail_netbox_client)
+    ctx = inv.load_uplink_provider_context(inventory_report=report)
+    assert ctx is not None
+    assert ctx["netbox_interface_relations"] == relations
+    assert ctx["device_iface_to_provider"][("FRN-MX-1", "ae5.0")] == "Hurricane"

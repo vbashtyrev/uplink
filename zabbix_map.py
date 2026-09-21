@@ -12,8 +12,11 @@ from env_urls import load_env_file_if_present
 from uplinks.data import (
     DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
+    GENERATE_DESCRIPTION_MAP_REQUIRES_LEGACY_MSG,
+    MAP_LEGACY_UTILITY_REQUIRES_LEGACY_MSG,
     load_description_map,
     load_devices_json,
+    resolve_uplink_cli_input,
 )
 from uplinks.netbox.inventory import (
     arm_netbox_incomplete_guard,
@@ -336,23 +339,42 @@ def _is_free(cx, cy, occupied, min_dist):
 def _place_single_host_provider(hx, hy, host_pos, isp_pos):
     """
     Find a free position for a provider with one host (the host is already in another block).
-    Order: left, right, bottom, top, between (closest left/right).
-    Return (x, y) or (hx ​​- 170, hy) if everything is busy.
+    Order: left, right, bottom, top, between (closest left/right), then further offsets.
+    Return (x, y) within map margins or the closest in-bounds fallback.
     """
     occupied = _occupied_positions(host_pos, isp_pos)
     min_d = LAYOUT_MIN_DISTANCE
-    candidates = [
-        (hx - 170, hy), # left
-        (hx + 170, hy), # right
-        (hx, hy + 100), # from below
-        (hx, hy - 100), # on top
-        (hx - 85, hy), # between (closer to the left)
-        (hx + 85, hy), # between (closer to the right)
-    ]
-    for (cx, cy) in candidates:
+    min_x = LAYOUT_MARGIN
+    min_y = LAYOUT_MARGIN
+
+    def _try(cx, cy):
+        if cx < min_x or cy < min_y:
+            return None
         if _is_free(cx, cy, occupied, min_d):
             return (cx, cy)
-    return (hx - 170, hy)
+        return None
+
+    candidates = [
+        (hx - 170, hy),  # left
+        (hx + 170, hy),  # right
+        (hx, hy + 100),  # from below
+        (hx, hy - 100),  # on top
+        (hx - 85, hy),   # between (closer to the left)
+        (hx + 85, hy),   # between (closer to the right)
+    ]
+    for (cx, cy) in candidates:
+        pos = _try(cx, cy)
+        if pos is not None:
+            return pos
+
+    for dist in (170, 340):
+        for dx, dy in ((dist, 0), (-dist, 0), (0, dist), (0, -dist)):
+            pos = _try(hx + dx, hy + dy)
+            if pos is not None:
+                return pos
+
+    # Last resort: keep provider near the host but inside map margins.
+    return (max(min_x, hx - 170), max(min_y, hy))
 
 
 def _compute_layout(edges, map_width, map_height):
@@ -435,8 +457,15 @@ def _compute_layout(edges, map_width, map_height):
         block_x += LAYOUT_BLOCK_WIDTH
 
     # Take into account the size of the element: in the API (x,y) - the upper left corner, element SELEMENT_WIDTH x SELEMENT_HEIGHT
-    required_width = max(block_x + LAYOUT_MARGIN, max_row_width) + SELEMENT_WIDTH
-    required_height = block_y + row_max_height + LAYOUT_MARGIN + SELEMENT_HEIGHT
+    block_required_width = max(block_x + LAYOUT_MARGIN, max_row_width) + SELEMENT_WIDTH
+    block_required_height = block_y + row_max_height + LAYOUT_MARGIN + SELEMENT_HEIGHT
+    pos_max_right = LAYOUT_MARGIN
+    pos_max_bottom = LAYOUT_MARGIN
+    for x, y in list(host_pos.values()) + list(isp_pos.values()):
+        pos_max_right = max(pos_max_right, x + SELEMENT_WIDTH + LAYOUT_MARGIN)
+        pos_max_bottom = max(pos_max_bottom, y + SELEMENT_HEIGHT + LAYOUT_MARGIN)
+    required_width = max(block_required_width, pos_max_right)
+    required_height = max(block_required_height, pos_max_bottom)
     return host_pos, isp_pos, required_width, required_height
 
 
@@ -925,6 +954,11 @@ def main():
         help="When --update-map, do not remove hosts/providers from the map that are not in the current JSON (old behavior)",
     )
     parser.add_argument(
+        "--legacy-dry-ssh",
+        action="store_true",
+        help="Use legacy dry-ssh.json input (-f/--file) instead of --inventory-file",
+    )
+    parser.add_argument(
         "--legacy-provider-filter",
         action="store_true",
         help="Use description-based uplink filter instead of NetBox circuit scope (legacy)",
@@ -942,9 +976,23 @@ def main():
     )
     args = parser.parse_args()
 
-    # Generating the description_to_name template: collect all descriptions from the file
+    # Legacy utility: build description_to_name template from explicit dry-ssh.json
     if args.generate_description_map:
-        data, err = load_devices_json(args.file)
+        if not args.legacy_dry_ssh or not args.file:
+            print(GENERATE_DESCRIPTION_MAP_REQUIRES_LEGACY_MSG, file=sys.stderr)
+            sys.exit(1)
+        input_mode, input_path, input_err = resolve_uplink_cli_input(
+            inventory_file=args.inventory_file,
+            dry_ssh_file=args.file,
+            legacy_dry_ssh=args.legacy_dry_ssh,
+        )
+        if input_err:
+            print(input_err, file=sys.stderr)
+            sys.exit(1)
+        if input_mode != "legacy_dry_ssh":
+            print(GENERATE_DESCRIPTION_MAP_REQUIRES_LEGACY_MSG, file=sys.stderr)
+            sys.exit(1)
+        data, err = load_devices_json(input_path)
         if err:
             print(err, file=sys.stderr)
             sys.exit(1)
@@ -954,7 +1002,9 @@ def main():
                 d = (iface.get("description") or "").strip()
                 if d:
                     descriptions.add(d)
-        existing = load_description_map(args.description_map)
+        existing = {}
+        if "-m" in sys.argv or "--description-map" in sys.argv:
+            existing = load_description_map(args.description_map)
         # We save the existing mappings, new description -> as is (then edit)
         out = dict(existing)
         for d in sorted(descriptions):
@@ -963,8 +1013,11 @@ def main():
         print(json.dumps(out, indent=2, ensure_ascii=False))
         sys.exit(0)
 
-    # Export mode: map.get and JSON output only
+    # Legacy utility: export map JSON from Zabbix API only
     if args.export_map:
+        if not args.legacy_dry_ssh:
+            print(MAP_LEGACY_UTILITY_REQUIRES_LEGACY_MSG, file=sys.stderr)
+            sys.exit(1)
         url, token = _get_zabbix_url_token()
         if not url:
             print("For --export-map, set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
@@ -981,8 +1034,11 @@ def main():
         print(json.dumps(result, indent=2, ensure_ascii=False))
         sys.exit(0)
 
-    # Only create a map - do not load data, do not display a table
+    # Legacy utility: create an empty map shell without inventory data
     if args.create_map and not args.update_map and not args.zabbix and not args.print_table:
+        if not args.legacy_dry_ssh:
+            print(MAP_LEGACY_UTILITY_REQUIRES_LEGACY_MSG, file=sys.stderr)
+            sys.exit(1)
         url, token = _get_zabbix_url_token()
         if not url:
             print("Set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
@@ -994,13 +1050,23 @@ def main():
         print("Map created (or already exists): sysmapid={}".format(sysmapid), file=sys.stderr)
         sys.exit(0)
 
-    desc_to_name = load_description_map(args.description_map)
+    input_mode, input_path, input_err = resolve_uplink_cli_input(
+        inventory_file=args.inventory_file,
+        dry_ssh_file=args.file,
+        legacy_dry_ssh=args.legacy_dry_ssh,
+    )
+    if input_err:
+        print(input_err, file=sys.stderr)
+        sys.exit(1)
+
+    desc_to_name = {}
     inventory_report = None
-    if args.inventory_file:
+    inv_ctx = None
+    if input_mode == "inventory":
         try:
-            inventory_report = load_inventory_report(args.inventory_file)
+            inventory_report = load_inventory_report(input_path)
         except (OSError, json.JSONDecodeError) as e:
-            print("failed to read inventory file {}: {}".format(args.inventory_file, e), file=sys.stderr)
+            print("failed to read inventory file {}: {}".format(input_path, e), file=sys.stderr)
             sys.exit(1)
         inv_ctx = load_uplink_provider_context(inventory_report=inventory_report, debug=args.debug)
         expanded_map = (inv_ctx or {}).get("device_iface_to_provider") or {}
@@ -1009,8 +1075,8 @@ def main():
             print("No devices in scoped inventory", file=sys.stderr)
             sys.exit(1)
     else:
-        dry_ssh_path = args.file or DEFAULT_INPUT
-        data, err = load_devices_json(dry_ssh_path)
+        desc_to_name = load_description_map(args.description_map)
+        data, err = load_devices_json(input_path)
         if err:
             print(err, file=sys.stderr)
             sys.exit(1)
@@ -1029,12 +1095,13 @@ def main():
     device_iface_to_provider = {}
     inventory_scoped = not args.legacy_provider_filter
     inventory_read_error = False
-    if use_zabbix and not args.legacy_provider_filter:
-        inv_ctx = load_uplink_provider_context(
-            devices,
-            debug=args.debug,
-            inventory_report=inventory_report,
-        )
+    if not args.legacy_provider_filter:
+        if inv_ctx is None and (use_zabbix or args.print_table):
+            inv_ctx = load_uplink_provider_context(
+                devices,
+                debug=args.debug,
+                inventory_report=inventory_report,
+            )
         if inv_ctx is not None:
             device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
             inventory_read_error = bool(inv_ctx.get("read_error"))
@@ -1048,7 +1115,7 @@ def main():
             print("For --zabbix, --create-map and --update-map set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
             sys.exit(1)
         hostnames = set(devices.keys())
-        cache_base = args.inventory_file or args.file or DEFAULT_INPUT
+        cache_base = args.inventory_file or args.file
         cache_path = os.path.join(
             os.path.dirname(os.path.abspath(cache_base)) if cache_base else ".",
             ZABBIX_CACHE_FILE,

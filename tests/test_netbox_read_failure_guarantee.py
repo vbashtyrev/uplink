@@ -556,6 +556,7 @@ def test_aggregate_skip_blocks_formula_update_on_read_failure(
                     "argv",
                     [
                         "zabbix_provider_aggregate.py",
+                        "--legacy-dry-ssh",
                         "-d",
                         str(DRY_SSH),
                         "-f",
@@ -576,9 +577,10 @@ def test_aggregate_skip_blocks_formula_update_on_read_failure(
                     str(desc_map),
                     cache_path=None,
                 )
-                assert done
+                assert not done
                 assert err
     assert _item_update_with_params(mocker) == []
+    assert "host.create" not in _method_names(mocker)
 
 
 @pytest.mark.parametrize(
@@ -607,7 +609,7 @@ def test_dashboard_skip_blocks_writes_on_read_failure(
         monkeypatch.setattr(
             sys,
             "argv",
-            ["zabbix_uplinks_dashboard.py", "-f", str(DRY_SSH), "--no-cache"],
+            ["zabbix_uplinks_dashboard.py", "--legacy-dry-ssh", "-f", str(DRY_SSH), "--no-cache"],
         )
         with pytest.raises(SystemExit) as exc:
             dash.main()
@@ -695,7 +697,11 @@ def test_sla_skip_exits_on_read_failure_without_report_reads(
     mocker.activate(monkeypatch)
     _disarm_guard(monkeypatch, sla_mod)
 
-    monkeypatch.setattr(sla_mod, "_load_netbox_services_context", lambda debug=False: ctx)
+    monkeypatch.setattr(
+        sla_mod,
+        "_load_netbox_services_context",
+        lambda debug=False, inventory_report=None: ctx,
+    )
     monkeypatch.setattr(sys, "argv", ["zabbix_provider_sla.py", "--days", "1"])
     with pytest.raises(SystemExit) as exc:
         sla_mod.main()
@@ -745,6 +751,7 @@ def test_map_skip_blocks_map_update_on_read_failure(
                     "argv",
                     [
                         "zabbix_map.py",
+                        "--legacy-dry-ssh",
                         "-f",
                         str(DRY_SSH),
                         "-m",
@@ -804,6 +811,7 @@ def test_map_default_create_skips_writes_on_read_failure(
                     "argv",
                     [
                         "zabbix_map.py",
+                        "--legacy-dry-ssh",
                         "-f",
                         str(DRY_SSH),
                         "-m",
@@ -1110,6 +1118,7 @@ def test_positive_map_updates_links_on_healthy_read(monkeypatch, zabbix_env, tmp
                     "argv",
                     [
                         "zabbix_map.py",
+                        "--legacy-dry-ssh",
                         "-f",
                         str(DRY_SSH),
                         "-m",
@@ -1184,7 +1193,7 @@ def test_positive_dashboard_writes_on_healthy_read(monkeypatch, zabbix_env, netb
             monkeypatch.setattr(
                 sys,
                 "argv",
-                ["zabbix_uplinks_dashboard.py", "-f", str(DRY_SSH), "--no-cache"],
+                ["zabbix_uplinks_dashboard.py", "--legacy-dry-ssh", "-f", str(DRY_SSH), "--no-cache"],
             )
             dash.main()
     assert "dashboard.create" in _method_names(mocker) or "dashboard.update" in _method_names(mocker)

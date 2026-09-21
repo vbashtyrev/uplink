@@ -15,9 +15,14 @@ from uplinks.netbox.inventory import (
     ERROR_PROVIDERS_UNAVAILABLE,
     arm_netbox_incomplete_guard,
     burst_metadata_from_inventory,
+    collect_netbox_interface_relations,
+    device_names_from_complete_inventory,
     expand_burst_metadata_for_zabbix,
+    finalize_inventory_read_stats,
     inventory_read_failed,
     is_burst_billing_model,
+    load_inventory_report,
+    netbox_interface_relations_from_report,
     project_circuit_scope,
     providers_from_complete_inventory,
     _zabbix_iface_from_inventory_iface,
@@ -117,11 +122,12 @@ def _burst_report_rows(commit_rates):
     return sorted(rows, key=lambda x: x[0])
 
 
-def _load_netbox_services_context(debug=False):
+def _load_netbox_services_context(debug=False, inventory_report=None):
     """
     Read-only NetBox context for SLA report.
     Return dict with report, providers, burst_circuits, provider_slo_percent,
-    provider_limits_gbps, stats, read_error; or None when NetBox is unavailable.
+    provider_limits_gbps, netbox_interface_relations, stats, read_error;
+    or None when NetBox is unavailable.
     """
     from zabbix_provider_services import (
         collect_provider_limits_gbps,
@@ -133,34 +139,50 @@ def _load_netbox_services_context(debug=False):
     from uplinks.netbox.inventory import burst_circuits_unique_from_inventory
 
     nb = netbox_client_from_env(debug=debug)
-    if nb is None:
+    if nb is None and inventory_report is None:
         return None
 
     scope = project_circuit_scope()
     tag = netbox_border_tag()
-    report = collect_uplink_inventory(
-        nb, tag=tag, debug=debug, active_only=True, circuit_scope=scope
-    )
+    if inventory_report is not None:
+        report = inventory_report
+    else:
+        report = collect_uplink_inventory(
+            nb, tag=tag, debug=debug, active_only=True, circuit_scope=scope
+        )
+    netbox_relations = netbox_interface_relations_from_report(report)
+    if netbox_relations is None and nb is not None:
+        device_names = device_names_from_complete_inventory(report)
+        netbox_relations = collect_netbox_interface_relations(
+            nb, device_names, debug=debug, stats=report.get("stats")
+        )
     stats = dict(report.get("stats") or {})
+    finalize_inventory_read_stats(stats)
     read_error = inventory_read_failed(report)
 
-    provider_slo_percent, slo_error = collect_provider_slo_percent(nb, debug=debug)
-    if slo_error:
-        if slo_error == ERROR_AUTH_DENIED:
-            stats["error"] = ERROR_AUTH_DENIED
-        elif slo_error == ERROR_PARTIAL_READ:
-            if stats.get("error") not in (ERROR_AUTH_DENIED, ERROR_PROVIDERS_UNAVAILABLE):
-                stats["error"] = ERROR_PARTIAL_READ
-        read_error = True
+    provider_slo_percent = {}
+    slo_error = None
+    if nb is not None:
+        provider_slo_percent, slo_error = collect_provider_slo_percent(nb, debug=debug)
+        if slo_error:
+            if slo_error == ERROR_AUTH_DENIED:
+                stats["error"] = ERROR_AUTH_DENIED
+            elif slo_error == ERROR_PARTIAL_READ:
+                if stats.get("error") not in (ERROR_AUTH_DENIED, ERROR_PROVIDERS_UNAVAILABLE):
+                    stats["error"] = ERROR_PARTIAL_READ
+            read_error = True
 
-    provider_limits_gbps, limits_error = collect_provider_limits_gbps(nb, debug=debug)
-    if limits_error:
-        if limits_error == ERROR_AUTH_DENIED:
-            stats["error"] = ERROR_AUTH_DENIED
-        elif limits_error == ERROR_PARTIAL_READ:
-            if stats.get("error") not in (ERROR_AUTH_DENIED, ERROR_PROVIDERS_UNAVAILABLE):
-                stats["error"] = ERROR_PARTIAL_READ
-        read_error = True
+    provider_limits_gbps = {}
+    limits_error = None
+    if nb is not None:
+        provider_limits_gbps, limits_error = collect_provider_limits_gbps(nb, debug=debug)
+        if limits_error:
+            if limits_error == ERROR_AUTH_DENIED:
+                stats["error"] = ERROR_AUTH_DENIED
+            elif limits_error == ERROR_PARTIAL_READ:
+                if stats.get("error") not in (ERROR_AUTH_DENIED, ERROR_PROVIDERS_UNAVAILABLE):
+                    stats["error"] = ERROR_PARTIAL_READ
+            read_error = True
 
     return {
         "report": report,
@@ -168,6 +190,7 @@ def _load_netbox_services_context(debug=False):
         "burst_circuits": burst_circuits_unique_from_inventory(report),
         "provider_slo_percent": provider_slo_percent,
         "provider_limits_gbps": provider_limits_gbps,
+        "netbox_interface_relations": netbox_relations,
         "stats": stats,
         "read_error": read_error,
     }
@@ -219,6 +242,15 @@ def _resolve_providers(netbox_ctx, commit_rates, legacy_commit_rates_fallback=Fa
     return sorted(providers)
 
 
+def _usable_netbox_relations(netbox_relations):
+    """Return relations only when they contain lag/parent mappings."""
+    if not netbox_relations:
+        return None
+    if netbox_relations.get("member_to_aggregate") or netbox_relations.get("parent_children"):
+        return netbox_relations
+    return None
+
+
 def _commit_rate_gbps_from_inventory_row(row):
     kbps = row.get("commit_rate_kbps")
     if kbps is None:
@@ -229,11 +261,22 @@ def _commit_rate_gbps_from_inventory_row(row):
         return None
 
 
-def _burst_report_rows_from_inventory(report, dry_ssh_devices=None, debug=False):
-    """Burst SLA rows from NetBox inventory; optional dry-ssh maps physical to logical iface."""
+def _burst_report_rows_from_inventory(
+    report,
+    dry_ssh_devices=None,
+    netbox_relations=None,
+    debug=False,
+):
+    """Burst SLA rows from NetBox inventory; map physical to logical via relations or dry-ssh."""
     meta = burst_metadata_from_inventory(report)
-    if dry_ssh_devices:
-        meta = expand_burst_metadata_for_zabbix(meta, dry_ssh_devices, debug=debug)
+    relations = _usable_netbox_relations(netbox_relations)
+    if dry_ssh_devices or relations:
+        meta = expand_burst_metadata_for_zabbix(
+            meta,
+            dry_ssh_devices=dry_ssh_devices,
+            netbox_relations=relations,
+            debug=debug,
+        )
 
     cr_by_pair = {}
     for row in report.get("complete") or []:
@@ -245,7 +288,12 @@ def _burst_report_rows_from_inventory(report, dry_ssh_devices=None, debug=False)
             continue
         cr_gbps = _commit_rate_gbps_from_inventory_row(row)
         zabbix_iface = (
-            _zabbix_iface_from_inventory_iface(device_name, iface_name, dry_ssh_devices)
+            _zabbix_iface_from_inventory_iface(
+                device_name,
+                iface_name,
+                dry_ssh_devices=dry_ssh_devices,
+                netbox_relations=relations,
+            )
             or iface_name
         )
         cr_by_pair[(device_name, zabbix_iface)] = cr_gbps
@@ -267,6 +315,7 @@ def _resolve_burst_report_rows(
     netbox_ctx,
     commit_rates,
     dry_ssh_devices=None,
+    netbox_relations=None,
     legacy_commit_rates_fallback=False,
     debug=False,
 ):
@@ -275,9 +324,13 @@ def _resolve_burst_report_rows(
     seen = set()
     netbox_available = bool(netbox_ctx) and not netbox_ctx.get("read_error")
     if netbox_available:
+        relations = _usable_netbox_relations(
+            netbox_relations or netbox_ctx.get("netbox_interface_relations")
+        )
         inv_rows = _burst_report_rows_from_inventory(
             netbox_ctx.get("report") or {},
             dry_ssh_devices=dry_ssh_devices,
+            netbox_relations=relations,
             debug=debug,
         )
         for row in inv_rows:
@@ -664,10 +717,16 @@ def main():
         help="Explicitly allow transition fallback to commit_rates.json for providers, Burst, and SLO.",
     )
     parser.add_argument(
+        "--inventory-file",
+        default=None,
+        metavar="FILE",
+        help="NetBox inventory JSON (with netbox_interface_relations) for physical-to-logical mapping.",
+    )
+    parser.add_argument(
         "--dry-ssh",
         default=None,
         metavar="FILE",
-        help="dry-ssh.json: map physical inventory interface to logical Zabbix trigger name.",
+        help="Legacy dry-ssh.json: map physical inventory interface to logical Zabbix trigger name.",
     )
     parser.add_argument(
         "--days",
@@ -702,6 +761,17 @@ def main():
             sys.exit(1)
         dry_ssh_devices = data.get("devices")
 
+    inventory_report = None
+    if args.inventory_file:
+        try:
+            inventory_report = load_inventory_report(args.inventory_file)
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                "failed to read inventory file {}: {}".format(args.inventory_file, e),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     commit_rates = {}
     legacy_global_slo = None
     if args.legacy_commit_rates_fallback:
@@ -712,7 +782,10 @@ def main():
         commit_rates = commit_rates or {}
         legacy_global_slo = _get_global_provider_sla(commit_rates)
 
-    netbox_ctx = _load_netbox_services_context(debug=args.debug)
+    netbox_ctx = _load_netbox_services_context(
+        debug=args.debug,
+        inventory_report=inventory_report,
+    )
     if netbox_ctx and netbox_ctx.get("read_error"):
         arm_netbox_incomplete_guard(netbox_ctx.get("stats"))
         print(_netbox_read_error_message(netbox_ctx.get("stats")), file=sys.stderr)
@@ -728,6 +801,9 @@ def main():
         netbox_ctx,
         commit_rates,
         dry_ssh_devices=dry_ssh_devices,
+        netbox_relations=_usable_netbox_relations(
+            (netbox_ctx or {}).get("netbox_interface_relations")
+        ),
         legacy_commit_rates_fallback=args.legacy_commit_rates_fallback,
         debug=args.debug,
     )

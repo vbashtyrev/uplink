@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
+from tests.mocks.inventory_scope import (
+    dry_ssh_minimal_inventory_context,
+    write_dry_ssh_minimal_inventory,
+)
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from zabbix_map import MAP_NAME, update_uplinks_map, load_devices_json
 
@@ -64,13 +67,14 @@ def test_main_update_map(monkeypatch, zabbix_env, tmp_path, capsys):
             with patch.object(
                 zm, "load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()
             ):
+                inv = write_dry_ssh_minimal_inventory(tmp_path)
                 monkeypatch.setattr(
                     sys,
                     "argv",
                     [
                         "zabbix_map.py",
-                        "-f",
-                        str(FIXTURES / "dry_ssh_minimal.json"),
+                        "--inventory-file",
+                        str(inv),
                         "-m",
                         str(desc),
                         "--update-map",

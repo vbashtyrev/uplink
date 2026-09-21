@@ -10,8 +10,8 @@ import sys
 import pynetbox
 
 from env_urls import load_env_file_if_present
+from uplinks.data import resolve_uplink_cli_input
 from zabbix_map import (
-    DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
     ZABBIX_CACHE_FILE,
     load_devices_json,
@@ -446,15 +446,18 @@ def run(
             provider_limits = {}
 
     inventory_report = None
+    inventory_inv_ctx = None
     if inventory_file:
         try:
             inventory_report = load_inventory_report(inventory_file)
         except (OSError, json.JSONDecodeError) as e:
             return None, "failed to read inventory file {}: {}".format(inventory_file, e)
-        inv_ctx = load_uplink_provider_context(inventory_report=inventory_report, debug=debug)
+        inventory_inv_ctx = load_uplink_provider_context(
+            inventory_report=inventory_report, debug=debug
+        )
         device_iface_to_provider = {}
-        if inv_ctx:
-            device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
+        if inventory_inv_ctx:
+            device_iface_to_provider = inventory_inv_ctx.get("device_iface_to_provider") or {}
         devices = scoped_devices_from_inventory_report(
             inventory_report, device_iface_to_provider
         )
@@ -465,7 +468,10 @@ def run(
         if err:
             return None, err
         devices = data["devices"]
-    desc_to_name = load_description_map(desc_map_path)
+    if inventory_file:
+        desc_to_name = {}
+    else:
+        desc_to_name = load_description_map(desc_map_path)
 
     hostnames = set(devices.keys())
     host_id_by_name = {}
@@ -541,6 +547,12 @@ def run(
         nb_read_failed = bool(nb_ctx.get("read_error"))
         if nb_read_failed:
             arm_netbox_incomplete_guard(nb_ctx.get("stats") or {})
+    elif inventory_inv_ctx:
+        device_iface_to_provider = inventory_inv_ctx.get("device_iface_to_provider") or {}
+        providers_from_inventory = inventory_inv_ctx.get("providers") or set()
+        nb_read_failed = bool(inventory_inv_ctx.get("read_error"))
+        if nb_read_failed:
+            arm_netbox_incomplete_guard(inventory_inv_ctx.get("stats") or {})
 
     edges = _build_edges_with_keys(
         devices,
@@ -563,7 +575,9 @@ def run(
     else:
         providers_iter = sorted(by_provider.keys())
 
-    skip_formula_updates = nb_read_failed
+    if nb_read_failed:
+        return [], NETBOX_READ_PARTIAL_MSG
+
     done = []
     for provider in providers_iter:
         if not provider:
@@ -589,41 +603,33 @@ def run(
         if err:
             return None, "{}: {}".format(provider, err)
         has_triggers = False
-        if skip_formula_updates:
-            print(
-                "Skipping calculated items and triggers for {}: NetBox read incomplete".format(provider),
-                file=sys.stderr,
-            )
-        else:
-            formula_in = "+".join("last(/{}/{})".format(h, k) for h, k in refs_in)
-            formula_out = "+".join("last(/{}/{})".format(h, k) for h, k in refs_out) if refs_out else "0"
-            _, err = _create_or_update_calculated_item(
-                url, token, hostid, CALCULATED_ITEM_KEY_IN,
-                "{} total Bits received".format(provider), formula_in, debug=debug
+        formula_in = "+".join("last(/{}/{})".format(h, k) for h, k in refs_in)
+        formula_out = "+".join("last(/{}/{})".format(h, k) for h, k in refs_out) if refs_out else "0"
+        _, err = _create_or_update_calculated_item(
+            url, token, hostid, CALCULATED_ITEM_KEY_IN,
+            "{} total Bits received".format(provider), formula_in, debug=debug
+        )
+        if err:
+            return None, "{} item in: {}".format(provider, err)
+        _, err = _create_or_update_calculated_item(
+            url, token, hostid, CALCULATED_ITEM_KEY_OUT,
+            "{} total Bits sent".format(provider), formula_out, debug=debug
+        )
+        if err:
+            return None, "{} item out: {}".format(provider, err)
+        if limit_bps is not None:
+            technical_host = _sanitize_provider_name(host_name)
+            err = _ensure_triggers(
+                url, token, hostid, technical_host, provider, None, limit_bps, debug=debug
             )
             if err:
-                return None, "{} item in: {}".format(provider, err)
-            _, err = _create_or_update_calculated_item(
-                url, token, hostid, CALCULATED_ITEM_KEY_OUT,
-                "{} total Bits sent".format(provider), formula_out, debug=debug
-            )
+                return None, "{} triggers: {}".format(provider, err)
+            has_triggers = True
+        elif prune_triggers_without_limits:
+            err = _delete_provider_aggregate_triggers(url, token, hostid, debug=debug)
             if err:
-                return None, "{} item out: {}".format(provider, err)
-            if limit_bps is not None:
-                technical_host = _sanitize_provider_name(host_name)
-                err = _ensure_triggers(
-                    url, token, hostid, technical_host, provider, None, limit_bps, debug=debug
-                )
-                if err:
-                    return None, "{} triggers: {}".format(provider, err)
-                has_triggers = True
-            elif prune_triggers_without_limits:
-                err = _delete_provider_aggregate_triggers(url, token, hostid, debug=debug)
-                if err:
-                    return None, "{} trigger cleanup: {}".format(provider, err)
+                return None, "{} trigger cleanup: {}".format(provider, err)
         done.append((provider, host_name, has_triggers))
-    if nb_read_failed:
-        return done, NETBOX_READ_PARTIAL_MSG
     return done, None
 
 
@@ -653,6 +659,11 @@ def main():
         help="Read _provider_limits from commit_rates.json when aggregate_limit_gbps is missing in NetBox",
     )
     parser.add_argument(
+        "--legacy-dry-ssh",
+        action="store_true",
+        help="Use legacy dry-ssh.json input (-d/--dry-ssh) instead of --inventory-file",
+    )
+    parser.add_argument(
         "--legacy-provider-filter",
         action="store_true",
         help="Select uplink interfaces by Uplink: in description instead of NetBox inventory scope",
@@ -664,10 +675,15 @@ def main():
     if not url or not token:
         print("Set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
         sys.exit(1)
-    dry_ssh_path = args.dry_ssh or (DEFAULT_INPUT if os.path.isfile(DEFAULT_INPUT) else None)
-    if not args.inventory_file and not dry_ssh_path:
-        print("Provide --inventory-file or -d dry-ssh.json", file=sys.stderr)
+    input_mode, input_path, input_err = resolve_uplink_cli_input(
+        inventory_file=args.inventory_file,
+        dry_ssh_file=args.dry_ssh,
+        legacy_dry_ssh=args.legacy_dry_ssh,
+    )
+    if input_err:
+        print(input_err, file=sys.stderr)
         sys.exit(1)
+    dry_ssh_path = input_path if input_mode == "legacy_dry_ssh" else None
     cache_base = args.inventory_file or dry_ssh_path or "."
     cache_path = None if args.no_cache else os.path.join(
         os.path.dirname(os.path.abspath(cache_base)) if cache_base else ".",

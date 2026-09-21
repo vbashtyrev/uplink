@@ -1,6 +1,5 @@
 """Inventory provider map helpers: case, Juniper aliases, uplink filter."""
 
-from generate_commit_rates import is_uplink
 from uplinks.netbox.inventory import (
     device_iface_provider_map_from_inventory,
     expand_provider_map_for_zabbix,
@@ -53,7 +52,7 @@ def test_expand_inventory_physical_interface_direct():
 def test_is_uplink_iface_inventory_without_uplink_description():
     inventory_map = {("R1", "ethernet51/1"): "ManualISP"}
     iface = {"name": "Ethernet51/1", "description": "Transit only"}
-    assert is_uplink(iface) is False
+    assert is_uplink_iface(iface, hostname="R1", inventory_scoped=False) is False
     assert is_uplink_iface(
         iface, hostname="R1", device_iface_to_provider=inventory_map, inventory_scoped=True
     ) is True

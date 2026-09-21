@@ -6,8 +6,10 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
-from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
+from tests.mocks.inventory_scope import (
+    dry_ssh_minimal_inventory_context,
+    write_dry_ssh_minimal_inventory,
+)
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from zabbix_map import MAP_NAME, ensure_map_exists, main, update_uplinks_map
 
@@ -109,7 +111,7 @@ def test_update_map_with_existing_selements(monkeypatch, zabbix_env):
     assert sid == "55"
 
 
-def test_main_default_creates_map(monkeypatch, zabbix_env, capsys):
+def test_main_default_creates_map(monkeypatch, zabbix_env, tmp_path, capsys):
     hosts, items = _hosts_items()
 
     def map_get(params):
@@ -124,14 +126,15 @@ def test_main_default_creates_map(monkeypatch, zabbix_env, capsys):
         .on("map.update", lambda p: True)
     )
     mocker.activate(monkeypatch)
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
     with patch("zabbix_map.load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()):
         monkeypatch.setattr(
             sys,
             "argv",
             [
                 "zabbix_map.py",
-                "-f",
-                str(FIXTURES / "dry_ssh_minimal.json"),
+                "--inventory-file",
+                str(inv),
                 "--no-cache",
                 "--host",
                 "ALA-KZT-7280TR-1",

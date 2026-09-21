@@ -13,16 +13,10 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 def _default_ns(**overrides):
     base = dict(
-        auto=False,
         plan=False,
-        no_fetch=True,
-        from_file=True,
-        refresh=False,
         dry_ssh="dry-ssh.json",
-        commit_rates="commit_rates.json",
         no_netbox_apply=False,
         no_burst_triggers=False,
-        location=None,
         stop_on_error=False,
         no_stop_on_error=True,
         report=None,
@@ -49,8 +43,6 @@ def test_main_human_mode_all_steps_success(monkeypatch, tmp_path):
     monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
     monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
     monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
-    monkeypatch.setattr(full, "DEFAULT_COMMIT_RATES", "commit_rates.json")
-    monkeypatch.setattr(full, "DEFAULT_DESC_MAP", "description_to_name.json")
     monkeypatch.setattr(full, "DEFAULT_NETBOX_INVENTORY", "netbox_inventory.json")
 
     calls = []
@@ -157,110 +149,6 @@ def test_main_provider_services_without_commit_rates_file(monkeypatch, tmp_path)
     assert services[2:4] == ["--parent-service", "Uplinks providers"]
     assert "-f" not in services
     assert not (tmp_path / "commit_rates.json").exists()
-
-
-def test_main_auto_all_steps_success(monkeypatch, tmp_path):
-    """--auto: legacy chain with generate_commit_rates and netbox_create_circuits."""
-    dry = tmp_path / "dry-ssh.json"
-    dry.write_text((FIXTURES / "dry_ssh_minimal.json").read_text(encoding="utf-8"), encoding="utf-8")
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
-    desc = tmp_path / "description_to_name.json"
-    desc.write_text("{}", encoding="utf-8")
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
-    monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
-    monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
-    monkeypatch.setattr(full, "DEFAULT_COMMIT_RATES", "commit_rates.json")
-    monkeypatch.setattr(full, "DEFAULT_DESC_MAP", "description_to_name.json")
-
-    calls = []
-
-    def fake_run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
-        calls.append(list(argv))
-        return True, "ok line", ""
-
-    monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
-    monkeypatch.setattr(
-        full.argparse.ArgumentParser,
-        "parse_args",
-        lambda self: _default_ns(auto=True, location="ALA"),
-    )
-    with pytest.raises(SystemExit) as exc:
-        full.main()
-    assert exc.value.code == 0
-
-    scripts = [c[1] for c in calls]
-    expected_order = [
-        "netbox_checks.py",
-        "generate_commit_rates.py",
-        "netbox_create_circuits.py",
-        "zabbix_sync_commit_rate.py",
-        "zabbix_provider_aggregate.py",
-        "zabbix_map.py",
-        "zabbix_uplinks_dashboard.py",
-        "zabbix_provider_services.py",
-    ]
-    assert scripts == expected_order
-    assert "netbox_uplinks_inventory.py" not in scripts
-
-    sync = next(c for c in calls if c[1] == "zabbix_sync_commit_rate.py")
-    assert "-d" in sync
-    assert "-f" in sync
-
-
-def test_main_location_without_auto_exits(monkeypatch, tmp_path):
-    dry = tmp_path / "dry-ssh.json"
-    dry.write_text("{}", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
-    monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
-    monkeypatch.setattr(full, "run_cmd", lambda *a, **k: (True, "", ""))
-    monkeypatch.setattr(
-        full.argparse.ArgumentParser,
-        "parse_args",
-        lambda self: _default_ns(location="ALA"),
-    )
-    with pytest.raises(SystemExit) as exc:
-        full.main()
-    assert exc.value.code == 2
-
-
-def test_main_fetch_includes_uplinks_stats(monkeypatch, tmp_path):
-    """Without --no-fetch/--from-file, --auto runs uplinks_stats (legacy SSH path)."""
-    dry = tmp_path / "dry-ssh.json"
-    dry.write_text("{}", encoding="utf-8")
-    (tmp_path / "commit_rates.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "description_to_name.json").write_text("{}", encoding="utf-8")
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
-    monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
-    monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
-    monkeypatch.setattr(full, "DEFAULT_COMMIT_RATES", "commit_rates.json")
-    monkeypatch.setattr(full, "DEFAULT_DESC_MAP", "description_to_name.json")
-
-    calls = []
-
-    def fake_run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
-        calls.append(list(argv))
-        return True, "{}", ""
-
-    monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
-    monkeypatch.setattr(
-        full.argparse.ArgumentParser,
-        "parse_args",
-        lambda self: _default_ns(
-            auto=True, no_fetch=False, from_file=False, refresh=True
-        ),
-    )
-    with pytest.raises(SystemExit) as exc:
-        full.main()
-    assert exc.value.code == 0
-
-    scripts = [c[1] for c in calls]
-    assert scripts[0] == "uplinks_stats.py"
 
 
 def test_main_inventory_failure_stop_on_error(monkeypatch, tmp_path):

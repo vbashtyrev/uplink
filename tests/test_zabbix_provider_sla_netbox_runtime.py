@@ -396,7 +396,7 @@ def test_main_auth_denied_exits_without_legacy_json_fallback(
         encoding="utf-8",
     )
 
-    def fake_load_ctx(debug=False):
+    def fake_load_ctx(debug=False, inventory_report=None):
         return {
             "read_error": True,
             "stats": {"error": sla_mod.ERROR_AUTH_DENIED},

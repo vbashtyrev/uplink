@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context, write_dry_ssh_minimal_inventory
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from zabbix_map import ZABBIX_CACHE_FILE, load_devices_json, save_zabbix_cache
 
@@ -18,8 +19,7 @@ def test_main_print_table_with_cache(monkeypatch, zabbix_env, tmp_path, capsys):
         '{"Uplink: Cogent 10G": "Cogent", "Uplink: Hurricane": "Hurricane"}',
         encoding="utf-8",
     )
-    dry = tmp_path / "dry.json"
-    dry.write_text((FIXTURES / "dry_ssh_minimal.json").read_text(encoding="utf-8"), encoding="utf-8")
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
     cache = tmp_path / ZABBIX_CACHE_FILE
     save_zabbix_cache(
         str(cache),
@@ -56,21 +56,22 @@ def test_main_print_table_with_cache(monkeypatch, zabbix_env, tmp_path, capsys):
         )
 
     with patch.object(zm, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "zabbix_map.py",
-                "-f",
-                str(dry),
-                "-m",
-                str(desc),
-                "--print-table",
-                "--zabbix",
-                "--debug",
-                "--no-cache",
-            ],
-        )
-        zm.main()
+        with patch.object(zm, "load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()):
+            monkeypatch.setattr(
+                sys,
+                "argv",
+                [
+                    "zabbix_map.py",
+                    "--inventory-file",
+                    str(inv),
+                    "-m",
+                    str(desc),
+                    "--print-table",
+                    "--zabbix",
+                    "--debug",
+                    "--no-cache",
+                ],
+            )
+            zm.main()
     out = capsys.readouterr().out
     assert "hostname" in out or "ALA-KZT" in out
