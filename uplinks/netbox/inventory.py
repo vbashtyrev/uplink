@@ -348,13 +348,10 @@ def _record_is_circuit_termination(record):
     return "circuittermination" in ot_key or "circuit termination" in ot_key
 
 
-def _iter_path_objects(path_info):
+def _iter_path_segment_objects(path_info):
+    """Yield objects from the structural path only (not origin/destination)."""
     if path_info is None:
         return
-    for key in ("origin", "destination"):
-        obj = _safe_get_mapping(path_info, key)
-        if obj is not None:
-            yield obj
     path_segments = _safe_get_mapping(path_info, "path") or []
     if not isinstance(path_segments, (list, tuple)):
         return
@@ -367,12 +364,71 @@ def _iter_path_objects(path_info):
             yield segment
 
 
+def _iter_path_objects(path_info):
+    if path_info is None:
+        return
+    for key in ("origin", "destination"):
+        obj = _safe_get_mapping(path_info, key)
+        if obj is not None:
+            yield obj
+    for obj in _iter_path_segment_objects(path_info):
+        yield obj
+
+
+def _path_info_has_flags(path_info):
+    if not isinstance(path_info, dict):
+        return False
+    return any(key in path_info for key in ("is_active", "is_complete", "is_split"))
+
+
+def _is_legacy_path_info(path_info):
+    if not isinstance(path_info, dict):
+        return False
+    if _path_info_has_flags(path_info):
+        return False
+    return all(key in path_info for key in ("origin", "destination", "path"))
+
+
+def _new_path_info_valid(path_info):
+    return (
+        path_info.get("is_split") is False
+        and path_info.get("is_active") is True
+        and path_info.get("is_complete") is True
+    )
+
+
+def _cable_connection_status(record):
+    if not _record_is_cable(record):
+        return None
+    if isinstance(record, dict):
+        status = record.get("status")
+    else:
+        try:
+            status = getattr(record, "status", None)
+        except Exception:
+            status = None
+    normalized = _normalize_choice(status)
+    if normalized is None:
+        return None
+    return str(normalized).lower()
+
+
+def _all_path_cables_connected(path_info):
+    found_cable = False
+    for obj in _iter_path_segment_objects(path_info):
+        if _record_is_cable(obj):
+            found_cable = True
+            if _cable_connection_status(obj) != "connected":
+                return False
+    return found_cable
+
+
 def _path_matches_cable_and_termination(path_info, cable_id, circuit_termination_id):
     if cable_id is None or circuit_termination_id is None:
         return False
     has_cable = False
     has_ct = False
-    for obj in _iter_path_objects(path_info):
+    for obj in _iter_path_segment_objects(path_info):
         try:
             oid = _record_object_id(obj)
             if oid is None:
@@ -390,7 +446,7 @@ def _path_matches_cable_and_termination(path_info, cable_id, circuit_termination
 
 def _interface_from_path_info(path_info, circuit_termination_id=None):
     """Extract confirmed terminal dcim.interface from a validated paths() entry."""
-    objects = list(_iter_path_objects(path_info))
+    objects = list(_iter_path_segment_objects(path_info))
     interfaces = []
     ct_index = None
     for index, obj in enumerate(objects):
@@ -475,6 +531,24 @@ def _port_from_cable(nb, cable_obj, debug=False, stats=None):
         return None
 
 
+def _interface_from_legacy_path_info(
+    path_info, cable_id, circuit_termination_id, debug=False, port=None
+):
+    """Accept old pynetbox paths() shape when structural checks pass."""
+    if not _all_path_cables_connected(path_info):
+        if debug:
+            print(
+                "skip legacy path on {}: cable not connected".format(
+                    getattr(port, "name", port)
+                ),
+                file=sys.stderr,
+            )
+        return None
+    if not _path_matches_cable_and_termination(path_info, cable_id, circuit_termination_id):
+        return None
+    return _interface_from_path_info(path_info, circuit_termination_id=circuit_termination_id)
+
+
 def _interface_from_port_paths(nb, port, cable_id, circuit_termination_id, debug=False, stats=None):
     """Trace through pass-through port paths() to find terminal dcim.interface."""
     paths_fn = getattr(port, "paths", None)
@@ -490,32 +564,50 @@ def _interface_from_port_paths(nb, port, cable_id, circuit_termination_id, debug
         return None
     if not path_list or not isinstance(path_list, (list, tuple)):
         return None
+
+    legacy_entries = [
+        path_info
+        for path_info in path_list
+        if isinstance(path_info, dict) and _is_legacy_path_info(path_info)
+    ]
+    if legacy_entries:
+        if len(legacy_entries) != 1 or len(path_list) != 1:
+            if debug:
+                print(
+                    "skip legacy paths on {}: expected exactly one path, got {}".format(
+                        getattr(port, "name", port), len(path_list)
+                    ),
+                    file=sys.stderr,
+                )
+            return None
+        return _interface_from_legacy_path_info(
+            legacy_entries[0],
+            cable_id,
+            circuit_termination_id,
+            debug=debug,
+            port=port,
+        )
+
     for path_info in path_list:
         if not isinstance(path_info, dict):
             continue
-        if path_info.get("is_split") is not False:
+        if not _path_info_has_flags(path_info):
             if debug:
                 print(
-                    "skip path on {}: is_split={}".format(
-                        getattr(port, "name", port), path_info.get("is_split")
+                    "skip path on {}: missing path flags".format(
+                        getattr(port, "name", port)
                     ),
                     file=sys.stderr,
                 )
             continue
-        if path_info.get("is_active") is not True:
+        if not _new_path_info_valid(path_info):
             if debug:
                 print(
-                    "skip path on {}: is_active={}".format(
-                        getattr(port, "name", port), path_info.get("is_active")
-                    ),
-                    file=sys.stderr,
-                )
-            continue
-        if path_info.get("is_complete") is not True:
-            if debug:
-                print(
-                    "skip path on {}: is_complete={}".format(
-                        getattr(port, "name", port), path_info.get("is_complete")
+                    "skip path on {}: is_active={} is_complete={} is_split={}".format(
+                        getattr(port, "name", port),
+                        path_info.get("is_active"),
+                        path_info.get("is_complete"),
+                        path_info.get("is_split"),
                     ),
                     file=sys.stderr,
                 )

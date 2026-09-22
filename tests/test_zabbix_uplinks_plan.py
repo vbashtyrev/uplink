@@ -6,21 +6,60 @@ from pathlib import Path
 import pytest
 
 from tests.mocks.netbox_api import build_netbox_for_commit_rates
+from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from tests.mocks.zabbix_rpc import ZabbixRpcMocker
 from uplinks_config import (
+    DASHBOARD_NAME,
+    DASHBOARD_NAME_BY_PROVIDER,
+    MAP_NAME,
+    PROJECT_PROVIDER_SLO_PERCENT,
     TRIGGER_DESC_UTIL_CRIT_SUFFIX,
     TRIGGER_DESC_UTIL_WARN_SUFFIX,
     TRIGGER_TAG_NAME,
     TRIGGER_TAG_VALUE,
 )
 from uplinks.zabbix.plan import (
+    NOT_EVALUATED,
     ZABBIX_MUTATING_METHODS,
     build_zabbix_plan,
     format_plan_text,
     inventory_plan_gate,
+    _expected_main_dashboard_identities,
+    _plan_one_dashboard,
+    _plan_services,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def _zabbix_filter_name(params):
+    raw = (params.get("filter") or {}).get("name")
+    if isinstance(raw, list):
+        return raw[0] if raw else ""
+    return raw or ""
+
+
+def _activate_plan_mocker(monkeypatch, host_get=None, trigger_get=None, item_get=None, **extra_handlers):
+    mocker = build_standard_zabbix_mocker()
+    if host_get is not None:
+        mocker.on("host.get", host_get)
+    if trigger_get is not None:
+        mocker.on("trigger.get", trigger_get)
+    if item_get is not None:
+        mocker.on("item.get", item_get)
+    for method, handler in extra_handlers.items():
+        mocker.on(method, handler)
+    mocker.activate(monkeypatch)
+    monkeypatch.setattr(
+        "uplinks.zabbix.plan.collect_provider_limits_gbps",
+        lambda nb, debug=False: ({"Cogent": 20.0}, None),
+    )
+    monkeypatch.setattr(
+        "uplinks.zabbix.plan.collect_provider_slo_percent",
+        lambda nb, debug=False: ({}, None),
+    )
+    monkeypatch.setattr("uplinks.zabbix.plan.netbox_client_from_env", lambda debug=False: object())
+    return mocker
 
 
 def test_inventory_plan_gate_fail_closed():
@@ -57,18 +96,14 @@ def test_build_zabbix_plan_read_only_no_mutating_calls(monkeypatch, zabbix_env, 
             ]
         return []
 
-    mocker = ZabbixRpcMocker()
-    mocker.on("user.get", lambda p: [{"userid": "1"}])
-    mocker.on("host.get", host_get)
-    mocker.on("usermacro.get", lambda p: [])
-    mocker.on("trigger.get", lambda p: [])
-    mocker.activate(monkeypatch)
+    mocker = _activate_plan_mocker(monkeypatch, host_get=host_get)
 
     report, err = build_zabbix_plan(str(dry))
     assert err is None
     assert report["read_only"] is True
     assert report["inventory"]["stats"]
-    assert report["planned"]["maps"]["status"] == "not_evaluated"
+    assert report["planned"]["maps"].get("status") != "not_evaluated"
+    assert "sla.create" in ZABBIX_MUTATING_METHODS
 
     mutating = [m for m in mocker.method_names() if m in ZABBIX_MUTATING_METHODS]
     assert mutating == []
@@ -98,12 +133,7 @@ def test_build_zabbix_plan_macro_create_category(monkeypatch, zabbix_env, netbox
             ]
         return []
 
-    mocker = ZabbixRpcMocker()
-    mocker.on("user.get", lambda p: [{"userid": "1"}])
-    mocker.on("host.get", host_get)
-    mocker.on("usermacro.get", lambda p: [])
-    mocker.on("trigger.get", lambda p: [])
-    mocker.activate(monkeypatch)
+    _activate_plan_mocker(monkeypatch, host_get=host_get)
 
     report, err = build_zabbix_plan(str(dry))
     assert err is None
@@ -185,12 +215,7 @@ def test_build_zabbix_plan_util_triggers_exclude_out_of_scope_dry_ssh(
             ]
         return []
 
-    mocker = ZabbixRpcMocker()
-    mocker.on("user.get", lambda p: [{"userid": "1"}])
-    mocker.on("host.get", host_get)
-    mocker.on("usermacro.get", lambda p: [])
-    mocker.on("trigger.get", lambda p: [])
-    mocker.activate(monkeypatch)
+    _activate_plan_mocker(monkeypatch, host_get=host_get)
 
     report, err = build_zabbix_plan(str(dry))
     assert err is None
@@ -401,11 +426,7 @@ def test_build_zabbix_plan_fails_on_relations_read_error(monkeypatch, zabbix_env
     nb.dcim.interfaces.filter = fail_interfaces_filter
     monkeypatch.setattr("uplinks.zabbix.plan.pynetbox.api", lambda url, token: nb)
 
-    mocker = ZabbixRpcMocker()
-    mocker.on("user.get", lambda p: [{"userid": "1"}])
-    mocker.on("host.get", lambda p: [])
-    mocker.on("trigger.get", lambda p: [])
-    mocker.activate(monkeypatch)
+    build_standard_zabbix_mocker().on("host.get", lambda p: []).on("trigger.get", lambda p: []).activate(monkeypatch)
 
     report, err = build_zabbix_plan(str(dry), inventory_file=str(inv))
     assert report is None
@@ -443,11 +464,7 @@ def test_build_zabbix_plan_skips_missing_zabbix_host(monkeypatch, zabbix_env, ne
     )
     monkeypatch.setattr("uplinks.zabbix.plan.pynetbox.api", lambda url, token: nb)
 
-    mocker = ZabbixRpcMocker()
-    mocker.on("user.get", lambda p: [{"userid": "1"}])
-    mocker.on("host.get", lambda p: [])
-    mocker.on("trigger.get", lambda p: [])
-    mocker.activate(monkeypatch)
+    _activate_plan_mocker(monkeypatch, host_get=lambda p: [])
 
     report, err = build_zabbix_plan(str(dry), inventory_file=str(inv))
     assert err is None
@@ -512,12 +529,7 @@ def test_build_zabbix_plan_util_trigger_delete_stale_only(monkeypatch, zabbix_en
             {"triggerid": "902", "description": stale_desc, "tags": []},
         ]
 
-    mocker = ZabbixRpcMocker()
-    mocker.on("user.get", lambda p: [{"userid": "1"}])
-    mocker.on("host.get", host_get)
-    mocker.on("usermacro.get", lambda p: [])
-    mocker.on("trigger.get", trigger_get)
-    mocker.activate(monkeypatch)
+    _activate_plan_mocker(monkeypatch, host_get=host_get, trigger_get=trigger_get)
 
     report, err = build_zabbix_plan(str(dry), inventory_file=str(inv))
     assert err is None
@@ -563,12 +575,7 @@ def test_build_zabbix_plan_from_inventory_file_without_netbox(monkeypatch, zabbi
             ]
         return []
 
-    mocker = ZabbixRpcMocker()
-    mocker.on("user.get", lambda p: [{"userid": "1"}])
-    mocker.on("host.get", host_get)
-    mocker.on("usermacro.get", lambda p: [])
-    mocker.on("trigger.get", lambda p: [])
-    mocker.activate(monkeypatch)
+    _activate_plan_mocker(monkeypatch, host_get=host_get)
 
     monkeypatch.delenv("NETBOX_URL", raising=False)
     monkeypatch.delenv("NETBOX_TOKEN", raising=False)
@@ -629,12 +636,7 @@ def test_build_zabbix_plan_from_inventory_file_uses_embedded_relations(
             return [{"hostid": "102", "host": "FRN-MX-1", "name": "FRN-MX-1"}]
         return []
 
-    mocker = ZabbixRpcMocker()
-    mocker.on("user.get", lambda p: [{"userid": "1"}])
-    mocker.on("host.get", host_get)
-    mocker.on("usermacro.get", lambda p: [])
-    mocker.on("trigger.get", lambda p: [])
-    mocker.activate(monkeypatch)
+    _activate_plan_mocker(monkeypatch, host_get=host_get)
 
     monkeypatch.delenv("NETBOX_URL", raising=False)
     monkeypatch.delenv("NETBOX_TOKEN", raising=False)
@@ -655,3 +657,727 @@ def test_build_zabbix_plan_from_inventory_file_uses_embedded_relations(
     macro_hosts = {row["host"]: row for row in report["planned"]["macros"]["create"]}
     assert "FRN-MX-1" in macro_hosts
     assert macro_hosts["FRN-MX-1"]["interface"] == "ae5.0"
+
+
+def test_plan_sections_expose_create_update_unchanged_delete(monkeypatch, zabbix_env, tmp_path):
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "WAW-EQX-7280QR-2",
+                        "interface": "Ethernet23/1",
+                        "provider": "Cogent",
+                        "commit_rate_kbps": 10000000,
+                        "billing_model": "Flat",
+                        "circuit_id": "C-1",
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_limit_desc = "Provider aggregate traffic >= 100% of limit (10 Gbps)"
+
+    def host_get(params):
+        filt = params.get("filter") or {}
+        names = set(filt.get("host") or filt.get("name") or [])
+        if "WAW-EQX-7280QR-2" in names:
+            return [{"hostid": "102", "host": "WAW-EQX-7280QR-2", "name": "WAW-EQX-7280QR-2"}]
+        if "Uplinks Cogent" in names or "Uplinks_Cogent" in names:
+            return [{"hostid": "201", "host": "Uplinks_Cogent", "name": "Uplinks Cogent"}]
+        return []
+
+    def item_get(params):
+        hostids = {str(x) for x in (params.get("hostids") or [])}
+        name_search = (params.get("search") or {}).get("name", "")
+        key_search = (params.get("search") or {}).get("key_", "")
+        if "201" in hostids and "aggregate.bits" in key_search:
+            return [{"itemid": "501", "key_": "aggregate.bits.in[]"}]
+        if "102" in hostids and name_search == "Bits received":
+            return [
+                {
+                    "itemid": "601",
+                    "hostid": "102",
+                    "name": "Interface Ethernet23/1: Bits received",
+                    "key_": "net.if.in[eth23]",
+                }
+            ]
+        if "102" in hostids and name_search == "Bits sent":
+            return [
+                {
+                    "itemid": "602",
+                    "hostid": "102",
+                    "name": "Interface Ethernet23/1: Bits sent",
+                    "key_": "net.if.out[eth23]",
+                }
+            ]
+        return []
+
+    def trigger_get(params):
+        hostids = {str(x) for x in (params.get("hostids") or [])}
+        if "201" in hostids:
+            return [{"triggerid": "701", "description": stale_limit_desc}]
+        return []
+
+    def map_get(params):
+        return [
+            {
+                "sysmapid": "9",
+                "name": MAP_NAME,
+                "selements": [
+                    {
+                        "selementid": "11",
+                        "elementtype": 0,
+                        "elementid": 999,
+                        "elements": [{"hostid": "999"}],
+                    },
+                    {"selementid": "12", "elementtype": 4, "label": "StaleISP"},
+                ],
+                "links": [],
+            }
+        ]
+
+    def dashboard_get(params):
+        name = _zabbix_filter_name(params)
+        if name == DASHBOARD_NAME:
+            return [
+                {
+                    "dashboardid": "31",
+                    "name": DASHBOARD_NAME,
+                    "pages": [
+                        {
+                            "widgets": [
+                                {"name": "WAW-EQX-7280QR-2 - Ethernet23/1 (Cogent)"},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        return []
+
+    def service_get(params):
+        filt = set((params.get("filter") or {}).get("name") or [])
+        search = (params.get("search") or {}).get("name", "")
+        rows = []
+        if "Uplinks providers" in filt:
+            rows.append({"serviceid": "801", "name": "Uplinks providers", "parents": []})
+        if "Uplinks Cogent" in filt:
+            rows.append({"serviceid": "802", "name": "Uplinks Cogent", "parents": []})
+        if "Uplinks Cogent SLA source" in filt:
+            rows.append({"serviceid": "803", "name": "Uplinks Cogent SLA source"})
+        if search == "Uplinks":
+            rows.append({"serviceid": "804", "name": "Uplinks Orphan"})
+        return rows
+
+    def sla_get(params):
+        filt = set((params.get("filter") or {}).get("name") or [])
+        search = (params.get("search") or {}).get("name", "")
+        rows = []
+        if "Uplinks Cogent SLA" in filt:
+            rows.append({"slaid": "901", "name": "Uplinks Cogent SLA", "slo": "99.95"})
+        if search == "Uplinks":
+            rows.append({"slaid": "902", "name": "Uplinks Orphan SLA"})
+        return rows
+
+    _activate_plan_mocker(
+        monkeypatch,
+        host_get=host_get,
+        item_get=item_get,
+        trigger_get=trigger_get,
+        **{
+            "map.get": map_get,
+            "dashboard.get": dashboard_get,
+            "service.get": service_get,
+            "sla.get": sla_get,
+        },
+    )
+
+    report, err = build_zabbix_plan(None, inventory_file=str(inv))
+    assert err is None
+    planned = report["planned"]
+
+    assert planned["aggregate_hosts"]["unchanged"]
+    assert planned["aggregate_hosts"]["calculated_items"]["create"]
+    assert planned["aggregate_hosts"]["limit_triggers"]["delete"]
+
+    assert planned["maps"]["update"]
+    assert planned["maps"]["delete"]
+
+    assert planned["dashboards"]["unchanged"] or planned["dashboards"]["create"]
+    assert planned["dashboards"]["create"] or planned["dashboards"]["update"]
+
+    assert planned["services"]["delete"]
+    assert planned["services"]["sla"]["unchanged"]
+    assert planned["services"]["sla"]["delete"]
+
+
+def test_plan_services_partial_read_suppresses_delete(monkeypatch, zabbix_env):
+    uplink_ctx = {
+        "providers": ["Cogent"],
+        "burst_circuits": [],
+        "provider_slo_percent": {},
+    }
+
+    def service_get(params):
+        filt = set((params.get("filter") or {}).get("name") or [])
+        rows = []
+        if "Uplinks providers" in filt:
+            rows.append({"serviceid": "801", "name": "Uplinks providers", "parents": []})
+        if "Uplinks Cogent" in filt:
+            rows.append({"serviceid": "802", "name": "Uplinks Cogent", "parents": []})
+        if "Uplinks Cogent SLA source" in filt:
+            rows.append({"serviceid": "803", "name": "Uplinks Cogent SLA source"})
+        return rows
+
+    mocker = build_standard_zabbix_mocker()
+    mocker.on("service.get", service_get)
+    mocker.on("sla.get", lambda p: [{"slaid": "901", "name": "Uplinks Cogent SLA", "slo": "99.95"}])
+    mocker.activate(monkeypatch)
+
+    plan, _current, err = _plan_services(
+        "https://zabbix.example/api_jsonrpc.php",
+        "token",
+        uplink_ctx,
+        parent_service="Uplinks providers",
+        allow_delete=False,
+    )
+    assert err is None
+    assert plan["delete"] == []
+    assert plan["sla"]["delete"] == []
+    assert plan["skipped"]
+    assert "sla.create" in ZABBIX_MUTATING_METHODS
+    assert "sla.update" in ZABBIX_MUTATING_METHODS
+    assert "sla.delete" in ZABBIX_MUTATING_METHODS
+    assert "sla.create" not in mocker.method_names()
+
+
+def test_plan_unread_limits_no_aggregate_trigger_delete(monkeypatch, zabbix_env, tmp_path):
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "WAW-EQX-7280QR-2",
+                        "interface": "Ethernet23/1",
+                        "provider": "Cogent",
+                        "commit_rate_kbps": 10000000,
+                        "billing_model": "Flat",
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def host_get(params):
+        filt = params.get("filter") or {}
+        names = set(filt.get("host") or filt.get("name") or [])
+        if "WAW-EQX-7280QR-2" in names:
+            return [{"hostid": "102", "host": "WAW-EQX-7280QR-2", "name": "WAW-EQX-7280QR-2"}]
+        if "Uplinks Cogent" in names or "Uplinks_Cogent" in names:
+            return [{"hostid": "201", "host": "Uplinks_Cogent", "name": "Uplinks Cogent"}]
+        return []
+
+    def trigger_get(params):
+        hostids = {str(x) for x in (params.get("hostids") or [])}
+        if "201" in hostids:
+            return [
+                {
+                    "triggerid": "701",
+                    "description": "Provider aggregate traffic >= 100% of limit (10 Gbps)",
+                }
+            ]
+        return []
+
+    mocker = _activate_plan_mocker(monkeypatch, host_get=host_get, trigger_get=trigger_get)
+    monkeypatch.setattr("uplinks.zabbix.plan.netbox_client_from_env", lambda debug=False: None)
+
+    report, err = build_zabbix_plan(None, inventory_file=str(inv))
+    assert err is None
+    limit_triggers = report["planned"]["aggregate_hosts"]["limit_triggers"]
+    assert limit_triggers.get("status") == NOT_EVALUATED
+    assert limit_triggers["delete"] == []
+    assert limit_triggers["update"] == []
+    assert "unavailable" in limit_triggers.get("reason", "").lower()
+    assert "701" not in {row.get("triggerid") for row in limit_triggers.get("delete") or []}
+    assert "trigger.delete" not in mocker.method_names()
+    assert report["planned"]["dashboards"].get("status") == NOT_EVALUATED
+
+
+def test_plan_dashboard_no_aggregate_items_no_false_update(monkeypatch, zabbix_env, tmp_path):
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "WAW-EQX-7280QR-2",
+                        "interface": "Ethernet23/1",
+                        "provider": "Cogent",
+                        "commit_rate_kbps": 10000000,
+                        "billing_model": "Flat",
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def host_get(params):
+        filt = params.get("filter") or {}
+        names = set(filt.get("host") or filt.get("name") or [])
+        if "WAW-EQX-7280QR-2" in names:
+            return [{"hostid": "102", "host": "WAW-EQX-7280QR-2", "name": "WAW-EQX-7280QR-2"}]
+        if "Uplinks Cogent" in names or "Uplinks_Cogent" in names:
+            return [{"hostid": "201", "host": "Uplinks_Cogent", "name": "Uplinks Cogent"}]
+        return []
+
+    def item_get(params):
+        hostids = {str(x) for x in (params.get("hostids") or [])}
+        name_search = (params.get("search") or {}).get("name", "")
+        key_search = (params.get("search") or {}).get("key_", "")
+        if "201" in hostids and "aggregate.bits" in key_search:
+            return []
+        if "102" in hostids and name_search == "Bits received":
+            return [
+                {
+                    "itemid": "601",
+                    "hostid": "102",
+                    "name": "Interface Ethernet23/1: Bits received",
+                    "key_": "net.if.in[eth23]",
+                }
+            ]
+        if "102" in hostids and name_search == "Bits sent":
+            return [
+                {
+                    "itemid": "602",
+                    "hostid": "102",
+                    "name": "Interface Ethernet23/1: Bits sent",
+                    "key_": "net.if.out[eth23]",
+                }
+            ]
+        return []
+
+    def dashboard_get(params):
+        name = _zabbix_filter_name(params)
+        if name == DASHBOARD_NAME_BY_PROVIDER:
+            return [
+                {
+                    "dashboardid": "41",
+                    "name": DASHBOARD_NAME_BY_PROVIDER,
+                    "pages": [
+                        {
+                            "name": "Cogent",
+                            "widgets": [
+                                {"name": "Cogent - Bits received (summary)"},
+                                {"name": "Cogent - Bits sent (summary)"},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        return []
+
+    _activate_plan_mocker(
+        monkeypatch,
+        host_get=host_get,
+        item_get=item_get,
+        **{"dashboard.get": dashboard_get},
+    )
+
+    report, err = build_zabbix_plan(None, inventory_file=str(inv))
+    assert err is None
+    dashboards = report["planned"]["dashboards"]
+    provider_updates = [
+        row for row in dashboards.get("update") or [] if row.get("dashboard") == DASHBOARD_NAME_BY_PROVIDER
+    ]
+    assert provider_updates == []
+    provider_unchanged = [
+        row for row in dashboards.get("unchanged") or [] if row.get("dashboard") == DASHBOARD_NAME_BY_PROVIDER
+    ]
+    assert provider_unchanged
+
+
+def test_plan_zabbix_items_read_failure_no_destructive_plan(monkeypatch, zabbix_env, tmp_path):
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "WAW-EQX-7280QR-2",
+                        "interface": "Ethernet23/1",
+                        "provider": "Cogent",
+                        "billing_model": "Flat",
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    our_tag = {"tag": TRIGGER_TAG_NAME, "value": TRIGGER_TAG_VALUE}
+    stale_desc = "Interface ae5: {}".format(TRIGGER_DESC_UTIL_WARN_SUFFIX)
+
+    def host_get(params):
+        filt = params.get("filter") or {}
+        names = set(filt.get("host") or filt.get("name") or [])
+        if "WAW-EQX-7280QR-2" in names:
+            return [{"hostid": "102", "host": "WAW-EQX-7280QR-2", "name": "WAW-EQX-7280QR-2"}]
+        return []
+
+    def trigger_get(params):
+        return [{"triggerid": "900", "description": stale_desc, "tags": [our_tag]}]
+
+    mocker = _activate_plan_mocker(monkeypatch, host_get=host_get, trigger_get=trigger_get)
+    monkeypatch.setattr(
+        "uplinks.zabbix.plan.fetch_zabbix_hosts_and_items",
+        lambda *a, **k: (None, None, "item.get: simulated read failure"),
+    )
+
+    report, err = build_zabbix_plan(None, inventory_file=str(inv))
+    assert err is None
+    planned = report["planned"]
+    assert planned["util_triggers"]["delete"] == []
+    assert planned["dashboards"].get("status") == NOT_EVALUATED
+    assert planned["aggregate_hosts"]["calculated_items"].get("status") == NOT_EVALUATED
+    assert planned["aggregate_hosts"]["limit_triggers"].get("status") == NOT_EVALUATED
+    assert planned["maps"].get("status") == NOT_EVALUATED
+    assert planned["maps"]["create"] == []
+    assert planned["maps"]["update"] == []
+    assert planned["maps"]["delete"] == []
+    assert "trigger.delete" not in mocker.method_names()
+    util_skipped = [s for s in planned["util_triggers"]["skipped"] if s.get("suppressed") == "delete"]
+    assert util_skipped
+
+
+def test_plan_aggregate_item_get_error_dashboards_not_evaluated(monkeypatch, zabbix_env, tmp_path):
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "WAW-EQX-7280QR-2",
+                        "interface": "Ethernet23/1",
+                        "provider": "Cogent",
+                        "commit_rate_kbps": 10000000,
+                        "billing_model": "Flat",
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def host_get(params):
+        filt = params.get("filter") or {}
+        names = set(filt.get("host") or filt.get("name") or [])
+        if "WAW-EQX-7280QR-2" in names:
+            return [{"hostid": "102", "host": "WAW-EQX-7280QR-2", "name": "WAW-EQX-7280QR-2"}]
+        if "Uplinks Cogent" in names or "Uplinks_Cogent" in names:
+            return [{"hostid": "201", "host": "Uplinks_Cogent", "name": "Uplinks Cogent"}]
+        return []
+
+    def item_get(params):
+        hostids = {str(x) for x in (params.get("hostids") or [])}
+        name_search = (params.get("search") or {}).get("name", "")
+        key_search = (params.get("search") or {}).get("key_", "")
+        if "201" in hostids and "aggregate.bits" in key_search:
+            return None  # force mocker error path
+        if "102" in hostids and name_search == "Bits received":
+            return [
+                {
+                    "itemid": "601",
+                    "hostid": "102",
+                    "name": "Interface Ethernet23/1: Bits received",
+                    "key_": "net.if.in[eth23]",
+                }
+            ]
+        if "102" in hostids and name_search == "Bits sent":
+            return [
+                {
+                    "itemid": "602",
+                    "hostid": "102",
+                    "name": "Interface Ethernet23/1: Bits sent",
+                    "key_": "net.if.out[eth23]",
+                }
+            ]
+        return []
+
+    def item_get_fail(params):
+        hostids = {str(x) for x in (params.get("hostids") or [])}
+        key_search = (params.get("search") or {}).get("key_", "")
+        if "201" in hostids and "aggregate.bits" in key_search:
+            raise RuntimeError("item.get aggregate simulated failure")
+        return item_get(params)
+
+    _activate_plan_mocker(monkeypatch, host_get=host_get, item_get=item_get_fail)
+
+    report, err = build_zabbix_plan(None, inventory_file=str(inv))
+    assert err is None
+    dashboards = report["planned"]["dashboards"]
+    assert dashboards.get("status") == NOT_EVALUATED
+    assert "item.get aggregate" in dashboards.get("reason", "")
+    assert dashboards.get("update") == []
+
+
+def test_plan_slo_read_error_no_sla_plan(monkeypatch, zabbix_env, tmp_path):
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "WAW-EQX-7280QR-2",
+                        "interface": "Ethernet23/1",
+                        "provider": "Cogent",
+                        "billing_model": "Flat",
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def host_get(params):
+        filt = params.get("filter") or {}
+        names = set(filt.get("host") or filt.get("name") or [])
+        if "WAW-EQX-7280QR-2" in names:
+            return [{"hostid": "102", "host": "WAW-EQX-7280QR-2", "name": "WAW-EQX-7280QR-2"}]
+        return []
+
+    mocker = _activate_plan_mocker(monkeypatch, host_get=host_get)
+    monkeypatch.setattr(
+        "uplinks.zabbix.plan.collect_provider_limits_gbps",
+        lambda nb, debug=False: ({}, None),
+    )
+    monkeypatch.setattr(
+        "uplinks.zabbix.plan.collect_provider_slo_percent",
+        lambda nb, debug=False: ({}, "partial_read"),
+    )
+
+    report, err = build_zabbix_plan(None, inventory_file=str(inv))
+    assert err is None
+    sla = report["planned"]["services"]["sla"]
+    assert sla.get("status") == NOT_EVALUATED
+    assert sla.get("create") == []
+    assert sla.get("update") == []
+    assert sla.get("delete") == []
+    assert "SLO read failed" in sla.get("reason", "")
+    assert "sla.create" not in mocker.method_names()
+
+
+def test_plan_dashboard_update_suppressed_when_destructive_disabled(monkeypatch, zabbix_env):
+    edges = [
+        (
+            "WAW-EQX-7280QR-2",
+            "102",
+            "Ethernet23/1",
+            "Cogent",
+            "601",
+            "602",
+            False,
+            False,
+            False,
+        )
+    ]
+    expected = _expected_main_dashboard_identities(edges)
+
+    def dashboard_get(params):
+        return [
+            {
+                "dashboardid": "31",
+                "name": DASHBOARD_NAME,
+                "pages": [{"widgets": [{"name": "stale widget only"}]}],
+            }
+        ]
+
+    mocker = build_standard_zabbix_mocker()
+    mocker.on("dashboard.get", dashboard_get)
+    mocker.activate(monkeypatch)
+
+    plan, _current, err = _plan_one_dashboard(
+        "https://zabbix.example/api_jsonrpc.php",
+        "token",
+        DASHBOARD_NAME,
+        expected,
+        allow_destructive=False,
+    )
+    assert err is None
+    assert plan["update"] == []
+    suppressed = [row for row in plan["skipped"] if row.get("suppressed") == "update"]
+    assert len(suppressed) == 1
+    assert suppressed[0]["dashboard"] == DASHBOARD_NAME
+
+
+def test_plan_maps_not_evaluated_when_zabbix_items_unread(monkeypatch, zabbix_env, tmp_path):
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "WAW-EQX-7280QR-2",
+                        "interface": "Ethernet23/1",
+                        "provider": "Cogent",
+                        "billing_model": "Flat",
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def host_get(params):
+        filt = params.get("filter") or {}
+        names = set(filt.get("host") or filt.get("name") or [])
+        if "WAW-EQX-7280QR-2" in names:
+            return [{"hostid": "102", "host": "WAW-EQX-7280QR-2", "name": "WAW-EQX-7280QR-2"}]
+        return []
+
+    def map_get(params):
+        return [
+            {
+                "sysmapid": "9",
+                "name": MAP_NAME,
+                "selements": [
+                    {
+                        "selementid": "11",
+                        "elementtype": 0,
+                        "elementid": 999,
+                        "elements": [{"hostid": "999"}],
+                    },
+                    {"selementid": "12", "elementtype": 4, "label": "StaleISP"},
+                ],
+                "links": [],
+            }
+        ]
+
+    mocker = _activate_plan_mocker(
+        monkeypatch,
+        host_get=host_get,
+        **{"map.get": map_get},
+    )
+    monkeypatch.setattr(
+        "uplinks.zabbix.plan.fetch_zabbix_hosts_and_items",
+        lambda *a, **k: (None, None, "item.get: simulated read failure"),
+    )
+
+    report, err = build_zabbix_plan(None, inventory_file=str(inv))
+    assert err is None
+    maps = report["planned"]["maps"]
+    assert maps.get("status") == NOT_EVALUATED
+    assert maps.get("create") == []
+    assert maps.get("update") == []
+    assert maps.get("delete") == []
+    assert "map diff suppressed" in maps.get("reason", "")
+    assert report["zabbix_current"]["maps"]["sysmapid"] == "9"
+    assert "map.get" in mocker.method_names()
+    assert "map.create" not in mocker.method_names()
+    assert "map.update" not in mocker.method_names()
+    assert "map.delete" not in mocker.method_names()
+
+
+def test_plan_stale_aggregate_limit_trigger_skipped_when_allow_delete_false(
+    monkeypatch, zabbix_env, tmp_path
+):
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "WAW-EQX-7280QR-2",
+                        "interface": "Ethernet23/1",
+                        "provider": "Cogent",
+                        "commit_rate_kbps": 10000000,
+                        "billing_model": "Flat",
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_limit_desc = "Provider aggregate traffic >= 100% of limit (10 Gbps)"
+
+    def host_get(params):
+        filt = params.get("filter") or {}
+        names = set(filt.get("host") or filt.get("name") or [])
+        if "WAW-EQX-7280QR-2" in names:
+            return [{"hostid": "102", "host": "WAW-EQX-7280QR-2", "name": "WAW-EQX-7280QR-2"}]
+        if "Uplinks Cogent" in names or "Uplinks_Cogent" in names:
+            return [{"hostid": "201", "host": "Uplinks_Cogent", "name": "Uplinks Cogent"}]
+        return []
+
+    def item_get(params):
+        hostids = {str(x) for x in (params.get("hostids") or [])}
+        name_search = (params.get("search") or {}).get("name", "")
+        key_search = (params.get("search") or {}).get("key_", "")
+        if "201" in hostids and "aggregate.bits" in key_search:
+            return [
+                {"itemid": "501", "key_": "aggregate.bits.in[]"},
+                {"itemid": "502", "key_": "aggregate.bits.out[]"},
+            ]
+        if "102" in hostids and name_search == "Bits received":
+            return [
+                {
+                    "itemid": "601",
+                    "hostid": "102",
+                    "name": "Interface Ethernet23/1: Bits received",
+                    "key_": "net.if.in[eth23]",
+                }
+            ]
+        if "102" in hostids and name_search == "Bits sent":
+            return [
+                {
+                    "itemid": "602",
+                    "hostid": "102",
+                    "name": "Interface Ethernet23/1: Bits sent",
+                    "key_": "net.if.out[eth23]",
+                }
+            ]
+        return []
+
+    def trigger_get(params):
+        hostids = {str(x) for x in (params.get("hostids") or [])}
+        if "201" in hostids:
+            return [{"triggerid": "701", "description": stale_limit_desc}]
+        return []
+
+    mocker = _activate_plan_mocker(monkeypatch, host_get=host_get, item_get=item_get, trigger_get=trigger_get)
+    monkeypatch.setattr(
+        "uplinks.zabbix.plan.collect_provider_slo_percent",
+        lambda nb, debug=False: ({}, "partial_read"),
+    )
+
+    report, err = build_zabbix_plan(None, inventory_file=str(inv))
+    assert err is None
+    limit_triggers = report["planned"]["aggregate_hosts"]["limit_triggers"]
+    assert limit_triggers.get("delete") == []
+    assert limit_triggers.get("update") == []
+    suppressed = [
+        row for row in limit_triggers.get("skipped") or [] if row.get("suppressed") == "delete"
+    ]
+    assert len(suppressed) == 1
+    assert suppressed[0]["triggerid"] == "701"
+    assert "stale aggregate limit" in suppressed[0].get("reason", "")
+    assert "trigger.delete" not in mocker.method_names()

@@ -562,6 +562,30 @@ def _netbox44_path_segment(
     ]
 
 
+def _legacy_pynetbox_path_segment(
+    border_iface,
+    cable_to_iface,
+    front_port,
+    rear_port,
+    cable_to_rear,
+    ct,
+):
+    """Old pynetbox paths(): each hop wrapped in a single-element list."""
+    return [
+        [border_iface],
+        [cable_to_iface],
+        [front_port],
+        [rear_port],
+        [cable_to_rear],
+        [ct],
+    ]
+
+
+def _connected_cable(record):
+    record.status = "connected"
+    return record
+
+
 def _build_odf_inventory_nb(
     *,
     provider=None,
@@ -1000,6 +1024,193 @@ def test_pass_through_path_without_is_complete_key_skipped():
     assert report["complete"] == []
     assert len(report["incomplete"]) == 1
     assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
+
+
+def test_legacy_paths_choice_cable_status_accepted():
+    """Legacy path accepts NetBox choice payloads on cable status fields."""
+    parts = _valid_odf_paths_result(None)
+    cable_to_iface = parts["cable_to_iface"]
+    cable_to_iface.status = {"value": "connected", "label": "Connected"}
+    cable_to_rear = parts["cable_to_rear"]
+    cable_to_rear.status = _choice_record("connected", "Connected")
+    legacy_segment = _legacy_pynetbox_path_segment(
+        parts["border_iface"],
+        cable_to_iface,
+        parts["front_port"],
+        parts["rear_port"],
+        cable_to_rear,
+        parts["ct"],
+    )
+    paths_result = [
+        {
+            "origin": None,
+            "destination": None,
+            "path": legacy_segment,
+        }
+    ]
+    nb, rear_port = _build_odf_inventory_nb(
+        paths_result=paths_result,
+        border_iface=parts["border_iface"],
+        ct=parts["ct"],
+        cable_to_rear=cable_to_rear,
+        cable_to_iface=cable_to_iface,
+        rear_port=parts["rear_port"],
+        front_port=parts["front_port"],
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert len(report["complete"]) == 1
+    assert report["complete"][0]["interface"] == "Ethernet23/1"
+    assert report["incomplete"] == []
+    rear_port.paths.assert_called_once()
+
+
+def test_legacy_pynetbox_paths_accepted():
+    """Cogent-shaped rear_port.paths() without is_* flags but connected cables."""
+    parts = _valid_odf_paths_result(None)
+    cable_to_iface = _connected_cable(parts["cable_to_iface"])
+    cable_to_rear = _connected_cable(parts["cable_to_rear"])
+    legacy_segment = _legacy_pynetbox_path_segment(
+        parts["border_iface"],
+        cable_to_iface,
+        parts["front_port"],
+        parts["rear_port"],
+        cable_to_rear,
+        parts["ct"],
+    )
+    paths_result = [
+        {
+            "origin": None,
+            "destination": None,
+            "path": legacy_segment,
+        }
+    ]
+    nb, rear_port = _build_odf_inventory_nb(
+        paths_result=paths_result,
+        border_iface=parts["border_iface"],
+        ct=parts["ct"],
+        cable_to_rear=cable_to_rear,
+        cable_to_iface=cable_to_iface,
+        rear_port=parts["rear_port"],
+        front_port=parts["front_port"],
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert len(report["complete"]) == 1
+    assert report["complete"][0]["provider"] == "Cogent"
+    assert report["complete"][0]["circuit_id"] == "Cogent-MIA-1"
+    assert report["complete"][0]["device"] == "MIA-EQX-7280QR-1"
+    assert report["complete"][0]["interface"] == "Ethernet23/1"
+    assert report["incomplete"] == []
+    rear_port.paths.assert_called_once()
+
+
+def test_legacy_paths_non_connected_cable_rejected():
+    parts = _valid_odf_paths_result(None)
+    cable_to_iface = _connected_cable(parts["cable_to_iface"])
+    cable_to_rear = parts["cable_to_rear"]
+    cable_to_rear.status = "planned"
+    legacy_segment = _legacy_pynetbox_path_segment(
+        parts["border_iface"],
+        cable_to_iface,
+        parts["front_port"],
+        parts["rear_port"],
+        cable_to_rear,
+        parts["ct"],
+    )
+    paths_result = [
+        {
+            "origin": None,
+            "destination": None,
+            "path": legacy_segment,
+        }
+    ]
+    nb, rear_port = _build_odf_inventory_nb(
+        paths_result=paths_result,
+        border_iface=parts["border_iface"],
+        ct=parts["ct"],
+        cable_to_rear=cable_to_rear,
+        cable_to_iface=cable_to_iface,
+        rear_port=parts["rear_port"],
+        front_port=parts["front_port"],
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
+    rear_port.paths.assert_called_once()
+
+
+def test_legacy_paths_missing_cable_status_rejected():
+    parts = _valid_odf_paths_result(None)
+    cable_to_iface = parts["cable_to_iface"]
+    cable_to_rear = _connected_cable(parts["cable_to_rear"])
+    legacy_segment = _legacy_pynetbox_path_segment(
+        parts["border_iface"],
+        cable_to_iface,
+        parts["front_port"],
+        parts["rear_port"],
+        cable_to_rear,
+        parts["ct"],
+    )
+    paths_result = [
+        {
+            "origin": None,
+            "destination": None,
+            "path": legacy_segment,
+        }
+    ]
+    nb, _rear_port = _build_odf_inventory_nb(
+        paths_result=paths_result,
+        border_iface=parts["border_iface"],
+        ct=parts["ct"],
+        cable_to_rear=cable_to_rear,
+        cable_to_iface=cable_to_iface,
+        rear_port=parts["rear_port"],
+        front_port=parts["front_port"],
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
+
+
+def test_legacy_multiple_paths_rejected():
+    parts = _valid_odf_paths_result(None)
+    cable_to_iface = _connected_cable(parts["cable_to_iface"])
+    cable_to_rear = _connected_cable(parts["cable_to_rear"])
+    legacy_segment = _legacy_pynetbox_path_segment(
+        parts["border_iface"],
+        cable_to_iface,
+        parts["front_port"],
+        parts["rear_port"],
+        cable_to_rear,
+        parts["ct"],
+    )
+    paths_result = [
+        {
+            "origin": None,
+            "destination": None,
+            "path": legacy_segment,
+        },
+        {
+            "origin": None,
+            "destination": None,
+            "path": legacy_segment,
+        },
+    ]
+    nb, rear_port = _build_odf_inventory_nb(
+        paths_result=paths_result,
+        border_iface=parts["border_iface"],
+        ct=parts["ct"],
+        cable_to_rear=cable_to_rear,
+        cable_to_iface=cable_to_iface,
+        rear_port=parts["rear_port"],
+        front_port=parts["front_port"],
+    )
+    report = inv.collect_uplink_inventory(nb, tag="border")
+    assert report["complete"] == []
+    assert len(report["incomplete"]) == 1
+    assert report["incomplete"][0]["reason"] == inv.REASON_CABLE_NOT_TO_INTERFACE
+    rear_port.paths.assert_called_once()
 
 
 def test_auth_mid_walk_clears_partial_results():

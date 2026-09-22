@@ -124,6 +124,12 @@ python run_uplinks_full.py --plan --report uplinks_plan_report.txt
 python zabbix_uplinks_plan.py --inventory-file netbox_inventory.json
 ```
 
+План проверяет не только макросы и служебные триггеры. Он также показывает
+практические изменения для агрегатов, карты, дашбордов и сервисов с SLA
+(целевым уровнем доступности). Координаты карты и полное содержимое виджетов
+побитово не сравниваются. При ошибке чтения удаление и полная перезапись
+объектов подавляются и отмечаются как `skipped` или `not_evaluated`.
+
 Ключ `--dry-run` у `zabbix_sync_commit_rate.py` нельзя совмещать с
 `--delete-link-triggers` и `--delete-util-triggers`.
 

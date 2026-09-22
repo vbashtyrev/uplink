@@ -32,7 +32,10 @@ python run_uplinks_full.py --plan \
 `dry-ssh.json` и сверка интерфейсов в него не входят.
 
 Отчёт пишется в `run_logs/<дата>_zabbix_plan.json`. Карты, дашборды, сервисы и
-триггеры Burst в отчёте помечены `not_evaluated` — они не сравниваются.
+агрегатные элементы теперь проходят практическое read-only сравнение:
+показываются создание, изменение, удаление и отсутствие изменений. Координаты
+карты и полное содержимое виджетов побитово не сравниваются. Триггеры Burst
+пока помечаются `not_evaluated` — они не сравниваются.
 Отдельно тот же отчёт даёт `zabbix_uplinks_plan.py`:
 
 ```bash
@@ -64,6 +67,8 @@ python zabbix_uplinks_plan.py \
 
 В режиме `--plan` выполняются только чтение inventory и
 `zabbix_uplinks_plan.py`. Записи в NetBox и Zabbix не выполняются.
+При ошибке чтения NetBox или Zabbix удаление и полная перезапись объектов
+подавляются и отражаются в отчёте как `skipped` или `not_evaluated`.
 
 **Не входит в full run** (отдельные команды ниже): `grafana_uplinks_graph.py`, `zabbix_provider_sla.py`, `netbox_interface_types.py`, cleanup-скрипты.
 
