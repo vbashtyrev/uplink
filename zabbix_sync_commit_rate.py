@@ -1693,7 +1693,7 @@ def main():
 
     if inventory_read_error:
         print(
-            "Partial apply: {} hosts processed, {} commit pairs from NetBox, {} hosts with util from dry-ssh.".format(
+            "Partial apply: {} hosts processed, {} commit pairs from NetBox, {} hosts with util interfaces.".format(
                 updated, len(commit_rates), len(host_to_util_ifaces)
             )
         )
@@ -1703,7 +1703,7 @@ def main():
         )
         sys.exit(1)
     print(
-        "Done: {} hosts updated, {} commit pairs from NetBox, {} hosts with util from dry-ssh.".format(
+        "Done: {} hosts updated, {} commit pairs from NetBox, {} hosts with util interfaces.".format(
             updated, len(commit_rates), len(host_to_util_ifaces)
         )
     )
