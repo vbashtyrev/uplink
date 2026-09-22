@@ -2,15 +2,20 @@
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from tests.mocks.inventory_scope import (
+    dry_ssh_minimal_inventory_context,
+    write_dry_ssh_minimal_inventory,
+)
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-def test_main_updates_dashboard(monkeypatch, zabbix_env, capsys):
+def test_main_updates_dashboard(monkeypatch, zabbix_env, tmp_path, capsys):
     import zabbix_uplinks_dashboard as mod
 
     items = [
@@ -38,13 +43,14 @@ def test_main_updates_dashboard(monkeypatch, zabbix_env, capsys):
         lambda p: {"dashboardids": ["55"]},
     )
     mocker.activate(monkeypatch)
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "zabbix_uplinks_dashboard.py",
-            "-f",
-            str(FIXTURES / "dry_ssh_minimal.json"),
+            "--inventory-file",
+            str(inv),
             "--no-cache",
             "--dashboard-by-location",
             "",
@@ -52,5 +58,6 @@ def test_main_updates_dashboard(monkeypatch, zabbix_env, capsys):
             "",
         ],
     )
-    mod.main()
+    with patch.object(mod, "load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()):
+        mod.main()
     assert "dashboard" in capsys.readouterr().out.lower()

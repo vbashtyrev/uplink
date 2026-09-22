@@ -18,6 +18,26 @@ from zabbix_map import (
     validate_zabbix_token,
     zabbix_request,
 )
+from uplinks.netbox.inventory import (
+    ERROR_AUTH_DENIED,
+    ERROR_PROVIDERS_UNAVAILABLE,
+    arm_netbox_incomplete_guard,
+    burst_metadata_from_inventory,
+    burst_pairs_from_inventory,
+    collect_netbox_interface_relations,
+    collect_uplink_inventory,
+    device_names_from_complete_inventory,
+    expand_burst_metadata_for_zabbix,
+    expand_burst_pairs_for_zabbix,
+    inventory_read_failed,
+    is_netbox_auth_error,
+    load_inventory_report,
+    netbox_interface_relations_from_report,
+    map_commit_rates_to_zabbix_ifaces,
+    project_circuit_scope,
+    resolve_border_device_tag,
+)
+from uplinks.zabbix.client import stale_util_triggers, util_trigger_get_params
 from uplinks_config import (
     THRESHOLD_ITEM_KEY,
     THRESHOLD_PERCENT_HIGH,
@@ -109,44 +129,89 @@ def is_physical_uplink_iface(iface_entry):
     return True
 
 
-def interfaces_by_host_from_dry_ssh(dry_ssh_devices, physical_only=False):
+def util_interfaces_by_host_from_inventory(
+    dry_ssh_devices, inventory_report, debug=False, netbox_relations=None
+):
     """
-    Interface names per device from dry-ssh.json (uplink list from SSH collection).
-    physical_only: skip LAG (aeN) and logical units (aeN.0); keep physical members (et-*, Ethernet*).
-    Return: dict device_name -> [iface_name, ...] (unique, stable order).
+    Physical util interface names per host from scoped inventory complete rows.
+    Without dry-ssh, uses complete inventory interfaces directly (cable termination points).
+    With dry-ssh, physical-only candidates are filtered by scoped inventory (legacy).
     """
+    from uplinks.netbox.inventory import (
+        device_iface_provider_map_from_inventory,
+        iface_has_inventory_entry,
+    )
+
+    expanded_map = device_iface_provider_map_from_inventory(
+        inventory_report,
+        dry_ssh_devices=dry_ssh_devices,
+        netbox_relations=netbox_relations,
+        debug=debug,
+    )
     result = {}
     if not dry_ssh_devices:
-        return result
-    for dev_name, ifaces in dry_ssh_devices.items():
-        if not isinstance(ifaces, list):
-            continue
-        seen = set()
-        names = []
-        for entry in ifaces:
-            if not isinstance(entry, dict):
+        for row in inventory_report.get("complete") or []:
+            dev_name = (row.get("device") or "").strip()
+            iface_name = (row.get("interface") or "").strip()
+            if not dev_name or not iface_name:
                 continue
-            if physical_only and not is_physical_uplink_iface(entry):
+            result.setdefault(dev_name, [])
+            if iface_name not in result[dev_name]:
+                result[dev_name].append(iface_name)
+    else:
+        for dev_name, ifaces in dry_ssh_devices.items():
+            if not isinstance(ifaces, list):
                 continue
-            name = (entry.get("name") or "").strip()
-            if not name or name in seen:
-                continue
-            seen.add(name)
-            names.append(name)
-        if names:
-            result[dev_name] = names
+            seen = set()
+            names = []
+            for entry in ifaces:
+                if not isinstance(entry, dict):
+                    continue
+                if not is_physical_uplink_iface(entry):
+                    continue
+                name = (entry.get("name") or "").strip()
+                if not name or name in seen:
+                    continue
+                if iface_has_inventory_entry(dev_name, entry, expanded_map):
+                    seen.add(name)
+                    names.append(name)
+            if names:
+                result[dev_name] = names
+    if debug:
+        total = sum(len(v) for v in result.values())
+        print(
+            "Util interfaces from scoped inventory: {} hosts, {} physical ifaces".format(
+                len(result), total
+            ),
+            file=sys.stderr,
+        )
     return result
 
 
-def load_burst_pairs(path):
-    """Load pairs (device, interface) with billing_model == 'Burst' from commit_rates.json."""
+def _load_commit_rates_json_file(path, strict=False):
+    """Load commit_rates.json root dict. Missing file -> {}. Invalid JSON fails when strict."""
     if not path or not os.path.isfile(path):
-        return set()
+        return {}, None
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return set()
+    except json.JSONDecodeError as e:
+        if strict:
+            return None, "invalid JSON in {}: {}".format(path, e)
+        return {}, None
+    except OSError as e:
+        if strict:
+            return None, "cannot read {}: {}".format(path, e)
+        return {}, None
+    if not isinstance(data, dict):
+        if strict:
+            return None, "unexpected JSON root in {}".format(path)
+        return {}, None
+    return data, None
+
+
+def _burst_pairs_from_commit_rates_data(data):
+    """Pairs (device, interface) with billing_model == 'Burst' from commit_rates dict."""
     out = set()
     for dev_name, ifaces in (data or {}).items():
         if not isinstance(dev_name, str) or dev_name.startswith("_"):
@@ -162,15 +227,76 @@ def load_burst_pairs(path):
     return out
 
 
-def load_burst_metadata(path):
+def load_burst_pairs(
+    path,
+    inventory_report=None,
+    dry_ssh_devices=None,
+    netbox_relations=None,
+    legacy_commit_rates_fallback=False,
+    debug=False,
+):
+    """Burst (device, interface) pairs from NetBox inventory (Zabbix iface names when dry-ssh given)."""
+    netbox_available = inventory_report is not None
+    if netbox_available and not legacy_commit_rates_fallback:
+        data = {}
+    elif netbox_available:
+        data, err = _load_commit_rates_json_file(path, strict=True)
+        if err:
+            raise ValueError(err)
+    else:
+        data, err = _load_commit_rates_json_file(path, strict=False)
+        if err:
+            raise ValueError(err)
+        return _burst_pairs_from_commit_rates_data(data)
+
+    netbox_pairs = burst_pairs_from_inventory(inventory_report)
+    if dry_ssh_devices or netbox_relations:
+        netbox_pairs = expand_burst_pairs_for_zabbix(
+            netbox_pairs,
+            dry_ssh_devices=dry_ssh_devices,
+            netbox_relations=netbox_relations,
+            debug=debug,
+        )
+    merged = set(netbox_pairs)
+    if merged and debug:
+        print(
+            "Burst pairs from NetBox inventory: {}".format(len(merged)),
+            file=sys.stderr,
+        )
+
+    if not legacy_commit_rates_fallback:
+        return merged
+
+    json_pairs = _burst_pairs_from_commit_rates_data(data)
+    added = []
+    for pair in json_pairs:
+        if pair not in merged:
+            merged.add(pair)
+            added.append(pair)
+
+    if added:
+        if netbox_pairs:
+            for dev_name, iface_name in sorted(added):
+                print(
+                    "Warning: Burst pair ({!r}, {!r}) not in NetBox inventory; "
+                    "using commit_rates.json billing_model (legacy fallback)".format(
+                        dev_name, iface_name
+                    ),
+                    file=sys.stderr,
+                )
+        else:
+            print(
+                "Warning: no Burst billing_model in NetBox inventory; "
+                "using commit_rates.json billing_model (legacy fallback)",
+                file=sys.stderr,
+            )
+        if debug:
+            print("Burst pairs from {}: {}".format(path, len(added)), file=sys.stderr)
+    return merged
+
+
+def _burst_metadata_from_commit_rates_data(data):
     """(device, interface) -> {provider, circuit_id} for billing_model=Burst."""
-    if not path or not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
     out = {}
     for dev_name, ifaces in (data or {}).items():
         if not isinstance(dev_name, str) or dev_name.startswith("_"):
@@ -188,6 +314,74 @@ def load_burst_metadata(path):
                 continue
             out[(dev_name, (iface_name or "").strip())] = {"provider": prov, "circuit_id": cid}
     return out
+
+
+def load_burst_metadata(
+    path,
+    inventory_report=None,
+    dry_ssh_devices=None,
+    netbox_relations=None,
+    legacy_commit_rates_fallback=False,
+    debug=False,
+):
+    """Burst link metadata from NetBox inventory (Zabbix iface names when dry-ssh given)."""
+    netbox_available = inventory_report is not None
+    if netbox_available and not legacy_commit_rates_fallback:
+        data = {}
+    elif netbox_available:
+        data, err = _load_commit_rates_json_file(path, strict=True)
+        if err:
+            raise ValueError(err)
+    else:
+        data, err = _load_commit_rates_json_file(path, strict=False)
+        if err:
+            raise ValueError(err)
+        return _burst_metadata_from_commit_rates_data(data)
+
+    netbox_meta = burst_metadata_from_inventory(inventory_report)
+    if dry_ssh_devices or netbox_relations:
+        netbox_meta = expand_burst_metadata_for_zabbix(
+            netbox_meta,
+            dry_ssh_devices=dry_ssh_devices,
+            netbox_relations=netbox_relations,
+            debug=debug,
+        )
+    merged = dict(netbox_meta)
+    if merged and debug:
+        print(
+            "Burst metadata from NetBox inventory: {} pairs".format(len(merged)),
+            file=sys.stderr,
+        )
+
+    if not legacy_commit_rates_fallback:
+        return merged
+
+    json_meta = _burst_metadata_from_commit_rates_data(data)
+    added = []
+    for pair, meta in json_meta.items():
+        if pair not in merged:
+            merged[pair] = meta
+            added.append(pair)
+
+    if added:
+        if netbox_meta:
+            for dev_name, iface_name in sorted(added):
+                print(
+                    "Warning: Burst metadata ({!r}, {!r}) not in NetBox inventory; "
+                    "using commit_rates.json provider/circuit_id (legacy fallback)".format(
+                        dev_name, iface_name
+                    ),
+                    file=sys.stderr,
+                )
+        else:
+            print(
+                "Warning: no Burst circuit metadata in NetBox inventory; "
+                "using commit_rates.json provider/circuit_id (legacy fallback)",
+                file=sys.stderr,
+            )
+        if debug:
+            print("Burst metadata from {}: {} pairs".format(path, len(added)), file=sys.stderr)
+    return merged
 
 
 def burst_link_trigger_tags_no_sla(provider, circuit_id):
@@ -211,9 +405,12 @@ def build_physical_to_logical(dry_ssh_devices):
     """
     By dry-ssh: for each (device, physical_interface) a list of logical interfaces,
     for which physicalInterface == physical_interface.
+    LAG members (aggregateInterface on a physical port, e.g. et-0/0/3 -> ae5)
+    inherit logical units from their aggregate anchor.
     Return: dict (dev_name, physical_iface) -> [logical_name, ...]
     """
     out = {}
+    member_to_aggregate = {}
     if not dry_ssh_devices:
         return out
     for dev_name, ifaces in dry_ssh_devices.items():
@@ -224,10 +421,21 @@ def build_physical_to_logical(dry_ssh_devices):
                 continue
             name = (entry.get("name") or "").strip()
             phys = (entry.get("physicalInterface") or "").strip()
+            aggregate = (entry.get("aggregateInterface") or "").strip()
+            if name and aggregate:
+                member_to_aggregate[(dev_name, _normalize_interface_name(name))] = aggregate
             if not name or not phys:
                 continue
-            key = (dev_name, phys)
+            key = (dev_name, _normalize_interface_name(phys))
             out.setdefault(key, []).append(name)
+    for (dev_name, member), aggregate in member_to_aggregate.items():
+        logicals = out.get((dev_name, _normalize_interface_name(aggregate)))
+        if not logicals:
+            continue
+        existing = out.setdefault((dev_name, member), [])
+        for logical in logicals:
+            if logical not in existing:
+                existing.append(logical)
     return out
 
 
@@ -257,7 +465,7 @@ def apply_logical_context(commit_rates, dry_ssh_devices, debug=False):
     result = {}
     substituted = []
     for (dev_name, iface_name), bps in commit_rates.items():
-        key = (dev_name, iface_name)
+        key = (dev_name, _normalize_interface_name(iface_name))
         logicals = phys_to_logical.get(key, [])
         if logicals:
             logical = _pick_one_logical(logicals)
@@ -274,184 +482,101 @@ def apply_logical_context(commit_rates, dry_ssh_devices, debug=False):
     return result
 
 
-def _is_netbox_auth_error(exc):
-    """Checking if the NetBox error is similar to an expired/invalid token (403, etc.)."""
-    msg = str(exc).lower()
-    return (
-        "403" in msg
-        or "forbidden" in msg
-        or "token expired" in msg
-        or ("token" in msg and "invalid" in msg)
-    )
+_NETBOX_AUTH_MESSAGE = (
+    "NetBox error: token has expired or access is denied (403). "
+    "Check NETBOX_TOKEN and update the token if necessary."
+)
 
 
-def get_commit_rates_from_netbox(nb, tag, debug=False):
-    """
-    By NetBox: interfaces connected by cable to circuit termination (A), and commit_rate of the circuit.
-    Return: dict (device_name, interface_name) -> commit_rate_bps (int).
-    Only devices with the tag tag are taken into account (a filter by tag is required).
-    """
-    result = {}
-    try:
-        cts = list(nb.circuits.circuit_terminations.filter(term_side="A"))
-    except Exception as e:
-        if _is_netbox_auth_error(e):
-            print(
-                "NetBox error: token has expired or access is denied (403). Check NETBOX_TOKEN and update the token if necessary.",
-                file=sys.stderr,
-            )
-            if debug:
-                print("circuit_terminations.filter: {}".format(e), file=sys.stderr)
-            sys.exit(1)
+# Backward-compatible alias for tests and callers.
+_is_netbox_auth_error = is_netbox_auth_error
+
+
+def commit_rates_from_inventory_report(report, debug=False):
+    """Build (device, interface) -> commit_rate_bps from inventory complete rows."""
+    stats = report.get("stats") or {}
+    error = stats.get("error")
+    if error == ERROR_PROVIDERS_UNAVAILABLE:
         if debug:
-            print("circuit_terminations.filter: {}".format(e), file=sys.stderr)
-        return result
+            print("NetBox: providers unavailable", file=sys.stderr)
+        return {}
 
-    if debug:
-        print("NetBox: circuit terminations (A): {}, with cable to dcim.interface, filter by tag {!r}". format(len(cts), tag or "(none)"), file=sys.stderr)
+    result = {}
+    skipped_missing_commit_rate = 0
 
-    device_ids_by_tag = set()
-    if tag:
-        try:
-            devices_tagged = list(nb.dcim.devices.filter(tag=tag))
-            device_ids_by_tag = {d.id for d in devices_tagged}
+    for row in report.get("complete") or []:
+        commit_rate_kbps = row.get("commit_rate_kbps")
+        if commit_rate_kbps is None:
+            skipped_missing_commit_rate += 1
             if debug:
-                print("Devices with tag {!r}: {} pcs.".format(tag, len(device_ids_by_tag)), file=sys.stderr)
-        except Exception as e:
-            if _is_netbox_auth_error(e):
                 print(
-                    "NetBox error: token has expired or access is denied (403). Check NETBOX_TOKEN and update the token if necessary.",
+                    "Skip missing commit_rate: device={} interface={} circuit={}".format(
+                        row.get("device") or "?",
+                        row.get("interface") or "?",
+                        row.get("circuit_id") or "?",
+                    ),
                     file=sys.stderr,
                 )
-                if debug:
-                    print("dcim.devices.filter: {}".format(e), file=sys.stderr)
-                sys.exit(1)
-            if debug:
-                print("filter(tag=): {}".format(e), file=sys.stderr)
-
-    skipped_no_cable = 0
-    skipped_no_interface = 0
-    skipped_tag = 0
-
-    for ct in cts:
-        cable = getattr(ct, "cable", None)
-        if cable is None:
-            skipped_no_cable += 1
-            continue
-        cable_id = cable.id if hasattr(cable, "id") else cable
-        if not cable_id:
-            skipped_no_cable += 1
-            continue
-        try:
-            cable_obj = nb.dcim.cables.get(cable_id)
-        except Exception:
-            if debug:
-                print("cables.get({}) failed".format(cable_id), file=sys.stderr)
-            continue
-        if not cable_obj:
-            continue
-
-        a_terms = getattr(cable_obj, "a_terminations", None) or []
-        b_terms = getattr(cable_obj, "b_terminations", None) or []
-        if not isinstance(a_terms, list):
-            a_terms = [a_terms] if a_terms else []
-        if not isinstance(b_terms, list):
-            b_terms = [b_terms] if b_terms else []
-
-        # One end is circuit termination, the other is interface
-        interface_oid = None
-        for term in a_terms + b_terms:
-            if isinstance(term, dict):
-                ot = term.get("object_type") or term.get("object_type_id")
-                oid = term.get("object_id")
-            else:
-                ot = getattr(term, "object_type", None) or getattr(term, "object_type_id", None)
-                oid = getattr(term, "object_id", None)
-            if not oid:
-                continue
-            ot = (ot or "").lower()
-            if "interface" in ot and "circuit" not in ot:
-                interface_oid = oid
-                break
-        if not interface_oid:
-            skipped_no_interface += 1
-            continue
-
-        try:
-            iface = nb.dcim.interfaces.get(interface_oid)
-        except Exception:
-            continue
-        if not iface:
-            continue
-
-        device = getattr(iface, "device", None)
-        if device is None:
-            try:
-                dev_id = getattr(iface, "device_id", None) or iface.device
-                if dev_id is not None:
-                    device = nb.dcim.devices.get(dev_id)
-            except Exception:
-                pass
-        if not device:
-            continue
-        dev_id = device.id if hasattr(device, "id") else device
-        if tag and dev_id not in device_ids_by_tag:
-            skipped_tag += 1
-            continue
-        device_name = getattr(device, "name", None) or ""
-        iface_name = getattr(iface, "name", None) or ""
-        if not device_name or not iface_name:
-            continue
-
-        circuit = getattr(ct, "circuit", None)
-        if circuit is None:
-            try:
-                cid = getattr(ct, "circuit_id", None) or ct.circuit
-                if cid is not None:
-                    circuit = nb.circuits.circuits.get(cid)
-            except Exception:
-                pass
-        if not circuit:
-            continue
-        commit_rate_kbps = getattr(circuit, "commit_rate", None)
-        if commit_rate_kbps is None:
             continue
         try:
             commit_rate_kbps = int(commit_rate_kbps)
         except (TypeError, ValueError):
+            skipped_missing_commit_rate += 1
             continue
-        commit_rate_bps = commit_rate_kbps * KBPS_TO_BPS
-        result[(device_name, iface_name)] = commit_rate_bps
+
+        device_name = row.get("device") or ""
+        iface_name = row.get("interface") or ""
+        if not device_name or not iface_name:
+            continue
+        result[(device_name, iface_name)] = commit_rate_kbps * KBPS_TO_BPS
 
     if debug:
-        print("Missed: without cable {}, not interface {}, by tag {}; total pairs: {}".format(
-            skipped_no_cable, skipped_no_interface, skipped_tag, len(result)), file=sys.stderr)
+        incomplete = report.get("incomplete") or []
+        print(
+            "NetBox inventory: active={}, complete={}, incomplete={}, missing commit_rate={}, pairs with rate: {}".format(
+                stats.get("circuits_active", 0),
+                stats.get("complete", 0),
+                len(incomplete),
+                skipped_missing_commit_rate,
+                len(result),
+            ),
+            file=sys.stderr,
+        )
+        for row in incomplete:
+            print(
+                "INCOMPLETE circuit={} reason={} ({})".format(
+                    row.get("circuit_id") or "?",
+                    row.get("reason") or "?",
+                    row.get("reason_label") or row.get("reason") or "?",
+                ),
+                file=sys.stderr,
+            )
     return result
 
 
-def get_zabbix_host_macros(url, token, hostids, debug=False):
-    """Get host macros. Return hostid -> list of {macro, value, type, context?, hostmacroid?}."""
-    if not hostids:
-        return {}
-    result, err = zabbix_request(
-        url, token, "usermacro.get",
-        {"hostids": list(hostids), "output": ["macro", "value", "type", "context", "hostmacroid"]},
+def border_device_tag(tag=None):
+    """Border device tag from env/argument; monitor tag is not a device tag."""
+    return resolve_border_device_tag(tag)
+
+
+def fetch_uplink_inventory_report(nb, tag, debug=False, exit_on_auth=True):
+    """Collect uplink inventory; exit on auth error when exit_on_auth is True."""
+    report = collect_uplink_inventory(
+        nb,
+        tag=tag,
         debug=debug,
+        active_only=True,
+        circuit_scope=project_circuit_scope(),
     )
-    if err:
-        return {str(hid): [] for hid in hostids}
-    out = {str(hid): [] for hid in hostids}
-    for m in (result or []):
-        hid = str(m.get("hostid", ""))
-        if not hid or hid not in out:
-            continue
-        entry = {"macro": m.get("macro", ""), "value": m.get("value", ""), "type": str(m.get("type", "0"))}
-        if m.get("context") not in (None, ""):
-            entry["context"] = m.get("context")
-        if m.get("hostmacroid") is not None:
-            entry["hostmacroid"] = m["hostmacroid"]
-        out[hid].append(entry)
-    return out
+    stats = report.get("stats") or {}
+    error = stats.get("error")
+    if error == ERROR_AUTH_DENIED:
+        print(_NETBOX_AUTH_MESSAGE, file=sys.stderr)
+        if debug:
+            print("collect_uplink_inventory: {}".format(error), file=sys.stderr)
+        if exit_on_auth:
+            sys.exit(1)
+    return report
 
 
 def set_zabbix_host_macros_for_prefixes(url, token, hostid, new_macro_list, macro_prefixes, debug=False):
@@ -565,52 +690,28 @@ def prune_util_triggers_on_host(url, token, hostid, allowed_iface_names, debug=F
     """
     Remove utilization warn/crit triggers on this host for interfaces not in allowed_iface_names
     (e.g. after switching from LAG names to physical-only).
+    Return (deleted_count, error_message).
     """
-    allowed = {(n or "").strip() for n in (allowed_iface_names or [])}
     res, err = zabbix_request(
         url,
         token,
         "trigger.get",
-        {
-            "hostids": [hostid],
-            "output": ["triggerid", "description"],
-            "search": {"description": "Uplink utilization"},
-            "selectTags": "extend",
-        },
+        util_trigger_get_params([hostid]),
         debug=debug,
     )
-    if err or not res:
-        return 0
+    if err:
+        return 0, "trigger.get: {}".format(err)
     to_delete = []
-    for t in res:
-        desc = (t.get("description") or "").strip()
-        if not (
-            desc.endswith(TRIGGER_DESC_UTIL_WARN_SUFFIX)
-            or desc.endswith(TRIGGER_DESC_UTIL_CRIT_SUFFIX)
-        ):
-            continue
-        tags = t.get("tags") or []
-        if tags and not any(
-            tg.get("tag") == TRIGGER_TAG_NAME and tg.get("value") == TRIGGER_TAG_VALUE
-            for tg in tags
-        ):
-            continue
-        m = re.match(r"Interface\s+([^:]+):", desc)
-        if not m:
-            continue
-        iface = m.group(1).strip()
-        if iface in allowed:
-            continue
+    for t in stale_util_triggers(res, allowed_iface_names):
         tid = t.get("triggerid")
         if tid:
             to_delete.append(str(tid))
     if not to_delete:
-        return 0
+        return 0, None
     _, del_err = zabbix_request(url, token, "trigger.delete", to_delete, debug=debug)
     if del_err:
-        print("trigger.delete error: {}".format(del_err), file=sys.stderr)
-        return 0
-    return len(to_delete)
+        return 0, "trigger.delete: {}".format(del_err)
+    return len(to_delete), None
 
 
 def delete_link_triggers(url, token, debug=False):
@@ -873,7 +974,7 @@ def ensure_util_warn_trigger(url, token, host_technical, hostid, iface_name, deb
 
 
 def sync_uplink_utilization_for_host(
-    url, token, host_technical, hostid, iface_names, dry_run=False, debug=False
+    url, token, host_technical, hostid, iface_names, dry_run=False, debug=False, netbox_data_complete=True
 ):
     """
     Set {$UPLINK.UTIL.*} macros and warn/crit triggers for all iface_names on one host.
@@ -893,28 +994,47 @@ def sync_uplink_utilization_for_host(
         })
     if dry_run:
         return len(util_macros), len(iface_names), []
-    pruned = prune_util_triggers_on_host(url, token, hostid, iface_names, debug=debug)
-    if pruned and debug:
-        print("Pruned {} stale util triggers on hostid {}".format(pruned, hostid), file=sys.stderr)
-    ok, err = set_zabbix_host_uplink_util_macros(url, token, hostid, util_macros, debug=debug)
-    if not ok:
-        return 0, 0, [err or "usermacro"]
+    pruned = 0
+    if netbox_data_complete:
+        pruned, prune_err = prune_util_triggers_on_host(
+            url, token, hostid, iface_names, debug=debug
+        )
+        if prune_err:
+            return 0, 0, [prune_err]
+        if pruned and debug:
+            print("Pruned {} stale util triggers on hostid {}".format(pruned, hostid), file=sys.stderr)
+        ok, err = set_zabbix_host_uplink_util_macros(url, token, hostid, util_macros, debug=debug)
+        if not ok:
+            return 0, 0, [err or "usermacro"]
+    else:
+        print(
+            "Skipping utilization macro update for hostid {}: NetBox data is incomplete".format(hostid),
+            file=sys.stderr,
+        )
     triggers_ok = 0
     errors = []
-    for iface_name in iface_names:
-        ok_c, err_c = ensure_util_crit_trigger(
-            url, token, host_technical, hostid, iface_name, debug=debug
+    if netbox_data_complete:
+        for iface_name in iface_names:
+            ok_c, err_c = ensure_util_crit_trigger(
+                url, token, host_technical, hostid, iface_name, debug=debug
+            )
+            if not ok_c:
+                errors.append("{} crit: {}".format(iface_name, err_c))
+                continue
+            ok_w, err_w = ensure_util_warn_trigger(
+                url, token, host_technical, hostid, iface_name, debug=debug
+            )
+            if not ok_w:
+                errors.append("{} warn: {}".format(iface_name, err_w))
+                continue
+            triggers_ok += 1
+    elif iface_names:
+        print(
+            "Skipping utilization trigger create/update for hostid {}: NetBox data is incomplete".format(
+                hostid
+            ),
+            file=sys.stderr,
         )
-        if not ok_c:
-            errors.append("{} crit: {}".format(iface_name, err_c))
-            continue
-        ok_w, err_w = ensure_util_warn_trigger(
-            url, token, host_technical, hostid, iface_name, debug=debug
-        )
-        if not ok_w:
-            errors.append("{} warn: {}".format(iface_name, err_w))
-            continue
-        triggers_ok += 1
     return len(util_macros), triggers_ok, errors
 
 
@@ -1191,7 +1311,13 @@ def main():
             "from dry-ssh.json (all uplinks in file)."
         ),
     )
-    parser.add_argument("-d", "--dry-ssh", default=None, metavar="FILE", help="dry-ssh.json: for a physics cable (e.g. et-0/0/3) set the macro context by logical name (ae5.0) for Zabbix")
+    parser.add_argument("-d", "--dry-ssh", default=None, metavar="FILE", help="Legacy dry-ssh.json (optional; NetBox inventory is preferred)")
+    parser.add_argument(
+        "--inventory-file",
+        default=None,
+        metavar="FILE",
+        help="Scoped inventory JSON from netbox_uplinks_inventory.py --json",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Do not change macros in Zabbix, just display what would have been installed")
     parser.add_argument("--debug", action="store_true", help="Debug output (NetBox statistics, logical name substitution)")
     parser.add_argument(
@@ -1205,11 +1331,16 @@ def main():
     parser.add_argument(
         "--no-util-triggers",
         action="store_true",
-        help="Do not create {$UPLINK.UTIL.*} macros or utilization triggers (default: enabled when dry-ssh is loaded)",
+        help="Do not create {$UPLINK.UTIL.*} macros or utilization triggers (default: enabled from inventory)",
     )
     parser.add_argument(
         "-f", "--commit-rates", default=DEFAULT_COMMIT_RATES,
-        help="Path to commit_rates.json (for trigger filter by billing_model=Burst)",
+        help="Path to commit_rates.json (legacy fallback; not read unless --legacy-commit-rates-fallback)",
+    )
+    parser.add_argument(
+        "--legacy-commit-rates-fallback",
+        action="store_true",
+        help="Merge missing Burst pairs/metadata from commit_rates.json (legacy transition mode)",
     )
     parser.add_argument(
         "--delete-link-triggers",
@@ -1225,10 +1356,7 @@ def main():
 
     nb_url = os.environ.get("NETBOX_URL")
     nb_token = os.environ.get("NETBOX_TOKEN")
-    tag = (os.environ.get("NETBOX_TAG") or "").strip() or "border"
-    if not nb_url or not nb_token:
-        print("Set NETBOX_URL and NETBOX_TOKEN", file=sys.stderr)
-        sys.exit(1)
+    tag = border_device_tag()
 
     zabbix_url, zabbix_token = _get_zabbix_url_token()
     if not zabbix_url or not zabbix_token:
@@ -1239,36 +1367,124 @@ def main():
         print("Invalid or expired ZABBIX_TOKEN", file=sys.stderr)
         sys.exit(1)
 
-    if args.delete_link_triggers:
-        deleted = delete_link_triggers(zabbix_url, zabbix_token, debug=args.debug)
-        print("Deleted triggers uplinks 90%/100%/SLA breach: {}".format(deleted))
-        if not args.create_link_triggers and not args.dry_run and not args.delete_util_triggers:
-            return
-
-    if args.delete_util_triggers:
-        deleted_util = delete_util_triggers(zabbix_url, zabbix_token, debug=args.debug)
-        print("Deleted uplink utilization triggers: {}".format(deleted_util))
-        if not args.create_link_triggers and not args.dry_run and not args.delete_link_triggers:
-            return
-
-    dry_ssh_path = getattr(args, "dry_ssh", None) or (DEFAULT_DRY_SSH if os.path.isfile(DEFAULT_DRY_SSH) else None)
-    dry_ssh_devices = load_dry_ssh(dry_ssh_path) if dry_ssh_path else None
-    host_to_util_ifaces = interfaces_by_host_from_dry_ssh(dry_ssh_devices, physical_only=True)
-    sync_util = bool(host_to_util_ifaces) and not args.no_util_triggers
-    if dry_ssh_path and not dry_ssh_devices and not args.no_util_triggers:
+    if args.dry_run and (args.delete_link_triggers or args.delete_util_triggers):
         print(
-            "dry-ssh not loaded (file empty or missing); utilization triggers skipped.",
+            "Error: --dry-run cannot be used with --delete-link-triggers or --delete-util-triggers",
             file=sys.stderr,
         )
+        sys.exit(1)
 
-    nb = pynetbox.api(nb_url, token=nb_token)
-    commit_rates = get_commit_rates_from_netbox(nb, tag, debug=args.debug)
-    if dry_ssh_devices and commit_rates:
-        commit_rates = apply_logical_context(commit_rates, dry_ssh_devices, debug=args.debug)
+    dry_ssh_path = getattr(args, "dry_ssh", None)
+    dry_ssh_devices = load_dry_ssh(dry_ssh_path) if dry_ssh_path else None
+
+    if args.inventory_file:
+        try:
+            inventory_report = load_inventory_report(args.inventory_file)
+        except (OSError, json.JSONDecodeError) as e:
+            print("failed to read inventory file {}: {}".format(args.inventory_file, e), file=sys.stderr)
+            sys.exit(1)
+        netbox_relations = netbox_interface_relations_from_report(inventory_report)
+        if netbox_relations is None:
+            if not nb_url or not nb_token:
+                print("Set NETBOX_URL and NETBOX_TOKEN", file=sys.stderr)
+                sys.exit(1)
+            nb = pynetbox.api(nb_url, token=nb_token)
+            device_names = device_names_from_complete_inventory(inventory_report)
+            netbox_relations = collect_netbox_interface_relations(
+                nb, device_names, debug=args.debug, stats=inventory_report.get("stats")
+            )
+    else:
+        if not nb_url or not nb_token:
+            print("Set NETBOX_URL and NETBOX_TOKEN", file=sys.stderr)
+            sys.exit(1)
+        nb = pynetbox.api(nb_url, token=nb_token)
+        inventory_report = fetch_uplink_inventory_report(nb, tag, debug=args.debug, exit_on_auth=True)
+        netbox_relations = netbox_interface_relations_from_report(inventory_report)
+        if netbox_relations is None:
+            device_names = device_names_from_complete_inventory(inventory_report)
+            netbox_relations = collect_netbox_interface_relations(
+                nb, device_names, debug=args.debug, stats=inventory_report.get("stats")
+            )
+    from uplinks.netbox.inventory import finalize_inventory_read_stats
+
+    finalize_inventory_read_stats(inventory_report.get("stats"))
+    inventory_read_error = inventory_read_failed(inventory_report)
+    if inventory_read_error:
+        arm_netbox_incomplete_guard(inventory_report.get("stats"))
+    commit_rates = commit_rates_from_inventory_report(inventory_report, debug=args.debug)
+    host_to_util_ifaces = util_interfaces_by_host_from_inventory(
+        dry_ssh_devices,
+        inventory_report,
+        debug=args.debug,
+        netbox_relations=netbox_relations,
+    )
+    sync_util = bool(host_to_util_ifaces) and not args.no_util_triggers
+    if commit_rates:
+        if netbox_relations and (
+            netbox_relations.get("member_to_aggregate")
+            or netbox_relations.get("parent_children")
+        ):
+            commit_rates = map_commit_rates_to_zabbix_ifaces(
+                commit_rates,
+                netbox_relations=netbox_relations,
+                dry_ssh_devices=dry_ssh_devices,
+                debug=args.debug,
+            )
+        elif dry_ssh_devices:
+            commit_rates = apply_logical_context(commit_rates, dry_ssh_devices, debug=args.debug)
     elif dry_ssh_path and dry_ssh_devices and args.debug:
         print("dry-ssh loaded; NetBox commit_rates empty", file=sys.stderr)
 
+    if inventory_read_error:
+        inv_error = (inventory_report.get("stats") or {}).get("error")
+        if args.delete_link_triggers or args.delete_util_triggers:
+            if args.delete_link_triggers:
+                print(
+                    "Skipping --delete-link-triggers: NetBox inventory read failed",
+                    file=sys.stderr,
+                )
+            if args.delete_util_triggers:
+                print(
+                    "Skipping --delete-util-triggers: NetBox inventory read failed",
+                    file=sys.stderr,
+                )
+            delete_only_link = (
+                args.delete_link_triggers
+                and not args.create_link_triggers
+                and not args.dry_run
+                and not args.delete_util_triggers
+            )
+            delete_only_util = (
+                args.delete_util_triggers
+                and not args.create_link_triggers
+                and not args.dry_run
+                and not args.delete_link_triggers
+            )
+            if delete_only_link or delete_only_util:
+                sys.exit(1)
+        if inv_error == ERROR_PROVIDERS_UNAVAILABLE:
+            print("Error: NetBox providers unavailable", file=sys.stderr)
+            sys.exit(1)
+    else:
+        if args.delete_link_triggers:
+            deleted = delete_link_triggers(zabbix_url, zabbix_token, debug=args.debug)
+            print("Deleted triggers uplinks 90%/100%/SLA breach: {}".format(deleted))
+            if not args.create_link_triggers and not args.dry_run and not args.delete_util_triggers:
+                return
+
+        if args.delete_util_triggers:
+            deleted_util = delete_util_triggers(zabbix_url, zabbix_token, debug=args.debug)
+            print("Deleted uplink utilization triggers: {}".format(deleted_util))
+            if not args.create_link_triggers and not args.dry_run and not args.delete_link_triggers:
+                return
+
     if not commit_rates and not sync_util:
+        if inventory_read_error:
+            print(
+                "NetBox inventory is incomplete; sync run marked as failed",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print(
             "Nothing to sync: no NetBox circuits with cable and no uplinks in dry-ssh "
             "(or use --no-util-triggers). Check NETBOX_TAG / dry-ssh.json.",
@@ -1309,10 +1525,34 @@ def main():
         print("Hosts not found in Zabbix: {}".format(", ".join(sorted(missing))), file=sys.stderr)
 
     updated = 0
-    burst_pairs = load_burst_pairs(args.commit_rates) if args.create_link_triggers else set()
-    burst_meta = load_burst_metadata(args.commit_rates) if args.create_link_triggers else {}
-    if args.create_link_triggers and args.debug:
-        print("Burst pairs from {}: {}".format(args.commit_rates, len(burst_pairs)), file=sys.stderr)
+    try:
+        burst_pairs = (
+            load_burst_pairs(
+                args.commit_rates,
+                inventory_report=inventory_report,
+                dry_ssh_devices=dry_ssh_devices,
+                netbox_relations=netbox_relations,
+                legacy_commit_rates_fallback=args.legacy_commit_rates_fallback,
+                debug=args.debug,
+            )
+            if args.create_link_triggers
+            else set()
+        )
+        burst_meta = (
+            load_burst_metadata(
+                args.commit_rates,
+                inventory_report=inventory_report,
+                dry_ssh_devices=dry_ssh_devices,
+                netbox_relations=netbox_relations,
+                legacy_commit_rates_fallback=args.legacy_commit_rates_fallback,
+                debug=args.debug,
+            )
+            if args.create_link_triggers
+            else {}
+        )
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
     for dev_name in hostnames:
         if dev_name not in hostid_by_host:
             continue
@@ -1338,7 +1578,7 @@ def main():
             updated += 1
             continue
 
-        if iface_bps_list:
+        if iface_bps_list and not inventory_read_error:
             new_bps_macros = []
             for iface_name, bps in iface_bps_list:
                 new_bps_macros.append({
@@ -1359,6 +1599,11 @@ def main():
                     "Error updating BPS macros for {}: {}".format(dev_name, err or "usermacro"),
                     file=sys.stderr,
                 )
+        elif iface_bps_list and inventory_read_error:
+            print(
+                "Skipping BPS macro update for {}: NetBox data is incomplete".format(dev_name),
+                file=sys.stderr,
+            )
 
         util_macros_n = 0
         util_triggers_n = 0
@@ -1371,12 +1616,13 @@ def main():
                 util_ifaces,
                 dry_run=False,
                 debug=args.debug,
+                netbox_data_complete=not inventory_read_error,
             )
             for line in util_errors:
                 print(" {}: {}".format(dev_name, line), file=sys.stderr)
 
         created_triggers_for = 0
-        if args.create_link_triggers and iface_bps_list:
+        if args.create_link_triggers and iface_bps_list and not inventory_read_error:
             for iface_name, _bps in iface_bps_list:
                 if (dev_name, iface_name) not in burst_pairs:
                     continue
@@ -1409,19 +1655,35 @@ def main():
                 if ok_tr and ok_w and ok_sla:
                     created_triggers_for += 1
 
-        removed, rem_err = remove_threshold_items(zabbix_url, zabbix_token, hostid, debug=args.debug)
-        if rem_err:
-            print(" {}: deleting threshold items - {}".format(dev_name, rem_err), file=sys.stderr)
+        removed = 0
+        if not inventory_read_error:
+            removed, rem_err = remove_threshold_items(
+                zabbix_url, zabbix_token, hostid, debug=args.debug
+            )
+            if rem_err:
+                print(" {}: deleting threshold items - {}".format(dev_name, rem_err), file=sys.stderr)
+        else:
+            print(
+                "Skipping threshold item cleanup for {}: NetBox data is incomplete".format(
+                    dev_name
+                ),
+                file=sys.stderr,
+            )
 
         msg_parts = []
-        if iface_bps_list:
+        if iface_bps_list and not inventory_read_error:
             msg_parts.append("{} BPS macros".format(len(iface_bps_list) * 2))
         if sync_util and util_ifaces:
-            msg_parts.append(
-                "util {} macros, triggers {}/{}".format(
-                    util_macros_n, util_triggers_n, len(util_ifaces)
+            if not inventory_read_error:
+                msg_parts.append(
+                    "util {} macros, triggers {}/{}".format(
+                        util_macros_n, util_triggers_n, len(util_ifaces)
+                    )
                 )
-            )
+            elif util_triggers_n:
+                msg_parts.append(
+                    "util triggers {}/{}".format(util_triggers_n, len(util_ifaces))
+                )
         if args.create_link_triggers:
             msg_parts.append("Burst link triggers: {}".format(created_triggers_for))
         if removed:
@@ -1429,8 +1691,19 @@ def main():
         print("OK: {} - {}".format(dev_name, ", ".join(msg_parts) if msg_parts else "no changes"))
         updated += 1
 
+    if inventory_read_error:
+        print(
+            "Partial apply: {} hosts processed, {} commit pairs from NetBox, {} hosts with util interfaces.".format(
+                updated, len(commit_rates), len(host_to_util_ifaces)
+            )
+        )
+        print(
+            "NetBox inventory is incomplete; sync run marked as failed",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     print(
-        "Done: {} hosts updated, {} commit pairs from NetBox, {} hosts with util from dry-ssh.".format(
+        "Done: {} hosts updated, {} commit pairs from NetBox, {} hosts with util interfaces.".format(
             updated, len(commit_rates), len(host_to_util_ifaces)
         )
     )

@@ -9,6 +9,54 @@ ZABBIX_CACHE_FILE = "zabbix_uplinks_cache.json"
 BITS_RECEIVED_NAME = "Bits received"
 BITS_SENT_NAME = "Bits sent"
 
+_incomplete_netbox_data_reason = None
+
+UTIL_TRIGGER_GET_SEARCH = "Interface "
+
+
+def util_trigger_get_params(hostids):
+    """Shared trigger.get params for uplink utilization warn/crit triggers."""
+    return {
+        "output": ["triggerid", "description"],
+        "hostids": hostids,
+        "search": {"description": UTIL_TRIGGER_GET_SEARCH},
+        "selectTags": "extend",
+    }
+
+
+def stale_util_triggers(triggers, allowed_iface_names):
+    """Return utilization warn/crit triggers not in allowed_iface_names."""
+    from uplinks_config import (
+        TRIGGER_DESC_UTIL_CRIT_SUFFIX,
+        TRIGGER_DESC_UTIL_WARN_SUFFIX,
+        TRIGGER_TAG_NAME,
+        TRIGGER_TAG_VALUE,
+    )
+
+    allowed = {(n or "").strip() for n in (allowed_iface_names or [])}
+    stale = []
+    for trig in triggers or []:
+        desc = (trig.get("description") or "").strip()
+        if not (
+            desc.endswith(TRIGGER_DESC_UTIL_WARN_SUFFIX)
+            or desc.endswith(TRIGGER_DESC_UTIL_CRIT_SUFFIX)
+        ):
+            continue
+        tags = trig.get("tags") or []
+        if tags and not any(
+            tg.get("tag") == TRIGGER_TAG_NAME and tg.get("value") == TRIGGER_TAG_VALUE
+            for tg in tags
+        ):
+            continue
+        m = re.match(r"Interface\s+([^:]+):", desc)
+        if not m:
+            continue
+        iface = m.group(1).strip()
+        if iface in allowed:
+            continue
+        stale.append(trig)
+    return stale
+
 
 def load_zabbix_cache(path):
     """
@@ -43,6 +91,44 @@ def save_zabbix_cache(path, host_id_by_name, items_by_host_iface):
         json.dump(data, f, ensure_ascii=False, indent=0)
 
 
+def set_incomplete_netbox_data(reason):
+    """Arm guard: block destructive Zabbix calls until cleared."""
+    global _incomplete_netbox_data_reason
+    _incomplete_netbox_data_reason = (reason or "").strip() or "partial read"
+
+
+def incomplete_netbox_data():
+    """Return guard reason, or None when NetBox data is considered complete."""
+    return _incomplete_netbox_data_reason
+
+
+def clear_incomplete_netbox_data():
+    """Disarm guard (tests and fresh runs)."""
+    global _incomplete_netbox_data_reason
+    _incomplete_netbox_data_reason = None
+
+
+def is_destructive_call(method, params):
+    """True when the call may delete or replace a whole Zabbix collection."""
+    if not method:
+        return False
+    if method.endswith(".delete"):
+        return True
+    if method in ("dashboard.create", "dashboard.update"):
+        return True
+    if method == "map.update":
+        p = params or {}
+        return "links" in p or "selements" in p
+    if method == "item.update":
+        return "params" in (params or {})
+    if method == "host.update":
+        return "macros" in (params or {})
+    if method == "service.update":
+        p = params or {}
+        return "children" in p or "problem_tags" in p
+    return False
+
+
 def zabbix_request(url, token, method, params=None, debug=False):
     """
     Call Zabbix API 7 (JSON-RPC 2.0). Authorization: Bearer <token>.
@@ -54,6 +140,11 @@ def zabbix_request(url, token, method, params=None, debug=False):
         return None, "--zabbix requires the requests module (pip install requests)"
     if params is None:
         params = {}
+    reason = incomplete_netbox_data()
+    if reason and is_destructive_call(method, params):
+        msg = "{} skipped: NetBox data is incomplete ({})".format(method, reason)
+        print(msg, file=sys.stderr)
+        return None, msg
     if debug:
         print("Zabbix API: {} {}".format(method, params), file=sys.stderr)
     payload = {

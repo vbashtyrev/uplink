@@ -3,7 +3,6 @@
 
 ```bash
 cp urls.env.example urls.env
-python run_uplinks_full.py --refresh
 ```
 
 ---
@@ -13,36 +12,67 @@ python run_uplinks_full.py --refresh
 ```bash
 python run_uplinks_full.py
 
-python run_uplinks_full.py --refresh
-
-python run_uplinks_full.py --no-fetch
-python run_uplinks_full.py --from-file
-
 python run_uplinks_full.py --report uplinks_run_report.txt --no-stop-on-error
-
-python run_uplinks_full.py --no-fetch --location ALA
 
 # без Burst per-link триггеров (только макросы + util + агрегаты провайдера)
 python run_uplinks_full.py --no-burst-triggers
 ```
 
+Режим `--auto` удалён. Provider, Circuit, Termination и Cable создаются
+вручную в NetBox.
+
+Предварительный отчёт без записи в NetBox и Zabbix:
+
+```bash
+python run_uplinks_full.py --plan \
+  --report uplinks_plan_report.txt
+```
+
+Этот режим читает NetBox inventory и текущие объекты Zabbix. Опрос устройств,
+`dry-ssh.json` и сверка интерфейсов в него не входят.
+
+Отчёт пишется в `run_logs/<дата>_zabbix_plan.json`. Карты, дашборды, сервисы и
+агрегатные элементы теперь проходят практическое read-only сравнение:
+показываются создание, изменение, удаление и отсутствие изменений. Координаты
+карты и полное содержимое виджетов побитово не сравниваются. Триггеры Burst
+пока помечаются `not_evaluated` — они не сравниваются.
+Отдельно тот же отчёт даёт `zabbix_uplinks_plan.py`:
+
+```bash
+python zabbix_uplinks_plan.py \
+  --inventory-file netbox_inventory.json \
+  --text uplinks_plan_report.txt -o uplinks_plan_report.json
+```
+
+Обычный запуск работает в режиме NetBox-first: провайдеры, контуры,
+терминации и кабели заранее заводятся человеком в NetBox. Создание контуров
+не вызывается, а проверка интерфейсов выполняется в режиме
+`--existing-only`.
+
+Область мониторинга определяется на уровне Circuit: тип `Uplink`, встроенный
+статус `Active`, активный и полный кабельный путь без разветвления до устройства
+с тегом `border`. Если
+физический интерфейс входит в логическое объединение, связь с логическим
+интерфейсом берётся из NetBox.
+
 **Шаги `run_uplinks_full.py` (по порядку):**
 
-1. `uplinks_stats.py --fetch --json` → `dry-ssh.json` (кэш 24 ч; `--refresh` / `--no-fetch`)
-2. `netbox_checks.py` — сверка и `--apply` в NetBox
-3. `generate_commit_rates.py` → `commit_rates.json`
-4. `netbox_create_circuits.py` — контуры и кабели в NetBox
-5. `zabbix_sync_commit_rate.py -d dry-ssh.json -f commit_rates.json --create-link-triggers` — макросы, util, Burst 90%/100%/SLA на линках
-6. `zabbix_provider_aggregate.py` — хосты `Uplinks {Provider}`, агрегатные триггеры
-7. `zabbix_map.py --zabbix --update-map` — карта с окраской линков (после aggregate)
-8. `zabbix_uplinks_dashboard.py` — дашборды
-9. `zabbix_provider_services.py` — сервисы и SLA в Zabbix
+- Шаг 0: `netbox_uplinks_inventory.py --json --dry-run` — чтение цепочек NetBox
+  в локальный `netbox_inventory.json`
+- Шаг 1: `zabbix_sync_commit_rate.py` — макросы и триггеры
+- Шаг 2: `zabbix_provider_aggregate.py` — агрегаты провайдеров
+- Шаг 3: `zabbix_map.py --zabbix --update-map` — карта
+- Шаг 4: `zabbix_uplinks_dashboard.py` — дашборды
+- Шаг 5: `zabbix_provider_services.py` — сервисы и SLA
+
+В режиме `--plan` выполняются только чтение inventory и
+`zabbix_uplinks_plan.py`. Записи в NetBox и Zabbix не выполняются.
+При ошибке чтения NetBox или Zabbix удаление и полная перезапись объектов
+подавляются и отражаются в отчёте как `skipped` или `not_evaluated`.
 
 **Не входит в full run** (отдельные команды ниже): `grafana_uplinks_graph.py`, `zabbix_provider_sla.py`, `netbox_interface_types.py`, cleanup-скрипты.
 
 Логи: `run_logs/YYYY-MM-DD_HH-MM-SS_run.log` и `*_debug.log`.
-
-|----------|----------|
 
 
 ---
@@ -97,18 +127,21 @@ python netbox_checks.py -f dry-ssh.json --mt-ref netbox_interface_types.json --a
 ---
 
 
+Автоматическая генерация `commit_rates.json` удалена. Этот файл не используется
+рабочим проектом.
+
 ```bash
-python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json
+# Старые команды генерации commit_rates удалены.
 ```
 
 
 ```bash
-python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json --no-merge
+# Старые команды генерации commit_rates удалены.
 ```
 
 
 ```bash
-python generate_commit_rates.py -f dry-ssh.json -m description_to_name.json -o commit_rates.json
+# Старые команды генерации commit_rates удалены.
 ```
 
 
@@ -116,13 +149,15 @@ python generate_commit_rates.py -f dry-ssh.json -m description_to_name.json -o c
 
 
 ```bash
-python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json
+# Provider, Circuit, Termination и Cable создаются вручную в NetBox.
 ```
 
 
+Старый режим с записью в NetBox. Может удалить существующий кабель и
+подключить свой; на рабочем NetBox не запускать:
+
 ```bash
-python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json --location ALA
-python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json --dry-run
+# Старые команды создания Circuit/Cable удалены.
 ```
 
 ---
@@ -139,9 +174,15 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json
 ```
 
 
+Триггеры для Burst-контуров (схема расчёта берётся из поля NetBox
+`billing_model`):
+
 ```bash
-python zabbix_sync_commit_rate.py -d dry-ssh.json -f commit_rates.json --create-link-triggers
+python zabbix_sync_commit_rate.py -d dry-ssh.json --create-link-triggers
 ```
+
+Ключ `--dry-run` нельзя совмещать с `--delete-link-triggers` и
+`--delete-util-triggers`.
 
 
 ```bash
@@ -159,20 +200,20 @@ python zabbix_sync_commit_rate.py -d dry-ssh.json --debug
 
 
 ```bash
-python zabbix_map.py -f dry-ssh.json --print-table
-python zabbix_map.py -f dry-ssh.json --zabbix --print-table
-python zabbix_map.py -f dry-ssh.json --zabbix --create-map
+python zabbix_map.py --legacy-dry-ssh -f dry-ssh.json --print-table
+python zabbix_map.py --legacy-dry-ssh -f dry-ssh.json --zabbix --print-table
+python zabbix_map.py --legacy-dry-ssh -f dry-ssh.json --zabbix --create-map
 ```
 
 
 ```bash
-python zabbix_map.py -f dry-ssh.json --zabbix --update-map
+python zabbix_map.py --legacy-dry-ssh -f dry-ssh.json --zabbix --update-map
 ```
 
 
 ```bash
-python zabbix_map.py -f dry-ssh.json --zabbix --update-map --host "ALA-KZT-7280TR-1"
-python zabbix_map.py -f dry-ssh.json --zabbix --update-map --no-cache
+python zabbix_map.py --legacy-dry-ssh -f dry-ssh.json --zabbix --update-map --host "ALA-KZT-7280TR-1"
+python zabbix_map.py --legacy-dry-ssh -f dry-ssh.json --zabbix --update-map --no-cache
 ```
 
 ---
@@ -180,31 +221,36 @@ python zabbix_map.py -f dry-ssh.json --zabbix --update-map --no-cache
 
 
 ```bash
-python zabbix_uplinks_dashboard.py -f dry-ssh.json
+python zabbix_uplinks_dashboard.py --legacy-dry-ssh -f dry-ssh.json
 ```
 
 
 
 ```bash
-python zabbix_uplinks_dashboard.py -f dry-ssh.json --no-show-threshold
+python zabbix_uplinks_dashboard.py --legacy-dry-ssh -f dry-ssh.json --no-show-threshold
 ```
 
 
 ```bash
-python zabbix_uplinks_dashboard.py -f dry-ssh.json --no-cache
+python zabbix_uplinks_dashboard.py --legacy-dry-ssh -f dry-ssh.json --no-cache
 ```
 
 ---
 
 
 
-```json
-"_provider_limits": { "Cogent": 10, "Hurricane": 5 }
-```
-
+Общий лимит поставщика берётся из поля NetBox `aggregate_limit_gbps` у
+Provider (в Гбит/с):
 
 ```bash
-python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
+python zabbix_provider_aggregate.py --legacy-dry-ssh -d dry-ssh.json
+```
+
+Старый источник — ключ `_provider_limits` в `commit_rates.json`, например
+`{ "Cogent": 10, "Hurricane": 5 }`. Он читается только с явным ключом:
+
+```bash
+python zabbix_provider_aggregate.py --legacy-dry-ssh -d dry-ssh.json -f commit_rates.json --legacy-commit-rates-fallback
 ```
 
 
@@ -220,13 +266,20 @@ python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
 
 
 
+Обычный запуск сервисов и SLA использует активные Circuit из NetBox и
+`PROJECT_PROVIDER_SLO_PERCENT` из конфигурации проекта; `commit_rates.json`
+для этого не нужен. Переходный источник включается только явно:
+
 ```bash
-python zabbix_provider_services.py -f commit_rates.json --parent-service "Uplinks providers"
+python zabbix_provider_services.py --parent-service "Uplinks providers"
+python zabbix_provider_services.py -f commit_rates.json --parent-service "Uplinks providers" --legacy-commit-rates-fallback
 ```
 
 
 ```bash
-python zabbix_provider_sla.py -f commit_rates.json --days 30
+python zabbix_provider_sla.py --days 30
+python zabbix_provider_sla.py -f commit_rates.json --days 30 \
+  --legacy-commit-rates-fallback
 ```
 
 
@@ -261,45 +314,43 @@ python zabbix_uplinks_cleanup.py --dry-run
 python zabbix_uplinks_cleanup.py
 ```
 
-
-```bash
-```
-
 ---
 
 
 
 ```bash
-python netbox_uplinks_cleanup.py --dry-run
-
-python netbox_uplinks_cleanup.py
+Автоматический NetBox cleanup удалён. Старые объекты NetBox не удаляются
+рабочим проектом.
 ```
 
 
 ---
 
 
+Та же цепочка по шагам, если нужно выполнить её вручную вместо
+`run_uplinks_full.py`. Файл `commit_rates.json` здесь не участвует.
+
 ```bash
-python uplinks_stats.py --fetch --json > dry-ssh.json
+python netbox_uplinks_inventory.py --json --dry-run > netbox_inventory.json
 
-# python netbox_checks.py -f dry-ssh.json --apply
+python netbox_uplinks_inventory.py --json --dry-run > netbox_inventory.json
 
-python generate_commit_rates.py -f dry-ssh.json -o commit_rates.json
+python zabbix_sync_commit_rate.py --inventory-file netbox_inventory.json
+# и с триггерами Burst:
+# python zabbix_sync_commit_rate.py --inventory-file netbox_inventory.json --create-link-triggers
 
-python netbox_create_circuits.py -f commit_rates.json -d dry-ssh.json
+python zabbix_provider_aggregate.py --inventory-file netbox_inventory.json
 
-python zabbix_sync_commit_rate.py -d dry-ssh.json
-# python zabbix_sync_commit_rate.py -d dry-ssh.json -f commit_rates.json --create-link-triggers
+python zabbix_map.py --inventory-file netbox_inventory.json --zabbix --update-map
 
-python zabbix_map.py -f dry-ssh.json --zabbix --update-map
+python zabbix_uplinks_dashboard.py --inventory-file netbox_inventory.json
 
-python zabbix_provider_aggregate.py -f commit_rates.json -d dry-ssh.json
-
-python zabbix_uplinks_dashboard.py -f dry-ssh.json
-
-python zabbix_provider_services.py -f commit_rates.json --parent-service "Uplinks providers"
-# python zabbix_provider_sla.py -f commit_rates.json
+python zabbix_provider_services.py --parent-service "Uplinks providers"
+# python zabbix_provider_sla.py --inventory-file netbox_inventory.json
 
 # python grafana_uplinks_graph.py -f dry-ssh.json --grafana-api
 ```
+
+Автоматическая цепочка создания объектов удалена. Старые файлы не
+используются рабочим запуском.
 

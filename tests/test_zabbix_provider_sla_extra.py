@@ -88,8 +88,18 @@ def test_main_burst_host_missing(tmp_path, monkeypatch, zabbix_env, capsys):
     )
     build_standard_zabbix_mocker(hosts=[]).activate(monkeypatch)
     monkeypatch.setattr(
-        sys, "argv", ["zabbix_provider_sla.py", "-f", str(cr), "--days", "1"]
+        sys,
+        "argv",
+        [
+            "zabbix_provider_sla.py",
+            "-f",
+            str(cr),
+            "--days",
+            "1",
+            "--legacy-commit-rates-fallback",
+        ],
     )
+    monkeypatch.setattr("zabbix_provider_services.netbox_client_from_env", lambda **k: None)
     sla_mod.main()
     captured = capsys.readouterr()
     assert "host not found" in captured.err

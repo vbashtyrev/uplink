@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Теги NetBox для мониторинга uplinks</title>
+  <style>
+    @page { size: A4; margin: 18mm; }
+    body { font-family: "Helvetica Neue", Arial, sans-serif; color: #1f2937; font-size: 11pt; line-height: 1.45; }
+    h1 { color: #123b5d; font-size: 23pt; margin-bottom: 5mm; }
+    h2 { color: #155e75; font-size: 15pt; margin-top: 7mm; border-bottom: 1px solid #b8c7d1; padding-bottom: 1mm; }
+    h3 { color: #334e68; font-size: 12pt; margin-top: 5mm; }
+    code { font-family: Menlo, monospace; background: #eef3f6; padding: 1px 3px; }
+    pre { background: #f3f6f8; border-left: 3px solid #4f87a5; padding: 3mm; white-space: pre-wrap; }
+    li { margin: 1.5mm 0; }
+    .note { background: #fff7df; border-left: 4px solid #d99a00; padding: 3mm; }
+    .small { color: #52606d; font-size: 9pt; }
+  </style>
+</head>
+<body>
+  <h1>Теги NetBox для мониторинга uplinks</h1>
+  <p>Краткая инструкция для добавления и отключения каналов мониторинга.</p>
+
+  <h2>1. Тег <code>uplinks</code></h2>
+  <p><code>uplinks</code> ставится только на объект <b>Circuit</b> — конкретный канал связи.</p>
+  <p>Одного тега недостаточно. Канал попадёт в мониторинг только если одновременно:</p>
+  <ul>
+    <li>статус Circuit — <code>Active</code>;</li>
+    <li>поле <code>uplinks_circuit_lifecycle</code> имеет значение <code>active</code>;</li>
+    <li>есть терминация стороны A;</li>
+    <li>кабельный путь полный, активный и не разветвляется;</li>
+    <li>кабель заканчивается на интерфейсе устройства с тегом <code>border</code>.</li>
+  </ul>
+
+  <h2>2. Тег <code>border</code></h2>
+  <p><code>border</code> ставится на <b>Device</b>, где заканчивается кабель Circuit.</p>
+  <p>Этот тег не ставится на Circuit. Если конечное устройство не имеет тега <code>border</code>, цепочка не попадёт в мониторинг.</p>
+
+  <h2>3. Тег <code>automatization</code></h2>
+  <p><code>automatization</code> — старый служебный тег объектов, созданных прежним автоматическим режимом.</p>
+  <div class="note">
+    Он не включает Circuit в мониторинг, не заменяет <code>uplinks</code> и не заменяет <code>border</code>. Новым объектам вручную его добавлять не нужно.
+  </div>
+
+  <h2>4. Жизненный цикл Circuit</h2>
+  <p><code>uplinks_circuit_lifecycle</code> — дополнительное поле Circuit, а не тег.</p>
+  <ul>
+    <li><code>active</code> — участвует в мониторинге;</li>
+    <li><code>review</code> — временно исключён;</li>
+    <li><code>archived</code> — исключён окончательно.</li>
+  </ul>
+  <p>Чтобы временно убрать канал из мониторинга, установите <code>review</code>. Сам Circuit, кабель и терминация сохранятся.</p>
+
+  <h2>5. Пример правильного Circuit</h2>
+  <pre>Circuit:
+  Status: Active
+  Tag: uplinks
+  uplinks_circuit_lifecycle: active
+  billing_model: Burst
+  commit_rate: 10000000</pre>
+  <p>Значение <code>commit_rate</code> задаётся в килобитах в секунду. Для <code>FlatAggCap</code> индивидуальный commit rate не нужен: общий лимит задаётся у Provider в поле <code>aggregate_limit_gbps</code>.</p>
+
+  <h2>6. Как добавить канал</h2>
+  <ol>
+    <li>Создать или найти Provider.</li>
+    <li>Создать Circuit со статусом <code>Active</code>.</li>
+    <li>Выбрать тип Circuit <code>Uplink</code> и статус <code>Active</code>.</li>
+    <li>Заполнить <code>billing_model</code> и скорость, если они нужны для расчётов.</li>
+    <li>Создать терминацию стороны A и проложить кабель до интерфейса устройства.</li>
+    <li>Проверить, что конечное устройство имеет тег <code>border</code>.</li>
+  </ol>
+  <p>После этого проверить цепочку без изменений:</p>
+  <pre>python netbox_uplinks_inventory.py --json --dry-run &gt; netbox_inventory.json</pre>
+  <p>Автоматическое создание Circuit и Cable удалено. Создавайте эти объекты вручную в NetBox.</p>
+
+  <h2>7. Как убрать канал из мониторинга</h2>
+  <p>Измените встроенный статус Circuit с <code>Active</code> на другой статус,
+  например <code>Offline</code> или <code>Decommissioned</code>. Удалять Circuit
+  или кабель для отключения мониторинга не нужно.</p>
+
+  <h2>8. Имена тегов в настройках</h2>
+  <pre>NETBOX_TAG=border</pre>
+  <p class="small"><code>NETBOX_TAG</code> — тег конечного устройства, до которого
+  должна доходить кабельная цепочка Circuit.</p>
+
+  <h2>Источники</h2>
+  <p class="small">NetBox Documentation: Tags — https://netbox.readthedocs.io/en/stable/models/extras/tag/<br>
+  Custom fields — https://netbox.readthedocs.io/en/stable/customization/custom-fields/<br>
+  Circuits — https://netbox.readthedocs.io/en/stable/models/circuits/circuit/</p>
+</body>
+</html>

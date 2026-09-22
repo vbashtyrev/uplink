@@ -1,6 +1,5 @@
 """Tests for zabbix_uplinks_dashboard.py helpers."""
 
-from generate_commit_rates import is_uplink
 from zabbix_uplinks_dashboard import (
     _build_edges,
     _item_pattern_escape,
@@ -25,7 +24,7 @@ def test_build_edges_skips_non_uplink():
             {"name": "Eth2", "description": "management"},
         ],
     }
-    edges = _build_edges(devices, {"h1": "1"}, {}, {"Uplink: ISP": "ISP"})
+    edges = _build_edges(devices, {"h1": "1"}, {}, {"Uplink: ISP": "ISP"}, inventory_scoped=False)
     assert len(edges) == 1
     assert edges[0][2] == "Eth1"
 
@@ -41,7 +40,3 @@ def test_make_graph_widget():
 
 def test_make_graph_widget_no_items():
     assert _make_graph_widget(0, "h", "e", "ISP", "", "", x=0, y=0) is None
-
-
-def test_is_uplink_reexport():
-    assert is_uplink({"description": "Uplink: test"}) is True

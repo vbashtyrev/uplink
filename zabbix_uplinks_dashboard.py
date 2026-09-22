@@ -6,12 +6,9 @@ import json
 import os
 import sys
 
-import pynetbox
-
 from env_urls import load_env_file_if_present
-from generate_commit_rates import is_uplink
+from uplinks.data import resolve_uplink_cli_input
 from zabbix_map import (
-    DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
     ZABBIX_CACHE_FILE,
     load_devices_json,
@@ -23,11 +20,19 @@ from zabbix_map import (
     _normalize_interface_name,
     _get_zabbix_url_token,
 )
+from uplinks.netbox.inventory import (
+    arm_netbox_incomplete_guard,
+    is_uplink_iface,
+    lag_member_superseded_in_scoped,
+    load_inventory_report,
+    scoped_devices_from_inventory_report,
+    load_uplink_provider_context,
+    resolve_provider_name_for_iface,
+)
 from uplinks_config import (
     DASHBOARD_NAME,
     DASHBOARD_NAME_BY_LOCATION,
     DASHBOARD_NAME_BY_PROVIDER,
-    NETBOX_AUTOMATION_TAG,
     PROVIDERS_FOR_SUMMARY,
     UPLINKS_AGGREGATE_HOST_PREFIX,
 )
@@ -39,28 +44,15 @@ AGGREGATE_ITEM_KEY_IN = "aggregate.bits.in[]"
 AGGREGATE_ITEM_KEY_OUT = "aggregate.bits.out[]"
 
 
-def _get_providers_from_netbox(tag, debug=False):
-    """Return provider names from NetBox by tag or [] on error."""
-    url = os.environ.get("NETBOX_URL", "").strip()
-    token = os.environ.get("NETBOX_TOKEN", "").strip()
-    if not url or not token:
-        if debug:
-            print("NetBox: NETBOX_URL/NETBOX_TOKEN are not set - providers only from the config", file=sys.stderr)
-        return []
-    try:
-        nb = pynetbox.api(url, token=token)
-        providers = list(nb.circuits.providers.filter(tag=tag))
-        names = [p.name for p in providers if getattr(p, "name", None)]
-        if debug and names:
-            print("NetBox: providers with tag {}: {}".format(tag, ", ".join(names)), file=sys.stderr)
-        return names
-    except Exception as e:
-        if debug:
-            print("NetBox: failed to get providers ({}): {}".format(tag, e), file=sys.stderr)
-        return []
-
-
-def _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name):
+def _build_edges(
+    devices,
+    host_id_by_name,
+    items_by_host_iface,
+    desc_to_name,
+    device_iface_to_provider=None,
+    inventory_scoped=False,
+    netbox_relations=None,
+):
     """Build per-(host, provider) edge list similar to zabbix_map."""
     edges_raw = []
     for hostname in sorted(devices.keys()):
@@ -68,11 +60,29 @@ def _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name):
         if not hostid:
             continue
         for iface in devices[hostname]:
-            if not is_uplink(iface):
+            if not is_uplink_iface(
+                iface,
+                hostname=hostname,
+                device_iface_to_provider=device_iface_to_provider,
+                inventory_scoped=inventory_scoped,
+            ):
                 continue
             iface_name = iface.get("name", "")
-            description = iface.get("description", "")
-            isp = desc_to_name.get(description, description)
+            isp = resolve_provider_name_for_iface(
+                hostname,
+                iface,
+                desc_to_name,
+                device_iface_to_provider=device_iface_to_provider,
+            )
+            if inventory_scoped and lag_member_superseded_in_scoped(
+                hostname,
+                iface_name,
+                isp,
+                devices,
+                device_iface_to_provider=device_iface_to_provider,
+                netbox_relations=netbox_relations,
+            ):
+                continue
             key_norm = _normalize_interface_name(iface_name)
             rec = items_by_host_iface.get((hostname, key_norm), {})
             itemid_in = rec.get("itemid_in") or ""
@@ -91,7 +101,14 @@ def _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name):
 
     seen = {}
     for e in edges_raw:
-        key = (e[0], e[1], e[3])
+        _, _, iface_name, isp, _, _, _, is_logical, _ = e
+        key_norm = _normalize_interface_name(iface_name)
+        dedup_iface = key_norm
+        if is_logical:
+            base, _, suffix = key_norm.rpartition(".")
+            if base and suffix.isdigit():
+                dedup_iface = base
+        key = (e[0], e[1], isp, dedup_iface)
         if key not in seen or _edge_priority(e) > _edge_priority(seen[key]):
             seen[key] = e
     return sorted(seen.values(), key=lambda x: (x[0], x[3], x[2]))
@@ -239,7 +256,11 @@ def create_or_update_dashboard(url, token, edges, dashboard_name, debug=False, s
 
 
 def create_dashboard_by_location(url, token, edges, dashboard_name, debug=False, show_threshold=True):
-    """Create/update a dashboard with one page per location (the same graphs, divided into tabs)."""
+    """Create/update a dashboard with one page per location.
+
+    Each page has one svggraph widget per provider: stacked Item list datasets for
+    total Bits received and total Bits sent across all uplink itemids in that location.
+    """
     widget_h = 5
     row_max_width = 72
     by_location = {}
@@ -250,23 +271,95 @@ def create_dashboard_by_location(url, token, edges, dashboard_name, debug=False,
     for loc in sorted(by_location.keys()):
         by_location[loc] = sorted(by_location[loc], key=lambda e: (e[0], e[3], e[2]))
 
+    def _make_provider_summary_widget(widget_index, isp, prov_edges, y):
+        """One svggraph: stacked total Bits received + stacked total Bits sent for a provider."""
+        in_edges = [e for e in prov_edges if e[4]]
+        out_edges = [e for e in prov_edges if e[5]]
+        if not in_edges and not out_edges:
+            return None
+
+        ref = "L{:04d}".format(widget_index)[:5]
+        title = "{} (summary)".format(isp or "—")
+        fields = [
+            {"type": 1, "name": "reference", "value": ref},
+            {"type": 0, "name": "legend_statistic", "value": 1},
+        ]
+        if show_threshold:
+            fields.append({"type": 0, "name": "simple_triggers", "value": 1})
+
+        colors = [
+            "1A7F37", "E02F44", "0066CC", "CC8800", "9900CC",
+            "008B8B", "DC143C", "228B22", "483D8B", "FF1493",
+        ]
+
+        def _add_stacked_dataset(ds_idx, edges_list, kind):
+            item_count = 0
+            for idx, edge in enumerate(edges_list):
+                item_id = edge[4] if kind == "in" else edge[5]
+                if not item_id:
+                    continue
+                try:
+                    item_id_int = int(item_id)
+                except (TypeError, ValueError):
+                    continue
+                if item_count == 0:
+                    label = "Bits received" if kind == "in" else "Bits sent"
+                    fields.extend([
+                        {"type": 0, "name": "ds.{}.dataset_type".format(ds_idx), "value": 0},
+                        {"type": 0, "name": "ds.{}.width".format(ds_idx), "value": 1},
+                        {"type": 0, "name": "ds.{}.transparency".format(ds_idx), "value": 5},
+                        {"type": 0, "name": "ds.{}.fill".format(ds_idx), "value": 3},
+                        {"type": 0, "name": "ds.{}.stacked".format(ds_idx), "value": 1},
+                        {"type": 1, "name": "ds.{}.data_set_label".format(ds_idx), "value": label},
+                    ])
+                color = colors[idx % len(colors)]
+                fields.extend([
+                    {"type": 4, "name": "ds.{}.itemids.{}".format(ds_idx, item_count), "value": item_id_int},
+                    {"type": 1, "name": "ds.{}.color.{}".format(ds_idx, item_count), "value": color},
+                ])
+                item_count += 1
+            return item_count
+
+        num_ds = 0
+        if _add_stacked_dataset(num_ds, in_edges, "in"):
+            num_ds += 1
+        if _add_stacked_dataset(num_ds, out_edges, "out"):
+            num_ds += 1
+        if num_ds == 0:
+            return None
+
+        fields.append({"type": 0, "name": "legend_lines", "value": num_ds})
+        return {
+            "type": "svggraph",
+            "name": title,
+            "x": 0,
+            "y": y,
+            "width": row_max_width,
+            "height": widget_h,
+            "view_mode": 0,
+            "fields": fields,
+        }
+
     pages = []
     widget_index = 0
     for loc in sorted(by_location.keys()):
         loc_edges = by_location[loc]
         if not loc_edges:
             continue
+        by_provider = {}
+        for edge in loc_edges:
+            isp = edge[3] or ""
+            by_provider.setdefault(isp, []).append(edge)
         page_widgets = []
-        for row_idx, edge in enumerate(loc_edges):
-            hostname, _hid, iface_name, isp, itemid_in, itemid_out = edge[:6]
+        row_idx = 0
+        for isp in sorted(by_provider.keys()):
+            prov_edges = by_provider[isp]
             y = row_idx * widget_h
-            wg = _make_graph_widget(
-                widget_index, hostname, iface_name, isp, itemid_in, itemid_out,
-                0, y, width=row_max_width, height=widget_h, show_threshold=show_threshold,
-            )
+            wg = _make_provider_summary_widget(widget_index, isp, prov_edges, y)
             if wg:
                 page_widgets.append(wg)
                 widget_index += 1
+                row_idx += 1
         if page_widgets:
             pages.append({"name": loc, "widgets": page_widgets})
 
@@ -580,7 +673,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Create/update Zabbix dashboard with In/Out graphs by uplink from dry-ssh.json.",
     )
-    parser.add_argument("-f", "--file", default=DEFAULT_INPUT, help="Path to dry-ssh.json")
+    parser.add_argument("-f", "--file", default=None, help="Legacy path to dry-ssh.json")
+    parser.add_argument(
+        "--inventory-file",
+        default=None,
+        metavar="FILE",
+        help="Scoped inventory JSON from netbox_uplinks_inventory.py --json",
+    )
     parser.add_argument("-m", "--description-map", default=DESCRIPTION_MAP_FILE, help="File description_to_name.json")
     parser.add_argument("--dashboard-name", default=DASHBOARD_NAME, help="Name of the main dashboard in Zabbix")
     parser.add_argument("--dashboard-by-location", default=DASHBOARD_NAME_BY_LOCATION, metavar="NAME",
@@ -588,20 +687,73 @@ def main():
     parser.add_argument("--dashboard-by-provider", default=DASHBOARD_NAME_BY_PROVIDER, metavar="NAME",
                         help="Summary dashboard for providers with >1 link (tab = provider). Empty line - do not create")
     parser.add_argument("--providers", nargs="*", default=None, metavar="NAME",
-                        help="Providers for the summary dashboard (default from uplinks_config: Cogent, HE)")
+                        help="Providers for the summary dashboard (default: PROVIDERS_FOR_SUMMARY from uplinks_config plus providers from scoped NetBox inventory)")
     parser.add_argument("--no-cache", action="store_true", help="Do not use Zabbix cache")
     parser.add_argument("--no-show-threshold", action="store_true",
                         help="Do not draw trigger thresholds (Simple triggers) on graphs")
+    parser.add_argument(
+        "--legacy-dry-ssh",
+        action="store_true",
+        help="Use legacy dry-ssh.json input (-f/--file) instead of --inventory-file",
+    )
+    parser.add_argument(
+        "--legacy-provider-filter",
+        action="store_true",
+        help="Use description-based uplink filter instead of NetBox circuit scope (legacy)",
+    )
     parser.add_argument("--debug", action="store_true", help="Debug output")
     args = parser.parse_args()
     show_threshold = not args.no_show_threshold
 
-    data, err = load_devices_json(args.file)
-    if err:
-        print(err, file=sys.stderr)
+    input_mode, input_path, input_err = resolve_uplink_cli_input(
+        inventory_file=args.inventory_file,
+        dry_ssh_file=args.file,
+        legacy_dry_ssh=args.legacy_dry_ssh,
+    )
+    if input_err:
+        print(input_err, file=sys.stderr)
         sys.exit(1)
-    devices = data["devices"]
-    desc_to_name = load_description_map(args.description_map)
+
+    desc_to_name = {}
+    inventory_report = None
+    inv_ctx = None
+    if input_mode == "inventory":
+        try:
+            inventory_report = load_inventory_report(input_path)
+        except (OSError, json.JSONDecodeError) as e:
+            print("failed to read inventory file {}: {}".format(input_path, e), file=sys.stderr)
+            sys.exit(1)
+        inv_ctx = load_uplink_provider_context(inventory_report=inventory_report, debug=args.debug)
+        expanded_map = (inv_ctx or {}).get("device_iface_to_provider") or {}
+        devices = scoped_devices_from_inventory_report(inventory_report, expanded_map)
+        if not devices:
+            print("No devices in scoped inventory", file=sys.stderr)
+            sys.exit(1)
+    else:
+        desc_to_name = load_description_map(args.description_map)
+        data, err = load_devices_json(input_path)
+        if err:
+            print(err, file=sys.stderr)
+            sys.exit(1)
+        devices = data["devices"]
+
+    device_iface_to_provider = {}
+    inventory_scoped = not args.legacy_provider_filter
+    inventory_read_error = False
+    netbox_relations = None
+    if not args.legacy_provider_filter:
+        if inv_ctx is None:
+            inv_ctx = load_uplink_provider_context(
+                devices,
+                debug=args.debug,
+                inventory_report=inventory_report,
+            )
+        if inv_ctx is not None:
+            device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
+            netbox_relations = inv_ctx.get("netbox_interface_relations")
+            inventory_read_error = bool(inv_ctx.get("read_error"))
+            if inventory_read_error:
+                arm_netbox_incomplete_guard(inv_ctx.get("stats"))
 
     url, token = _get_zabbix_url_token()
     if not url:
@@ -609,8 +761,9 @@ def main():
         sys.exit(1)
 
     hostnames = set(devices.keys())
+    cache_base = args.inventory_file or args.file
     cache_path = os.path.join(
-        os.path.dirname(os.path.abspath(args.file)) if args.file else ".",
+        os.path.dirname(os.path.abspath(cache_base)) if cache_base else ".",
         ZABBIX_CACHE_FILE,
     )
     host_id_by_name = {}
@@ -630,7 +783,26 @@ def main():
         if not args.no_cache:
             save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
 
-    edges = _build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name)
+    edges = _build_edges(
+        devices,
+        host_id_by_name,
+        items_by_host_iface,
+        desc_to_name,
+        device_iface_to_provider=device_iface_to_provider,
+        inventory_scoped=inventory_scoped,
+        netbox_relations=netbox_relations,
+    )
+    if inventory_read_error:
+        print(
+            "NetBox data is incomplete; dashboard not updated "
+            "(replacing pages from partial data would drop widgets)",
+            file=sys.stderr,
+        )
+        print(
+            "NetBox inventory is incomplete; dashboard run marked as failed",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if not edges:
         print("No data for dashboard (no hosts in Zabbix or uplink without items)", file=sys.stderr)
         sys.exit(1)
@@ -656,11 +828,18 @@ def main():
         if args.providers is not None:
             providers_filter = args.providers
         else:
-            # Config + providers from NetBox with the automatization tag (no duplicates, order: config, then NetBox)
-            from_netbox = _get_providers_from_netbox(NETBOX_AUTOMATION_TAG, debug=args.debug)
+            # Config + providers from complete NetBox inventory (no duplicates, order: config, then inventory)
+            from_inventory = sorted((inv_ctx or {}).get("providers") or [])
+            if args.debug and from_inventory:
+                print(
+                    "NetBox: providers from complete inventory: {}".format(
+                        ", ".join(from_inventory)
+                    ),
+                    file=sys.stderr,
+                )
             seen = set()
             providers_filter = []
-            for p in list(PROVIDERS_FOR_SUMMARY) + from_netbox:
+            for p in list(PROVIDERS_FOR_SUMMARY) + from_inventory:
                 name = (p or "").strip()
                 if name and name not in seen:
                     seen.add(name)

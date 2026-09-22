@@ -67,7 +67,19 @@ def test_main_success(monkeypatch, zabbix_env, tmp_path, capsys):
     )
     mocker.activate(monkeypatch)
 
-    with patch.object(agg, "_get_providers_from_netbox", return_value=[]):
+    nb_ctx = {
+        "device_iface_to_provider": {
+            ("ALA-KZT-7280TR-1", "ethernet51/1"): "Cogent",
+            ("FRN-MX-1", "ae5.0"): "Hurricane",
+            ("FRN-MX-1", "et-0/0/1"): "Hurricane",
+            ("FRN-MX-1", "ae5"): "Hurricane",
+        },
+        "providers": {"Cogent", "Hurricane"},
+        "provider_limits_gbps": {"Cogent": 10, "Hurricane": 5},
+        "stats": {},
+    }
+
+    with patch.object(agg, "_load_netbox_aggregate_context", return_value=nb_ctx):
         with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
             monkeypatch.setattr(
                 sys,
@@ -76,6 +88,7 @@ def test_main_success(monkeypatch, zabbix_env, tmp_path, capsys):
                     "zabbix_provider_aggregate.py",
                     "-f",
                     str(cr),
+                    "--legacy-dry-ssh",
                     "-d",
                     str(FIXTURES / "dry_ssh_minimal.json"),
                     "-m",
@@ -105,6 +118,7 @@ def test_main_no_providers_exits_zero(monkeypatch, zabbix_env, tmp_path):
                 "zabbix_provider_aggregate.py",
                 "-f",
                 str(cr),
+                "--legacy-dry-ssh",
                 "-d",
                 str(FIXTURES / "dry_ssh_minimal.json"),
                 "-m",

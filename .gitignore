@@ -3,11 +3,14 @@ __pycache__/
 *.pyc
 
 dry-ssh.json
+netbox_inventory.json
 run_logs/
 zabbix_uplinks_cache.json
 description_to_name.json
 commit_rates.json
 *-export.json
+uplinks_*_report.txt
+uplinks_*_report.json
 *.log
 .coverage
 htmlcov/

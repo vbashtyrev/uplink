@@ -9,12 +9,22 @@ import re
 import sys
 
 from env_urls import load_env_file_if_present
-from generate_commit_rates import is_uplink
 from uplinks.data import (
     DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
+    GENERATE_DESCRIPTION_MAP_REQUIRES_LEGACY_MSG,
+    MAP_LEGACY_UTILITY_REQUIRES_LEGACY_MSG,
     load_description_map,
     load_devices_json,
+    resolve_uplink_cli_input,
+)
+from uplinks.netbox.inventory import (
+    arm_netbox_incomplete_guard,
+    is_uplink_iface,
+    load_inventory_report,
+    load_uplink_provider_context,
+    resolve_provider_name_for_iface,
+    scoped_devices_from_inventory_report,
 )
 from uplinks.zabbix.client import (
     BITS_RECEIVED_NAME,
@@ -278,20 +288,29 @@ ELEMENT_TYPE_HOST = 0
 # In API: 0=host, 4=image (picture with caption)
 ELEMENT_TYPE_IMAGE = 4
 
-# Arrangement: blocks by providers from left to right; map border is 30, hosts are no closer than 160 from the provider horizontally, vertical step is 100, between hosts horizontally is 180
+# Arrangement: provider blocks left to right; elements are SELEMENT_WIDTH x SELEMENT_HEIGHT with LAYOUT_ELEMENT_GAP
 LAYOUT_MARGIN = 30
-LAYOUT_BLOCK_WIDTH = 500
 LAYOUT_ISP_Y_OFFSET = 50
-LAYOUT_MIN_HOST_TO_PROVIDER = 160 # horizontal minimum from provider to host
-LAYOUT_HOST_HORIZONTAL_GAP = 180 # horizontal between hosts (two columns)
-LAYOUT_HOST_Y_OFFSET = 100 # vertical: first row of hosts under the provider
-LAYOUT_HOST_STEP_Y = 100 # vertical step between rows of hosts
+LAYOUT_HOST_Y_OFFSET = 100 # vertical offset for single-host row
 LAYOUT_HOST_COLUMNS = 2
-# Minimum distance between the centers of elements (so as not to overlap)
-LAYOUT_MIN_DISTANCE = 80
+# Minimum gap between host/provider element rectangles (SELEMENT_WIDTH x SELEMENT_HEIGHT)
+LAYOUT_ELEMENT_GAP = 40
 # Size of the element on the Zabbix map (x,y - upper left corner); needed to calculate the map height
 SELEMENT_HEIGHT = 200
 SELEMENT_WIDTH = 200
+
+
+def _layout_step():
+    """Horizontal/vertical distance between adjacent element upper-left corners."""
+    return SELEMENT_WIDTH + LAYOUT_ELEMENT_GAP
+
+
+def _layout_block_width(single_host):
+    """Content width of one provider block (two host columns or single-host pair)."""
+    step = _layout_step()
+    if single_host:
+        return 2 * step
+    return 2 * step + SELEMENT_WIDTH
 
 
 def _selement_hostid(el):
@@ -318,41 +337,116 @@ def _occupied_positions(host_pos, isp_pos, exclude_xy=None):
     return out
 
 
-def _is_free(cx, cy, occupied, min_dist):
-    """True if (cx, cy) is not closer than min_dist to any occupied point."""
+def _element_bounds(x, y):
+    """Upper-left (x, y) element rectangle: (left, top, right, bottom)."""
+    return (x, y, x + SELEMENT_WIDTH, y + SELEMENT_HEIGHT)
+
+
+def _inflated_bounds(x, y, gap):
+    """Rectangle expanded by gap on all sides for collision checks."""
+    return (x - gap, y - gap, x + SELEMENT_WIDTH + gap, y + SELEMENT_HEIGHT + gap)
+
+
+def _bounds_overlap(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    return ax1 < bx2 and bx1 < ax2 and ay1 < by2 and by1 < ay2
+
+
+def _is_free(cx, cy, occupied, gap=LAYOUT_ELEMENT_GAP):
+    """True if element at (cx, cy) has at least gap to every occupied element rectangle."""
+    candidate = _inflated_bounds(cx, cy, gap)
     for (ox, oy) in occupied:
-        if (cx - ox) ** 2 + (cy - oy) ** 2 < min_dist * min_dist:
+        if _bounds_overlap(candidate, _element_bounds(ox, oy)):
             return False
     return True
 
 
-def _place_single_host_provider(hx, hy, host_pos, isp_pos):
+def _find_free_layout_position(near_x, near_y, host_pos, isp_pos, map_width=None, map_height=None):
     """
-    Find a free position for a provider with one host (the host is already in another block).
-    Order: left, right, bottom, top, between (closest left/right).
-    Return (x, y) or (hx ​​- 170, hy) if everything is busy.
+    Return (x, y) for a 200x200 element with LAYOUT_ELEMENT_GAP to every occupied rectangle.
+    Order: preferred point, left, right, top, bottom, further offsets, in-bounds grid, then
+    expanding grid beyond nominal map size (required_width/height grows accordingly).
     """
     occupied = _occupied_positions(host_pos, isp_pos)
-    min_d = LAYOUT_MIN_DISTANCE
-    candidates = [
-        (hx - 170, hy), # left
-        (hx + 170, hy), # right
-        (hx, hy + 100), # from below
-        (hx, hy - 100), # on top
-        (hx - 85, hy), # between (closer to the left)
-        (hx + 85, hy), # between (closer to the right)
-    ]
-    for (cx, cy) in candidates:
-        if _is_free(cx, cy, occupied, min_d):
+    gap = LAYOUT_ELEMENT_GAP
+    min_x = LAYOUT_MARGIN
+    min_y = LAYOUT_MARGIN
+    step = SELEMENT_WIDTH + gap
+
+    max_x = (map_width - LAYOUT_MARGIN - SELEMENT_WIDTH) if map_width is not None else None
+    max_y = (map_height - LAYOUT_MARGIN - SELEMENT_HEIGHT) if map_height is not None else None
+
+    def _accepts(cx, cy):
+        if cx < min_x or cy < min_y:
+            return False
+        return _is_free(cx, cy, occupied, gap)
+
+    candidates = []
+    seen = set()
+
+    def _add(cx, cy):
+        key = (cx, cy)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(key)
+
+    _add(near_x, near_y)
+    _add(near_x - step, near_y)
+    _add(near_x + step, near_y)
+    _add(near_x, near_y - step)
+    _add(near_x, near_y + step)
+
+    for mult in range(2, 64):
+        _add(near_x - mult * step, near_y)
+        _add(near_x + mult * step, near_y)
+        _add(near_x, near_y - mult * step)
+        _add(near_x, near_y + mult * step)
+
+    if max_x is not None and max_y is not None:
+        for y in range(min_y, max_y + 1, step):
+            for x in range(min_x, max_x + 1, step):
+                _add(x, y)
+
+    for cx, cy in candidates:
+        if _accepts(cx, cy):
             return (cx, cy)
-    return (hx - 170, hy)
+
+    extent_cols = 64
+    row = 0
+    while row < 4096:
+        y = min_y + row * step
+        for col in range(extent_cols):
+            x = min_x + col * step
+            if _accepts(x, y):
+                return (x, y)
+        row += 1
+        if row % 64 == 0:
+            extent_cols += 64
+
+    raise RuntimeError("layout: no collision-free position found")
+
+
+def _place_single_host_provider(hx, hy, host_pos, isp_pos, map_width=None, map_height=None):
+    """Orphan single-host provider near an already-placed host."""
+    return _find_free_layout_position(hx, hy, host_pos, isp_pos, map_width, map_height)
+
+
+def _place_layout_element(preferred_x, preferred_y, host_pos, isp_pos, map_width=None, map_height=None):
+    """Place at preferred coordinates or find the nearest collision-free position."""
+    occupied = _occupied_positions(host_pos, isp_pos)
+    if _is_free(preferred_x, preferred_y, occupied):
+        return (preferred_x, preferred_y)
+    return _find_free_layout_position(
+        preferred_x, preferred_y, host_pos, isp_pos, map_width, map_height,
+    )
 
 
 def _compute_layout(edges, map_width, map_height):
     """
     Using the edges, calculate the positions of hosts and providers.
     Providers in descending order of number of connections; blocks from left to right; if there is not enough space, move to the next line.
-    One host at the provider: provider and host on the side (same rules ±170), at the same height.
+    One host at the provider: provider and host side by side with rectangle gap.
     Return: (host_pos, isp_pos, required_width, required_height).
     """
     isp_to_hosts = {}
@@ -376,17 +470,23 @@ def _compute_layout(edges, map_width, map_height):
     max_row_width = 0 # max. width across all rows (for the final card size)
 
     for isp in isps_sorted:
-        if block_x + LAYOUT_BLOCK_WIDTH > max_x and block_x > LAYOUT_MARGIN:
+        hosts_in_block = sorted(isp_to_hosts[isp], key=lambda t: (t[0], t[1]))
+        # One host per provider = by the number of connections to the ISP, not by the number placed in this block
+        single_host = len(isp_to_hosts[isp]) == 1
+        block_width = _layout_block_width(single_host)
+
+        if block_x + block_width > max_x and block_x > LAYOUT_MARGIN:
             max_row_width = max(max_row_width, block_x + LAYOUT_MARGIN)
             block_x = LAYOUT_MARGIN
             block_y += row_max_height
             row_max_height = 0
 
-        provider_x = block_x + LAYOUT_BLOCK_WIDTH // 2
-        hosts_in_block = sorted(isp_to_hosts[isp], key=lambda t: (t[0], t[1]))
-        # One host per provider = by the number of connections to the ISP, not by the number placed in this block
-        single_host = len(isp_to_hosts[isp]) == 1
+        provider_x = block_x + _layout_step()
+        gap = LAYOUT_ELEMENT_GAP
+        step = _layout_step()
         host_y_row0 = block_y + LAYOUT_ISP_Y_OFFSET + LAYOUT_HOST_Y_OFFSET
+        multi_host_y0 = block_y + LAYOUT_ISP_Y_OFFSET + SELEMENT_HEIGHT + gap
+        row_step_y = SELEMENT_HEIGHT + gap
 
         num_placed = 0
         for (hostname, hostid) in hosts_in_block:
@@ -395,41 +495,76 @@ def _compute_layout(edges, map_width, map_height):
             placed_hosts.add(hostid)
             row, subcol = divmod(num_placed, LAYOUT_HOST_COLUMNS)
             if single_host:
-                # Provider and host on the side: the same ±170, provider on the left, host on the right
-                isp_pos[isp] = (provider_x - 170, host_y_row0)
-                x = provider_x + 170
-                y = host_y_row0
+                isp_pos[isp] = _place_layout_element(
+                    provider_x - step, host_y_row0,
+                    host_pos, isp_pos, map_width, map_height,
+                )
+                host_pos[str(hostid)] = _place_layout_element(
+                    provider_x + gap, host_y_row0,
+                    host_pos, isp_pos, map_width, map_height,
+                )
             else:
-                offset_x = 170 if subcol == 1 else -170
-                x = provider_x + offset_x
-                y = host_y_row0 + row * LAYOUT_HOST_STEP_Y
+                pref_x = provider_x - step if subcol == 0 else provider_x + step
+                pref_y = multi_host_y0 + row * row_step_y
                 if num_placed == 0:
-                    isp_pos[isp] = (provider_x, block_y + LAYOUT_ISP_Y_OFFSET)
-            host_pos[str(hostid)] = (x, y)
+                    isp_pos[isp] = _place_layout_element(
+                        provider_x, block_y + LAYOUT_ISP_Y_OFFSET,
+                        host_pos, isp_pos, map_width, map_height,
+                    )
+                host_pos[str(hostid)] = _place_layout_element(
+                    pref_x, pref_y,
+                    host_pos, isp_pos, map_width, map_height,
+                )
             num_placed += 1
 
         if num_placed == 0:
             if single_host:
                 # Provider with one host: the host is already in another block - select a free position nearby
                 (_, only_hostid) = next(iter(hosts_in_block))
-                hx, hy = host_pos.get(str(only_hostid), (provider_x - 170, host_y_row0))
-                isp_pos[isp] = _place_single_host_provider(hx, hy, host_pos, isp_pos)
+                hx, hy = host_pos.get(str(only_hostid), (provider_x - step, host_y_row0))
+                isp_pos[isp] = _place_single_host_provider(
+                    hx, hy, host_pos, isp_pos, map_width, map_height,
+                )
+                max_row_width = max(max_row_width, block_x + block_width)
+                block_x += block_width + LAYOUT_ELEMENT_GAP
                 continue
             else:
-                isp_pos[isp] = (provider_x, block_y + LAYOUT_ISP_Y_OFFSET)
+                isp_pos[isp] = _place_layout_element(
+                    provider_x, block_y + LAYOUT_ISP_Y_OFFSET,
+                    host_pos, isp_pos, map_width, map_height,
+                )
 
         host_rows = math.ceil(num_placed / LAYOUT_HOST_COLUMNS) if num_placed else 0
         if single_host:
-            block_height = LAYOUT_ISP_Y_OFFSET + LAYOUT_HOST_Y_OFFSET
+            block_height = LAYOUT_ISP_Y_OFFSET + LAYOUT_HOST_Y_OFFSET + SELEMENT_HEIGHT
         else:
-            block_height = LAYOUT_ISP_Y_OFFSET + LAYOUT_HOST_Y_OFFSET + host_rows * LAYOUT_HOST_STEP_Y
+            block_height = (
+                LAYOUT_ISP_Y_OFFSET + SELEMENT_HEIGHT + gap
+                + host_rows * row_step_y
+            )
         row_max_height = max(row_max_height, block_height)
 
-        block_x += LAYOUT_BLOCK_WIDTH
+        max_row_width = max(max_row_width, block_x + block_width)
+        block_x += block_width + LAYOUT_ELEMENT_GAP
 
-    # Take into account the size of the element: in the API (x,y) - the upper left corner, element SELEMENT_WIDTH x SELEMENT_HEIGHT
-    required_width = max(block_x + LAYOUT_MARGIN, max_row_width) + SELEMENT_WIDTH
-    required_height = block_y + row_max_height + LAYOUT_MARGIN + SELEMENT_HEIGHT
+    # Take into account element rectangles and gap: (x,y) is upper-left, size SELEMENT_WIDTH x SELEMENT_HEIGHT
+    block_required_width = (
+        max(block_x + LAYOUT_MARGIN, max_row_width) + SELEMENT_WIDTH + LAYOUT_ELEMENT_GAP
+    )
+    block_required_height = (
+        block_y + row_max_height + LAYOUT_MARGIN + SELEMENT_HEIGHT + LAYOUT_ELEMENT_GAP
+    )
+    pos_max_right = LAYOUT_MARGIN
+    pos_max_bottom = LAYOUT_MARGIN
+    for x, y in list(host_pos.values()) + list(isp_pos.values()):
+        pos_max_right = max(
+            pos_max_right, x + SELEMENT_WIDTH + LAYOUT_MARGIN + LAYOUT_ELEMENT_GAP,
+        )
+        pos_max_bottom = max(
+            pos_max_bottom, y + SELEMENT_HEIGHT + LAYOUT_MARGIN + LAYOUT_ELEMENT_GAP,
+        )
+    required_width = max(block_required_width, pos_max_right)
+    required_height = max(block_required_height, pos_max_bottom)
     return host_pos, isp_pos, required_width, required_height
 
 
@@ -460,7 +595,16 @@ def ensure_map_exists(url, token, debug=False, width=None, height=None):
 
 
 def update_uplinks_map(
-    url, token, devices, host_id_by_name, items_by_host_iface, desc_to_name, debug=False, prune_obsolete=True
+    url,
+    token,
+    devices,
+    host_id_by_name,
+    items_by_host_iface,
+    desc_to_name,
+    debug=False,
+    prune_obsolete=True,
+    device_iface_to_provider=None,
+    inventory_scoped=True,
 ):
     """
     Update the map: hosts, providers (image), links.
@@ -479,11 +623,21 @@ def update_uplinks_map(
         if not hostid:
             continue
         for iface in devices[hostname]:
-            if not is_uplink(iface):
+            if not is_uplink_iface(
+                iface,
+                hostname=hostname,
+                device_iface_to_provider=device_iface_to_provider,
+                inventory_scoped=inventory_scoped,
+            ):
                 continue
             iface_name = iface.get("name", "")
             description = iface.get("description", "")
-            isp = desc_to_name.get(description, description)
+            isp = resolve_provider_name_for_iface(
+                hostname,
+                iface,
+                desc_to_name,
+                device_iface_to_provider=device_iface_to_provider,
+            )
             key_norm = _normalize_interface_name(iface_name)
             rec = items_by_host_iface.get((hostname, key_norm), {})
             itemid_in = rec.get("itemid_in") or ""
@@ -661,6 +815,11 @@ def update_uplinks_map(
     need_clear_links = pruned_selements > 0 or len(old_selements) < len(old_selements_raw)
     map_sid = _api_map_id(sysmapid)
     if need_clear_links:
+        n_clear = len(existing[0].get("links") or [])
+        print(
+            "Warning: clearing {} map link(s) after element merge/collapse".format(n_clear),
+            file=sys.stderr,
+        )
         _, err_clear = zabbix_request(
             url, token, "map.update", {"sysmapid": map_sid, "links": []}, debug=debug
         )
@@ -763,13 +922,8 @@ def update_uplinks_map(
             link["linktriggers"] = linktriggers
         new_links.append(link)
 
-    # Existing links: only those that are not from our hosts; replace deleted duplicates with the canonical selementid
-    our_host_sids_str = {str(s) for s in our_host_sids}
-    links_merged = []
-    for l in links_existing:
+    def _link_entry_from_existing(l):
         s1 = str(l.get("selementid1", ""))
-        if s1 in our_host_sids_str:
-            continue
         s2 = str(l.get("selementid2", ""))
         s1 = selementid_to_canonical.get(s1, s1)
         s2 = selementid_to_canonical.get(s2, s2)
@@ -781,7 +935,6 @@ def update_uplinks_map(
                 "selementid2": _api_map_id(s2),
                 "label": label,
             }
-            # Save trigger bindings to the link when updating
             lt_list = l.get("linktriggers") or []
             if lt_list:
                 entry["linktriggers"] = [
@@ -795,7 +948,16 @@ def update_uplinks_map(
                 "selementid2": _api_map_id(s2),
                 "label": label,
             }
-        links_merged.append(entry)
+        return entry
+
+    # Existing links: only those that are not from our hosts; replace deleted duplicates with the canonical selementid
+    our_host_sids_str = {str(s) for s in our_host_sids}
+    links_merged = []
+    for l in links_existing:
+        s1 = str(l.get("selementid1", ""))
+        if s1 in our_host_sids_str:
+            continue
+        links_merged.append(_link_entry_from_existing(l))
     links_merged.extend(new_links)
     # Ensure that each link has a label key (string) so that there are no gaps in the JSON.
     for link in links_merged:
@@ -834,9 +996,15 @@ def main():
     )
     parser.add_argument(
         "-f", "--file",
-        default=DEFAULT_INPUT,
+        default=None,
         metavar="FILE",
-        help="Path to JSON with devices (default {})".format(DEFAULT_INPUT),
+        help="Legacy JSON with devices (dry-ssh.json)",
+    )
+    parser.add_argument(
+        "--inventory-file",
+        default=None,
+        metavar="FILE",
+        help="Scoped inventory JSON from netbox_uplinks_inventory.py --json",
     )
     parser.add_argument(
         "-m", "--description-map",
@@ -885,6 +1053,16 @@ def main():
         help="When --update-map, do not remove hosts/providers from the map that are not in the current JSON (old behavior)",
     )
     parser.add_argument(
+        "--legacy-dry-ssh",
+        action="store_true",
+        help="Use legacy dry-ssh.json input (-f/--file) instead of --inventory-file",
+    )
+    parser.add_argument(
+        "--legacy-provider-filter",
+        action="store_true",
+        help="Use description-based uplink filter instead of NetBox circuit scope (legacy)",
+    )
+    parser.add_argument(
         "--export-map",
         metavar="SYSMAPID",
         help="Output JSON maps from the API (sysmapid) for comparison with a manual map; ZABBIX_URL and ZABBIX_TOKEN are needed",
@@ -897,9 +1075,23 @@ def main():
     )
     args = parser.parse_args()
 
-    # Generating the description_to_name template: collect all descriptions from the file
+    # Legacy utility: build description_to_name template from explicit dry-ssh.json
     if args.generate_description_map:
-        data, err = load_devices_json(args.file)
+        if not args.legacy_dry_ssh or not args.file:
+            print(GENERATE_DESCRIPTION_MAP_REQUIRES_LEGACY_MSG, file=sys.stderr)
+            sys.exit(1)
+        input_mode, input_path, input_err = resolve_uplink_cli_input(
+            inventory_file=args.inventory_file,
+            dry_ssh_file=args.file,
+            legacy_dry_ssh=args.legacy_dry_ssh,
+        )
+        if input_err:
+            print(input_err, file=sys.stderr)
+            sys.exit(1)
+        if input_mode != "legacy_dry_ssh":
+            print(GENERATE_DESCRIPTION_MAP_REQUIRES_LEGACY_MSG, file=sys.stderr)
+            sys.exit(1)
+        data, err = load_devices_json(input_path)
         if err:
             print(err, file=sys.stderr)
             sys.exit(1)
@@ -909,7 +1101,9 @@ def main():
                 d = (iface.get("description") or "").strip()
                 if d:
                     descriptions.add(d)
-        existing = load_description_map(args.description_map)
+        existing = {}
+        if "-m" in sys.argv or "--description-map" in sys.argv:
+            existing = load_description_map(args.description_map)
         # We save the existing mappings, new description -> as is (then edit)
         out = dict(existing)
         for d in sorted(descriptions):
@@ -918,8 +1112,11 @@ def main():
         print(json.dumps(out, indent=2, ensure_ascii=False))
         sys.exit(0)
 
-    # Export mode: map.get and JSON output only
+    # Legacy utility: export map JSON from Zabbix API only
     if args.export_map:
+        if not args.legacy_dry_ssh:
+            print(MAP_LEGACY_UTILITY_REQUIRES_LEGACY_MSG, file=sys.stderr)
+            sys.exit(1)
         url, token = _get_zabbix_url_token()
         if not url:
             print("For --export-map, set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
@@ -936,8 +1133,11 @@ def main():
         print(json.dumps(result, indent=2, ensure_ascii=False))
         sys.exit(0)
 
-    # Only create a map - do not load data, do not display a table
+    # Legacy utility: create an empty map shell without inventory data
     if args.create_map and not args.update_map and not args.zabbix and not args.print_table:
+        if not args.legacy_dry_ssh:
+            print(MAP_LEGACY_UTILITY_REQUIRES_LEGACY_MSG, file=sys.stderr)
+            sys.exit(1)
         url, token = _get_zabbix_url_token()
         if not url:
             print("Set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
@@ -949,13 +1149,37 @@ def main():
         print("Map created (or already exists): sysmapid={}".format(sysmapid), file=sys.stderr)
         sys.exit(0)
 
-    data, err = load_devices_json(args.file)
-    if err:
-        print(err, file=sys.stderr)
+    input_mode, input_path, input_err = resolve_uplink_cli_input(
+        inventory_file=args.inventory_file,
+        dry_ssh_file=args.file,
+        legacy_dry_ssh=args.legacy_dry_ssh,
+    )
+    if input_err:
+        print(input_err, file=sys.stderr)
         sys.exit(1)
 
-    desc_to_name = load_description_map(args.description_map)
-    devices = data["devices"]
+    desc_to_name = {}
+    inventory_report = None
+    inv_ctx = None
+    if input_mode == "inventory":
+        try:
+            inventory_report = load_inventory_report(input_path)
+        except (OSError, json.JSONDecodeError) as e:
+            print("failed to read inventory file {}: {}".format(input_path, e), file=sys.stderr)
+            sys.exit(1)
+        inv_ctx = load_uplink_provider_context(inventory_report=inventory_report, debug=args.debug)
+        expanded_map = (inv_ctx or {}).get("device_iface_to_provider") or {}
+        devices = scoped_devices_from_inventory_report(inventory_report, expanded_map)
+        if not devices:
+            print("No devices in scoped inventory", file=sys.stderr)
+            sys.exit(1)
+    else:
+        desc_to_name = load_description_map(args.description_map)
+        data, err = load_devices_json(input_path)
+        if err:
+            print(err, file=sys.stderr)
+            sys.exit(1)
+        devices = data["devices"]
     if args.host:
         if args.host not in devices:
             print("Host {!r} not found in devices. Available: {}".format(
@@ -967,6 +1191,22 @@ def main():
     default_create_map = not args.update_map and not args.print_table
 
     use_zabbix = args.zabbix or args.create_map or args.update_map or default_create_map
+    device_iface_to_provider = {}
+    inventory_scoped = not args.legacy_provider_filter
+    inventory_read_error = False
+    if not args.legacy_provider_filter:
+        if inv_ctx is None and (use_zabbix or args.print_table):
+            inv_ctx = load_uplink_provider_context(
+                devices,
+                debug=args.debug,
+                inventory_report=inventory_report,
+            )
+        if inv_ctx is not None:
+            device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
+            inventory_read_error = bool(inv_ctx.get("read_error"))
+            if inventory_read_error:
+                arm_netbox_incomplete_guard(inv_ctx.get("stats"))
+
     items_by_host_iface = {}
     if use_zabbix:
         url, token = _get_zabbix_url_token()
@@ -974,7 +1214,11 @@ def main():
             print("For --zabbix, --create-map and --update-map set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
             sys.exit(1)
         hostnames = set(devices.keys())
-        cache_path = os.path.join(os.path.dirname(os.path.abspath(args.file)) if args.file else ".", ZABBIX_CACHE_FILE)
+        cache_base = args.inventory_file or args.file
+        cache_path = os.path.join(
+            os.path.dirname(os.path.abspath(cache_base)) if cache_base else ".",
+            ZABBIX_CACHE_FILE,
+        )
         host_id_by_name = None
         items_by_host_iface = None
         if not args.no_cache:
@@ -998,9 +1242,10 @@ def main():
     else:
         host_id_by_name = {}
 
-    # Table to output to the console (only with --print-table)
+    # Table to output to the console (--print-table, or on incomplete inventory before exit)
+    print_table = args.print_table or inventory_read_error
     rows = []
-    if args.print_table:
+    if print_table:
         header = ("hostname", "interface", "description", "ISP")
         if use_zabbix:
             header = ("hostname", "hostid", "interface", "description", "ISP", "key Bits received", "key Bits sent")
@@ -1011,7 +1256,12 @@ def main():
             for iface in interfaces:
                 iface_name = iface.get("name", "")
                 description = iface.get("description", "")
-                isp = desc_to_name.get(description, description)
+                isp = resolve_provider_name_for_iface(
+                    hostname,
+                    iface,
+                    desc_to_name,
+                    device_iface_to_provider=device_iface_to_provider,
+                )
                 row = (hostname, iface_name, description, isp)
                 if use_zabbix:
                     hostid = str(host_id_by_name.get(hostname, ""))
@@ -1027,21 +1277,28 @@ def main():
 
     # Map update on demand
     if args.update_map:
-        prune_map = (not args.host) and (not args.keep_obsolete_map_elements)
-        err_msg, sysmapid = update_uplinks_map(
-            url,
-            token,
-            devices,
-            host_id_by_name,
-            items_by_host_iface,
-            desc_to_name,
-            debug=args.debug,
-            prune_obsolete=prune_map,
-        )
-        if err_msg:
-            print(err_msg, file=sys.stderr)
-            sys.exit(1)
-        print("Map updated: sysmapid={}".format(sysmapid), file=sys.stderr)
+        if inventory_read_error:
+            print(
+                "NetBox data is incomplete; map not updated (a map built from partial data would drop links)",
+                file=sys.stderr,
+            )
+        else:
+            err_msg, sysmapid = update_uplinks_map(
+                url,
+                token,
+                devices,
+                host_id_by_name,
+                items_by_host_iface,
+                desc_to_name,
+                debug=args.debug,
+                prune_obsolete=(not args.host) and (not args.keep_obsolete_map_elements),
+                device_iface_to_provider=device_iface_to_provider,
+                inventory_scoped=inventory_scoped,
+            )
+            if err_msg:
+                print(err_msg, file=sys.stderr)
+                sys.exit(1)
+            print("Map updated: sysmapid={}".format(sysmapid), file=sys.stderr)
     # Default behavior: create a map with elements if it doesn't already exist
     elif default_create_map and use_zabbix:
         # Check if there is already a card with the same name
@@ -1057,6 +1314,11 @@ def main():
             sysmapid = existing[0].get("sysmapid")
             print("Map already exists: name={!r}, sysmapid={}. Use --update-map to update.".format(
                 MAP_NAME, sysmapid), file=sys.stderr)
+        elif inventory_read_error:
+            print(
+                "NetBox data is incomplete; map not created",
+                file=sys.stderr,
+            )
         else:
             err_msg, sysmapid = update_uplinks_map(
                 url,
@@ -1066,20 +1328,27 @@ def main():
                 items_by_host_iface,
                 desc_to_name,
                 debug=args.debug,
-                prune_obsolete=True,
+                device_iface_to_provider=device_iface_to_provider,
+                inventory_scoped=inventory_scoped,
             )
             if err_msg:
                 print(err_msg, file=sys.stderr)
                 sys.exit(1)
             print("Map created: name={!r}, sysmapid={}".format(MAP_NAME, sysmapid), file=sys.stderr)
 
-    # Print table only when requested
-    if args.print_table and rows:
+    if print_table and rows:
         num_cols = len(rows[0])
         widths = [max(len(str(rows[i][c])) for i in range(len(rows))) for c in range(num_cols)]
         pad = "  "
         for row in rows:
             print(pad.join(str(row[c]).ljust(widths[c]) for c in range(num_cols)))
+
+    if inventory_read_error:
+        print(
+            "NetBox inventory is incomplete; map run marked as failed",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

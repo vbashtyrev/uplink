@@ -6,6 +6,10 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.mocks.inventory_scope import (
+    dry_ssh_minimal_inventory_context,
+    write_dry_ssh_minimal_inventory,
+)
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from zabbix_map import MAP_NAME, update_uplinks_map, load_devices_json
 
@@ -60,19 +64,23 @@ def test_main_update_map(monkeypatch, zabbix_env, tmp_path, capsys):
 
     with patch.object(zm, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
         with patch.object(zm, "validate_zabbix_token", lambda *a, **k: (True, None)):
-            monkeypatch.setattr(
-                sys,
-                "argv",
-                [
-                    "zabbix_map.py",
-                    "-f",
-                    str(FIXTURES / "dry_ssh_minimal.json"),
-                    "-m",
-                    str(desc),
-                    "--update-map",
-                    "--no-cache",
-                ],
-            )
-            zm.main()
+            with patch.object(
+                zm, "load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()
+            ):
+                inv = write_dry_ssh_minimal_inventory(tmp_path)
+                monkeypatch.setattr(
+                    sys,
+                    "argv",
+                    [
+                        "zabbix_map.py",
+                        "--inventory-file",
+                        str(inv),
+                        "-m",
+                        str(desc),
+                        "--update-map",
+                        "--no-cache",
+                    ],
+                )
+                zm.main()
     captured = capsys.readouterr()
     assert map_updates or "Map updated" in captured.err

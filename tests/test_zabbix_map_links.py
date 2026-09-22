@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from zabbix_map import MAP_NAME, load_devices_json, update_uplinks_map
 
@@ -66,6 +67,7 @@ def test_update_map_creates_links(monkeypatch, zabbix_env):
         items,
         desc,
         debug=True,
+        device_iface_to_provider=dry_ssh_minimal_inventory_context()["device_iface_to_provider"],
     )
     assert err is None
     assert sid == "55"

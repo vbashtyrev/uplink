@@ -89,3 +89,25 @@ def test_aggregate_second_pass_lag():
         "mx1", payload, nb_by_name, "lag", is_physical, "LAG"
     )
     nb_member.update.assert_called_with({"lag": 100})
+
+
+def test_aggregate_second_pass_skips_when_existing_only(capsys):
+    nb_lag = MagicMock()
+    nb_lag.id = 100
+    nb_member = MagicMock()
+    nb_member.id = 101
+    nb_member.lag = None
+    nb_member.update = MagicMock()
+    nb_by_name = {"ae5": nb_lag, "et-0/0/1": nb_member}
+    payload = [
+        {"name": "et-0/0/1", "aggregateInterface": "ae5", "isLag": False},
+    ]
+
+    def is_physical(e, n):
+        return not e.get("isLag")
+
+    nc._apply_aggregate_relation_second_pass(
+        "mx1", payload, nb_by_name, "lag", is_physical, "LAG", existing_only=True
+    )
+    nb_member.update.assert_not_called()
+    assert "LAG → ae5 skipped (--existing-only)" in capsys.readouterr().out

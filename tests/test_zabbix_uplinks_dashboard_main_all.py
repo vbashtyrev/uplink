@@ -4,6 +4,10 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.mocks.inventory_scope import (
+    dry_ssh_minimal_inventory_context,
+    write_dry_ssh_minimal_inventory,
+)
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from uplinks_config import UPLINKS_AGGREGATE_HOST_PREFIX
 from zabbix_uplinks_dashboard import AGGREGATE_ITEM_KEY_IN, AGGREGATE_ITEM_KEY_OUT
@@ -40,7 +44,7 @@ def _dashboard_items():
     ]
 
 
-def test_main_all_dashboards(monkeypatch, zabbix_env, capsys):
+def test_main_all_dashboards(monkeypatch, zabbix_env, tmp_path, capsys):
     import zabbix_uplinks_dashboard as mod
 
     agg_host = UPLINKS_AGGREGATE_HOST_PREFIX + "Cogent"
@@ -88,24 +92,22 @@ def test_main_all_dashboards(monkeypatch, zabbix_env, capsys):
         "Uplink: Hurricane member": "Hurricane",
         "Uplink: Hurricane LAG": "Hurricane",
     }
-    with patch.object(mod, "load_description_map", return_value=desc_map):
-        with patch.object(
-            mod, "_get_providers_from_netbox", return_value=["Hurricane"]
-        ):
-            monkeypatch.setattr(
-                sys,
-                "argv",
-                [
-                    "zabbix_uplinks_dashboard.py",
-                    "-f",
-                    str(FIXTURES / "dry_ssh_minimal.json"),
-                    "--no-cache",
-                    "--providers",
-                    "Cogent",
-                    "Hurricane",
-                ],
-            )
-            mod.main()
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
+    with patch.object(mod, "load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "zabbix_uplinks_dashboard.py",
+                "--inventory-file",
+                str(inv),
+                "--no-cache",
+                "--providers",
+                "Cogent",
+                "Hurricane",
+            ],
+        )
+        mod.main()
 
     out = capsys.readouterr().out
     assert out.count("OK: dashboard") >= 3

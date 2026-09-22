@@ -13,31 +13,25 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 def _base_args(tmp_path):
     return full.argparse.Namespace(
-        no_fetch=True,
-        from_file=True,
-        refresh=False,
+        plan=False,
         dry_ssh=str(tmp_path / "dry-ssh.json"),
-        commit_rates=str(tmp_path / "commit_rates.json"),
         no_netbox_apply=False,
         no_burst_triggers=False,
-        location="ALA",
         stop_on_error=True,
         no_stop_on_error=False,
         report=None,
         timeout=60,
         env_file="urls.env",
         no_env_file=True,
+        netbox_checks=False,
     )
 
 
 def test_main_stop_on_error(monkeypatch, tmp_path):
-    dry = tmp_path / "dry-ssh.json"
-    dry.write_text((FIXTURES / "dry_ssh_minimal.json").read_text(encoding="utf-8"), encoding="utf-8")
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
     monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
+    monkeypatch.setattr(full, "DEFAULT_NETBOX_INVENTORY", "netbox_inventory.json")
     monkeypatch.setattr(full, "run_cmd", lambda *a, **k: (False, "", "step failed"))
     monkeypatch.setattr(full.argparse.ArgumentParser, "parse_args", lambda self: _base_args(tmp_path))
     with pytest.raises(SystemExit) as exc:

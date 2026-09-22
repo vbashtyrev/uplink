@@ -89,17 +89,6 @@ def test_get_or_create_host_errors(monkeypatch):
     assert "Zabbix API" in err
 
 
-def test_get_providers_netbox_debug_names(capsys, monkeypatch):
-    nb = MagicMock()
-    nb.circuits.providers.filter.return_value = [type("P", (), {"name": "Cogent"})()]
-    with patch("zabbix_provider_aggregate.pynetbox.api", return_value=nb):
-        monkeypatch.setenv("NETBOX_URL", "https://nb.example")
-        monkeypatch.setenv("NETBOX_TOKEN", "tok")
-        names = agg._get_providers_from_netbox("automatization", debug=True)
-    assert names == ["Cogent"]
-    assert "Cogent" in capsys.readouterr().err
-
-
 def test_get_or_create_host_create_error(monkeypatch):
     (
         ZabbixRpcMocker()
@@ -190,7 +179,14 @@ def test_run_prune_triggers_without_limit(monkeypatch, tmp_path):
         .activate(monkeypatch)
     )
 
-    with patch.object(agg, "_get_providers_from_netbox", return_value=["Cogent"]):
+    nb_ctx = {
+        "device_iface_to_provider": {("ALA-KZT-7280TR-1", "ethernet51/1"): "Cogent"},
+        "providers": {"Cogent"},
+        "provider_limits_gbps": {},
+        "stats": {},
+    }
+
+    with patch.object(agg, "_load_netbox_aggregate_context", return_value=nb_ctx):
         with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
             done, err = agg.run(
                 "https://z.example/api_jsonrpc.php",

@@ -33,6 +33,7 @@ def test_main_burst_triggers_partial_failures(monkeypatch, zabbix_env, netbox_en
         device_name="ALA-KZT-7280TR-1",
         iface_name="Ethernet51/1",
         device_tag="border",
+        circuit_custom_fields={"billing_model": "Burst"},
     )
 
     def item_get(params):

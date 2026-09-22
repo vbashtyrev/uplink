@@ -6,19 +6,8 @@ from tests.mocks.zabbix_rpc import ZabbixRpcMocker
 from zabbix_provider_aggregate import (
     _create_or_update_calculated_item,
     _get_or_create_host,
-    _get_providers_from_netbox,
     _sanitize_provider_name,
 )
-
-
-def test_get_providers_netbox_exception(capsys, monkeypatch):
-    nb = MagicMock()
-    nb.circuits.providers.filter.side_effect = RuntimeError("nb down")
-    with patch("zabbix_provider_aggregate.pynetbox.api", return_value=nb):
-        monkeypatch.setenv("NETBOX_URL", "https://nb.example")
-        monkeypatch.setenv("NETBOX_TOKEN", "tok")
-        assert _get_providers_from_netbox("automatization", debug=True) == []
-    assert "nb down" in capsys.readouterr().err
 
 
 def test_get_or_create_host_creates(monkeypatch):

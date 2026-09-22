@@ -15,6 +15,16 @@ _config = ROOT / "uplinks_config.py"
 _example = ROOT / "uplinks_config.example.py"
 if not _config.exists() and _example.exists():
     _config.write_text(_example.read_text(encoding="utf-8"), encoding="utf-8")
+elif _config.exists() and _example.exists():
+    example_text = _example.read_text(encoding="utf-8")
+    config_text = _config.read_text(encoding="utf-8")
+    for line in example_text.splitlines():
+        if "=" not in line or line.strip().startswith("#"):
+            continue
+        name = line.split("=", 1)[0].strip()
+        if name and name + " =" not in config_text and name + "=" not in config_text:
+            config_text = config_text.rstrip() + "\n\n" + line + "\n"
+    _config.write_text(config_text, encoding="utf-8")
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -23,6 +33,16 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def _fast_sleep(monkeypatch):
     """Speed up SSH/read loops that use time.sleep."""
     monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
+
+
+@pytest.fixture(autouse=True)
+def _clear_netbox_incomplete_guard():
+    """Reset Zabbix transport guard so tests cannot leak process state."""
+    from uplinks.zabbix.client import clear_incomplete_netbox_data
+
+    clear_incomplete_netbox_data()
+    yield
+    clear_incomplete_netbox_data()
 
 
 @pytest.fixture

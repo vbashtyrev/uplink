@@ -16,15 +16,12 @@ def _edge():
     return ("ALA-1", "101", "Eth1", "Cogent", "1001", "1002", True, False, False)
 
 
-def test_get_providers_netbox_debug(capsys, monkeypatch):
-    nb = MagicMock()
-    nb.circuits.providers.filter.return_value = [type("P", (), {"name": "Cogent"})()]
-    with patch("zabbix_uplinks_dashboard.pynetbox.api", return_value=nb):
-        monkeypatch.setenv("NETBOX_URL", "https://nb.example")
-        monkeypatch.setenv("NETBOX_TOKEN", "tok")
-        names = dash._get_providers_from_netbox("automatization", debug=True)
-    assert names == ["Cogent"]
-    assert "Cogent" in capsys.readouterr().err
+def test_load_uplink_provider_context_debug(capsys, monkeypatch):
+    with patch(
+        "uplinks.netbox.inventory.netbox_client_from_env",
+        return_value=None,
+    ):
+        assert dash.load_uplink_provider_context({}, debug=True) is None
 
 
 def test_create_or_update_dashboard_update_debug(monkeypatch, capsys):
@@ -123,6 +120,7 @@ def test_main_no_zabbix_env(monkeypatch, tmp_path):
         "argv",
         [
             "zabbix_uplinks_dashboard.py",
+            "--legacy-dry-ssh",
             "-f",
             str(FIXTURES / "dry_ssh_minimal.json"),
             "--no-cache",

@@ -7,6 +7,10 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.mocks.inventory_scope import (
+    dry_ssh_minimal_inventory_context,
+    write_dry_ssh_minimal_inventory,
+)
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from tests.mocks.zabbix_rpc import ZabbixRpcMocker
 from zabbix_map import (
@@ -74,6 +78,7 @@ def test_update_uplinks_map_creates_map(monkeypatch, zabbix_env):
         items,
         desc,
         debug=False,
+        device_iface_to_provider=dry_ssh_minimal_inventory_context()["device_iface_to_provider"],
     )
     assert err is None
     assert sysmapid == "55"
@@ -86,6 +91,7 @@ def test_main_generate_description_map(monkeypatch, tmp_path, capsys):
         "argv",
         [
             "zabbix_map.py",
+            "--legacy-dry-ssh",
             "-f",
             str(FIXTURES / "dry_ssh_minimal.json"),
             "--generate-description-map",
@@ -99,7 +105,7 @@ def test_main_generate_description_map(monkeypatch, tmp_path, capsys):
     assert "Uplink: Cogent 10G" in data
 
 
-def test_main_print_table_with_zabbix(monkeypatch, zabbix_env, capsys):
+def test_main_print_table_with_zabbix(monkeypatch, zabbix_env, tmp_path, capsys):
     items = [
         {
             "itemid": "501",
@@ -122,19 +128,21 @@ def test_main_print_table_with_zabbix(monkeypatch, zabbix_env, capsys):
         items=items,
     )
     mocker.activate(monkeypatch)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "zabbix_map.py",
-            "-f",
-            str(FIXTURES / "dry_ssh_minimal.json"),
-            "--zabbix",
-            "--print-table",
-            "--no-cache",
-        ],
-    )
-    main()
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
+    with patch("zabbix_map.load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "zabbix_map.py",
+                "--inventory-file",
+                str(inv),
+                "--zabbix",
+                "--print-table",
+                "--no-cache",
+            ],
+        )
+        main()
     out = capsys.readouterr().out
     assert "ALA-KZT-7280TR-1" in out
     assert "Ethernet51/1" in out
@@ -150,7 +158,7 @@ def test_main_create_map_only(monkeypatch, zabbix_env, capsys):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["zabbix_map.py", "--create-map"],
+        ["zabbix_map.py", "--legacy-dry-ssh", "--create-map"],
     )
     with pytest.raises(SystemExit) as exc:
         main()
@@ -160,7 +168,9 @@ def test_main_create_map_only(monkeypatch, zabbix_env, capsys):
 def test_main_export_map(monkeypatch, zabbix_env, capsys):
     mocker = ZabbixRpcMocker().on("map.get", lambda p: [{"sysmapid": "1", "name": "Uplinks"}])
     mocker.activate(monkeypatch)
-    monkeypatch.setattr(sys, "argv", ["zabbix_map.py", "--export-map", "1"])
+    monkeypatch.setattr(
+        sys, "argv", ["zabbix_map.py", "--legacy-dry-ssh", "--export-map", "1"]
+    )
     with pytest.raises(SystemExit) as exc:
         main()
     assert exc.value.code == 0

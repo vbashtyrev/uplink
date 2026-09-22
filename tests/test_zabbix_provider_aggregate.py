@@ -29,7 +29,7 @@ def test_build_edges_with_keys():
     items = {
         ("host1", "ae5.0"): {"bits_in": "net.if.in[1]", "bits_out": "net.if.out[1]"},
     }
-    edges = _build_edges_with_keys(devices, {"host1": "101"}, items, {"Uplink: ISP": "ISP"})
+    edges = _build_edges_with_keys(devices, {"host1": "101"}, items, {"Uplink: ISP": "ISP"}, inventory_scoped=False)
     assert len(edges) == 1
     assert edges[0][0] == "host1"
     assert edges[0][1] == "ISP"
