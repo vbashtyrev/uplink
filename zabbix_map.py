@@ -282,7 +282,7 @@ def get_link_commit_triggers(url, token, hostids, debug=False):
     return out
 
 
-MAP_WIDTH = 1200
+MAP_WIDTH = 1460
 MAP_HEIGHT = 800
 ELEMENT_TYPE_HOST = 0
 # In API: 0=host, 4=image (picture with caption)
@@ -290,8 +290,6 @@ ELEMENT_TYPE_IMAGE = 4
 
 # Arrangement: provider blocks left to right; elements are SELEMENT_WIDTH x SELEMENT_HEIGHT with LAYOUT_ELEMENT_GAP
 LAYOUT_MARGIN = 30
-LAYOUT_ISP_Y_OFFSET = 50
-LAYOUT_HOST_Y_OFFSET = 100 # vertical offset for single-host row
 LAYOUT_HOST_COLUMNS = 2
 # Minimum gap between host/provider element rectangles (SELEMENT_WIDTH x SELEMENT_HEIGHT)
 LAYOUT_ELEMENT_GAP = 40
@@ -305,12 +303,55 @@ def _layout_step():
     return SELEMENT_WIDTH + LAYOUT_ELEMENT_GAP
 
 
-def _layout_block_width(single_host):
-    """Content width of one provider block (two host columns or single-host pair)."""
+def _layout_block_width():
+    """Content width of one provider block (two columns or single-host pair side by side)."""
+    return 2 * SELEMENT_WIDTH + LAYOUT_ELEMENT_GAP
+
+
+def _layout_block_height(single_host, num_placed):
+    """Reserved vertical extent of a placed provider block."""
+    if num_placed <= 0:
+        return 0
     step = _layout_step()
     if single_host:
-        return 2 * step
-    return 2 * step + SELEMENT_WIDTH
+        return SELEMENT_HEIGHT
+    host_rows = math.ceil(num_placed / LAYOUT_HOST_COLUMNS)
+    return step + host_rows * step - LAYOUT_ELEMENT_GAP
+
+
+def _layout_block_positions(single_host, hosts_to_place):
+    """Relative (rx, ry) positions for provider and hosts inside one block."""
+    step = _layout_step()
+    positions = [("isp", None, 0, 0)]
+    if single_host:
+        (_hostname, hostid) = hosts_to_place[0]
+        positions.append(("host", str(hostid), step, 0))
+    else:
+        for idx, (_hostname, hostid) in enumerate(hosts_to_place):
+            row, subcol = divmod(idx, LAYOUT_HOST_COLUMNS)
+            positions.append(("host", str(hostid), subcol * step, step + row * step))
+    return positions
+
+
+def _block_positions_fit(block_x, block_y, positions, host_pos, isp_pos):
+    """True when every element of a block fits at block_x/block_y without collision."""
+    occupied = _occupied_positions(host_pos, isp_pos)
+    for _kind, _key, rel_x, rel_y in positions:
+        if not _is_free(block_x + rel_x, block_y + rel_y, occupied):
+            return False
+    return True
+
+
+def _layout_required_dimensions(host_pos, isp_pos):
+    """Map size from actual element AABB plus margin and outer gap."""
+    margin = LAYOUT_MARGIN
+    gap = LAYOUT_ELEMENT_GAP
+    max_right = margin
+    max_bottom = margin
+    for x, y in list(host_pos.values()) + list(isp_pos.values()):
+        max_right = max(max_right, x + SELEMENT_WIDTH)
+        max_bottom = max(max_bottom, y + SELEMENT_HEIGHT)
+    return max_right + margin + gap, max_bottom + margin + gap
 
 
 def _selement_hostid(el):
@@ -392,10 +433,11 @@ def _find_free_layout_position(near_x, near_y, host_pos, isp_pos, map_width=None
             candidates.append(key)
 
     _add(near_x, near_y)
-    _add(near_x - step, near_y)
-    _add(near_x + step, near_y)
-    _add(near_x, near_y - step)
-    _add(near_x, near_y + step)
+    for dx, dy in (
+        (-1, 0), (1, 0), (0, -1), (0, 1),
+        (-1, -1), (1, -1), (-1, 1), (1, 1),
+    ):
+        _add(near_x + dx * step, near_y + dy * step)
 
     for mult in range(2, 64):
         _add(near_x - mult * step, near_y)
@@ -469,102 +511,68 @@ def _compute_layout(edges, map_width, map_height):
     max_x = map_width - LAYOUT_MARGIN
     max_row_width = 0 # max. width across all rows (for the final card size)
 
+    block_width = _layout_block_width()
+    gap = LAYOUT_ELEMENT_GAP
+    orphan_isps = []
+
+    def _wrap_shelf():
+        nonlocal block_x, block_y, row_max_height, max_row_width
+        max_row_width = max(max_row_width, block_x + LAYOUT_MARGIN)
+        block_x = LAYOUT_MARGIN
+        block_y += row_max_height + gap
+        row_max_height = 0
+
     for isp in isps_sorted:
         hosts_in_block = sorted(isp_to_hosts[isp], key=lambda t: (t[0], t[1]))
         # One host per provider = by the number of connections to the ISP, not by the number placed in this block
         single_host = len(isp_to_hosts[isp]) == 1
-        block_width = _layout_block_width(single_host)
+
+        hosts_to_place = [
+            (hostname, hostid)
+            for (hostname, hostid) in hosts_in_block
+            if hostid not in placed_hosts
+        ]
+
+        if not hosts_to_place:
+            orphan_isps.append(isp)
+            continue
+
+        num_placed = len(hosts_to_place)
+        block_height = _layout_block_height(single_host, num_placed)
+        positions = _layout_block_positions(single_host, hosts_to_place)
 
         if block_x + block_width > max_x and block_x > LAYOUT_MARGIN:
-            max_row_width = max(max_row_width, block_x + LAYOUT_MARGIN)
-            block_x = LAYOUT_MARGIN
-            block_y += row_max_height
-            row_max_height = 0
+            _wrap_shelf()
 
-        provider_x = block_x + _layout_step()
-        gap = LAYOUT_ELEMENT_GAP
-        step = _layout_step()
-        host_y_row0 = block_y + LAYOUT_ISP_Y_OFFSET + LAYOUT_HOST_Y_OFFSET
-        multi_host_y0 = block_y + LAYOUT_ISP_Y_OFFSET + SELEMENT_HEIGHT + gap
-        row_step_y = SELEMENT_HEIGHT + gap
+        while not _block_positions_fit(block_x, block_y, positions, host_pos, isp_pos):
+            if block_x + block_width + gap + block_width <= max_x + LAYOUT_MARGIN:
+                block_x += block_width + gap
+            else:
+                _wrap_shelf()
 
-        num_placed = 0
-        for (hostname, hostid) in hosts_in_block:
-            if hostid in placed_hosts:
-                continue
+        for kind, key, rel_x, rel_y in positions:
+            abs_x = block_x + rel_x
+            abs_y = block_y + rel_y
+            if kind == "isp":
+                isp_pos[isp] = (abs_x, abs_y)
+            else:
+                host_pos[key] = (abs_x, abs_y)
+        for _hostname, hostid in hosts_to_place:
             placed_hosts.add(hostid)
-            row, subcol = divmod(num_placed, LAYOUT_HOST_COLUMNS)
-            if single_host:
-                isp_pos[isp] = _place_layout_element(
-                    provider_x - step, host_y_row0,
-                    host_pos, isp_pos, map_width, map_height,
-                )
-                host_pos[str(hostid)] = _place_layout_element(
-                    provider_x + gap, host_y_row0,
-                    host_pos, isp_pos, map_width, map_height,
-                )
-            else:
-                pref_x = provider_x - step if subcol == 0 else provider_x + step
-                pref_y = multi_host_y0 + row * row_step_y
-                if num_placed == 0:
-                    isp_pos[isp] = _place_layout_element(
-                        provider_x, block_y + LAYOUT_ISP_Y_OFFSET,
-                        host_pos, isp_pos, map_width, map_height,
-                    )
-                host_pos[str(hostid)] = _place_layout_element(
-                    pref_x, pref_y,
-                    host_pos, isp_pos, map_width, map_height,
-                )
-            num_placed += 1
 
-        if num_placed == 0:
-            if single_host:
-                # Provider with one host: the host is already in another block - select a free position nearby
-                (_, only_hostid) = next(iter(hosts_in_block))
-                hx, hy = host_pos.get(str(only_hostid), (provider_x - step, host_y_row0))
-                isp_pos[isp] = _place_single_host_provider(
-                    hx, hy, host_pos, isp_pos, map_width, map_height,
-                )
-                max_row_width = max(max_row_width, block_x + block_width)
-                block_x += block_width + LAYOUT_ELEMENT_GAP
-                continue
-            else:
-                isp_pos[isp] = _place_layout_element(
-                    provider_x, block_y + LAYOUT_ISP_Y_OFFSET,
-                    host_pos, isp_pos, map_width, map_height,
-                )
-
-        host_rows = math.ceil(num_placed / LAYOUT_HOST_COLUMNS) if num_placed else 0
-        if single_host:
-            block_height = LAYOUT_ISP_Y_OFFSET + LAYOUT_HOST_Y_OFFSET + SELEMENT_HEIGHT
-        else:
-            block_height = (
-                LAYOUT_ISP_Y_OFFSET + SELEMENT_HEIGHT + gap
-                + host_rows * row_step_y
-            )
         row_max_height = max(row_max_height, block_height)
-
         max_row_width = max(max_row_width, block_x + block_width)
-        block_x += block_width + LAYOUT_ELEMENT_GAP
+        block_x += block_width + gap
 
-    # Take into account element rectangles and gap: (x,y) is upper-left, size SELEMENT_WIDTH x SELEMENT_HEIGHT
-    block_required_width = (
-        max(block_x + LAYOUT_MARGIN, max_row_width) + SELEMENT_WIDTH + LAYOUT_ELEMENT_GAP
-    )
-    block_required_height = (
-        block_y + row_max_height + LAYOUT_MARGIN + SELEMENT_HEIGHT + LAYOUT_ELEMENT_GAP
-    )
-    pos_max_right = LAYOUT_MARGIN
-    pos_max_bottom = LAYOUT_MARGIN
-    for x, y in list(host_pos.values()) + list(isp_pos.values()):
-        pos_max_right = max(
-            pos_max_right, x + SELEMENT_WIDTH + LAYOUT_MARGIN + LAYOUT_ELEMENT_GAP,
+    for isp in orphan_isps:
+        hosts_in_block = sorted(isp_to_hosts[isp], key=lambda t: (t[0], t[1]))
+        (_, anchor_hostid) = next(iter(hosts_in_block))
+        hx, hy = host_pos.get(str(anchor_hostid), (LAYOUT_MARGIN, LAYOUT_MARGIN))
+        isp_pos[isp] = _place_single_host_provider(
+            hx, hy, host_pos, isp_pos, map_width, map_height,
         )
-        pos_max_bottom = max(
-            pos_max_bottom, y + SELEMENT_HEIGHT + LAYOUT_MARGIN + LAYOUT_ELEMENT_GAP,
-        )
-    required_width = max(block_required_width, pos_max_right)
-    required_height = max(block_required_height, pos_max_bottom)
+
+    required_width, required_height = _layout_required_dimensions(host_pos, isp_pos)
     return host_pos, isp_pos, required_width, required_height
 
 
