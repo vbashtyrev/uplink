@@ -284,74 +284,551 @@ def get_link_commit_triggers(url, token, hostids, debug=False):
 
 MAP_WIDTH = 1460
 MAP_HEIGHT = 800
+LAYOUT_MAX_WIDTH = 1800
+LAYOUT_MAX_HEIGHT = 1600
 ELEMENT_TYPE_HOST = 0
 # In API: 0=host, 4=image (picture with caption)
 ELEMENT_TYPE_IMAGE = 4
 
-# Arrangement: provider blocks left to right; elements are SELEMENT_WIDTH x SELEMENT_HEIGHT with LAYOUT_ELEMENT_GAP
+# Icon placement slot: Zabbix map (x,y) is the upper-left of the element area; icons render inside it.
 LAYOUT_MARGIN = 30
 LAYOUT_HOST_COLUMNS = 2
-# Minimum gap between host/provider element rectangles (SELEMENT_WIDTH x SELEMENT_HEIGHT)
 LAYOUT_ELEMENT_GAP = 40
-# Size of the element on the Zabbix map (x,y - upper left corner); needed to calculate the map height
 SELEMENT_HEIGHT = 200
 SELEMENT_WIDTH = 200
 
+# Zabbix map label_location: 0 bottom, 1 left, 2 right, 3 top, -1 map default.
+LABEL_LOCATION_BOTTOM = 0
+LABEL_LOCATION_LEFT = 1
+LABEL_LOCATION_RIGHT = 2
+LABEL_LOCATION_TOP = 3
+LABEL_LOCATION_DEFAULT = -1
+LAYOUT_PROVIDER_LABEL_LOCATION = LABEL_LOCATION_TOP
+LAYOUT_HOST_LABEL_LOCATION = LABEL_LOCATION_BOTTOM
 
-def _layout_step():
-    """Horizontal/vertical distance between adjacent element upper-left corners."""
+# Conservative visible-label preview estimates (exact Zabbix font metrics are not exposed via API).
+LABEL_CHAR_WIDTH_PX = 9
+LABEL_LINE_HEIGHT_PX = 16
+LABEL_PADDING_PX = 6
+LINK_LABEL_LINE_HEIGHT_PX = 14
+# Preview cap for 3-line link labels (iface + In + Out); not 56 chars * 8 px.
+LINK_LABEL_PREVIEW_WIDTH_PX = 220
+LINK_LABEL_PREVIEW_HEIGHT_PX = 54
+LAYOUT_LABEL_GAP = 8
+
+
+class LayoutValidationError(RuntimeError):
+    """Raised when the offline layout model still detects collisions."""
+
+
+def _layout_icon_step():
+    """Horizontal/vertical distance between adjacent icon upper-left corners."""
     return SELEMENT_WIDTH + LAYOUT_ELEMENT_GAP
 
 
-def _layout_block_width():
-    """Content width of one provider block (two columns or single-host pair side by side)."""
-    return 2 * SELEMENT_WIDTH + LAYOUT_ELEMENT_GAP
+def _layout_step():
+    """Backward-compatible alias for icon step."""
+    return _layout_icon_step()
+
+
+def _layout_provider_label_corridor():
+    """Space reserved above provider icons for a one-line top label."""
+    return LABEL_LINE_HEIGHT_PX + 2 * LABEL_PADDING_PX + LAYOUT_LABEL_GAP
+
+
+def _layout_host_label_corridor():
+    """Space reserved below host icons for a one-line bottom label."""
+    return LABEL_LINE_HEIGHT_PX + 2 * LABEL_PADDING_PX + LAYOUT_LABEL_GAP
+
+
+def _layout_link_corridor():
+    """Vertical gap between provider and host icon rows for a 3-line link label."""
+    return LINK_LABEL_PREVIEW_HEIGHT_PX + 2 * LAYOUT_LABEL_GAP
+
+
+def _layout_host_row_offset():
+    """
+    Y offset from block top to the first host icon row.
+    Sized so a preview link label centered on icon centers clears both icons.
+    """
+    provider_y = _layout_provider_label_corridor()
+    return provider_y + SELEMENT_HEIGHT + LINK_LABEL_PREVIEW_HEIGHT_PX + 2 * LAYOUT_LABEL_GAP
+
+
+def _layout_host_row_step():
+    """Y distance between host icon rows inside a multi-host block."""
+    return SELEMENT_HEIGHT + _layout_host_label_corridor() + LAYOUT_ELEMENT_GAP
+
+
+def _layout_single_host_horizontal_offset():
+    """X offset between provider and host icons in a single-host block."""
+    return SELEMENT_WIDTH + max(LAYOUT_ELEMENT_GAP, LINK_LABEL_PREVIEW_WIDTH_PX // 2 + LAYOUT_LABEL_GAP)
+
+
+def _layout_block_width(single_host=False, num_placed=1):
+    """Content width of one provider block icon slots."""
+    if single_host:
+        return _layout_single_host_horizontal_offset() + SELEMENT_WIDTH
+    if num_placed <= 1:
+        return SELEMENT_WIDTH
+    return (LAYOUT_HOST_COLUMNS - 1) * _layout_icon_step() + SELEMENT_WIDTH
 
 
 def _layout_block_height(single_host, num_placed):
-    """Reserved vertical extent of a placed provider block."""
+    """Reserved vertical extent of a placed provider block (icons + label/link corridors)."""
     if num_placed <= 0:
         return 0
-    step = _layout_step()
     if single_host:
-        return SELEMENT_HEIGHT
+        return _layout_provider_label_corridor() + SELEMENT_HEIGHT + _layout_host_label_corridor()
     host_rows = math.ceil(num_placed / LAYOUT_HOST_COLUMNS)
-    return step + host_rows * step - LAYOUT_ELEMENT_GAP
+    return (
+        _layout_host_row_offset()
+        + (host_rows - 1) * _layout_host_row_step()
+        + SELEMENT_HEIGHT
+        + _layout_host_label_corridor()
+    )
 
 
 def _layout_block_positions(single_host, hosts_to_place):
-    """Relative (rx, ry) positions for provider and hosts inside one block."""
-    step = _layout_step()
-    positions = [("isp", None, 0, 0)]
+    """Relative (rx, ry) icon positions for provider and hosts inside one block."""
+    col_step = _layout_icon_step()
+    provider_y = _layout_provider_label_corridor()
+    positions = [("isp", None, 0, provider_y)]
     if single_host:
         (_hostname, hostid) = hosts_to_place[0]
-        positions.append(("host", str(hostid), step, 0))
+        positions.append((
+            "host",
+            str(hostid),
+            _layout_single_host_horizontal_offset(),
+            provider_y,
+        ))
     else:
+        row_offset = _layout_host_row_offset()
+        row_step = _layout_host_row_step()
         for idx, (_hostname, hostid) in enumerate(hosts_to_place):
             row, subcol = divmod(idx, LAYOUT_HOST_COLUMNS)
-            positions.append(("host", str(hostid), subcol * step, step + row * step))
+            positions.append((
+                "host",
+                str(hostid),
+                subcol * col_step,
+                row_offset + row * row_step,
+            ))
     return positions
 
 
-def _block_positions_fit(block_x, block_y, positions, host_pos, isp_pos):
-    """True when every element of a block fits at block_x/block_y without collision."""
-    occupied = _occupied_positions(host_pos, isp_pos)
-    for _kind, _key, rel_x, rel_y in positions:
-        if not _is_free(block_x + rel_x, block_y + rel_y, occupied):
-            return False
-    return True
+def _element_icon_center(x, y):
+    return (x + SELEMENT_WIDTH / 2.0, y + SELEMENT_HEIGHT / 2.0)
 
 
-def _layout_required_dimensions(host_pos, isp_pos):
-    """Map size from actual element AABB plus margin and outer gap."""
+def _label_text_metrics(text, char_width=LABEL_CHAR_WIDTH_PX, line_height=LABEL_LINE_HEIGHT_PX):
+    """Conservative (width, height) for an element label string."""
+    lines = (text or "").split("\n") or [""]
+    width = max(len(line) for line in lines) * char_width + 2 * LABEL_PADDING_PX
+    height = len(lines) * line_height + 2 * LABEL_PADDING_PX
+    return width, height
+
+
+def _element_label_box(x, y, label, label_location, box_id, owner_id=None):
+    """Conservative visible element-label rectangle adjacent to an icon slot."""
+    width, height = _label_text_metrics(label)
+    cx, cy = _element_icon_center(x, y)
+    loc = int(label_location)
+    if loc == LABEL_LOCATION_TOP:
+        bounds = (cx - width / 2.0, y - height, cx + width / 2.0, y)
+    elif loc == LABEL_LOCATION_LEFT:
+        bounds = (x - width, cy - height / 2.0, x, cy + height / 2.0)
+    elif loc == LABEL_LOCATION_RIGHT:
+        bounds = (
+            x + SELEMENT_WIDTH,
+            cy - height / 2.0,
+            x + SELEMENT_WIDTH + width,
+            cy + height / 2.0,
+        )
+    else:
+        bounds = (
+            cx - width / 2.0,
+            y + SELEMENT_HEIGHT,
+            cx + width / 2.0,
+            y + SELEMENT_HEIGHT + height,
+        )
+    return {"id": box_id, "kind": "element_label", "owner_id": owner_id, "bounds": bounds}
+
+
+def _element_icon_box(x, y, box_id, owner_id=None):
+    return {"id": box_id, "kind": "icon", "owner_id": owner_id, "bounds": _element_bounds(x, y)}
+
+
+def _link_label_box(pos1, pos2, label, box_id, endpoint_ids=None):
+    """Conservative link-label rectangle centered on icon centers (preview-sized, not char-derived width)."""
+    cx1, cy1 = _element_icon_center(*pos1)
+    cx2, cy2 = _element_icon_center(*pos2)
+    mx = (cx1 + cx2) / 2.0
+    my = (cy1 + cy2) / 2.0
+    width = LINK_LABEL_PREVIEW_WIDTH_PX
+    height = LINK_LABEL_PREVIEW_HEIGHT_PX
+    return {
+        "id": box_id,
+        "kind": "link_label",
+        "owner_id": None,
+        "endpoint_ids": tuple(endpoint_ids or ()),
+        "bounds": (mx - width / 2.0, my - height / 2.0, mx + width / 2.0, my + height / 2.0),
+    }
+
+
+def _build_link_label(hostname, iface_name, key_in="", key_out=""):
+    """Link label text (interface + In/Out macros) without calling Zabbix API."""
+    label_parts = [iface_name or "—"]
+    if key_in or key_out:
+        if key_in:
+            label_parts.append("In: {?last(/" + hostname + "/" + key_in + ")}")
+        if key_out:
+            label_parts.append("Out: {?last(/" + hostname + "/" + key_out + ")}")
+    return "\n".join(label_parts)
+
+
+def _assign_layout_label_locations(edges, host_pos, isp_pos):
+    """Explicit label_location per hostid and provider for offline validation."""
+    host_label_locations = {
+        str(hostid): LAYOUT_HOST_LABEL_LOCATION
+        for hostid in host_pos
+    }
+    isp_label_locations = {
+        isp: LAYOUT_PROVIDER_LABEL_LOCATION
+        for isp in isp_pos
+    }
+    return host_label_locations, isp_label_locations
+
+
+def _build_layout_model_from_edges(edges, host_pos, isp_pos, host_label_locations=None, isp_label_locations=None):
+    """Offline selement/link model for layout validation (no Zabbix API)."""
+    if host_label_locations is None or isp_label_locations is None:
+        host_label_locations, isp_label_locations = _assign_layout_label_locations(
+            edges, host_pos, isp_pos,
+        )
+
+    host_names = {}
+    for hostname, hostid, _iface, _isp, _in, _out, _ki, _ko, _desc in edges:
+        host_names.setdefault(str(hostid), hostname)
+
+    selements = []
+    for hostid, (x, y) in sorted(host_pos.items(), key=lambda item: (item[1][1], item[1][0])):
+        selements.append({
+            "elementtype": ELEMENT_TYPE_HOST,
+            "hostid": hostid,
+            "x": x,
+            "y": y,
+            "label": host_names.get(hostid, hostid),
+            "label_location": host_label_locations.get(hostid, LAYOUT_HOST_LABEL_LOCATION),
+        })
+    for isp, (x, y) in sorted(isp_pos.items(), key=lambda item: (item[1][1], item[1][0])):
+        selements.append({
+            "elementtype": ELEMENT_TYPE_IMAGE,
+            "label": isp,
+            "x": x,
+            "y": y,
+            "label_location": isp_label_locations.get(isp, LAYOUT_PROVIDER_LABEL_LOCATION),
+        })
+
+    hostid_to_sid = {str(el["hostid"]): "host-{}".format(el["hostid"]) for el in selements if el.get("hostid")}
+    isp_to_sid = {
+        el["label"]: "isp-{}".format(el["label"])
+        for el in selements
+        if int(el.get("elementtype", 0)) == ELEMENT_TYPE_IMAGE
+    }
+
+    links = []
+    for idx, (hostname, hostid, iface_name, isp, _in, _out, key_in, key_out, _desc) in enumerate(edges):
+        if not isp:
+            continue
+        sid1 = hostid_to_sid.get(str(hostid))
+        sid2 = isp_to_sid.get(isp)
+        if not sid1 or not sid2:
+            continue
+        links.append({
+            "id": "link-{}".format(idx),
+            "selementid1": sid1,
+            "selementid2": sid2,
+            "label": _build_link_label(hostname, iface_name, key_in, key_out),
+        })
+    return selements, links, host_label_locations, isp_label_locations
+
+
+def _layout_positions_from_model(selements):
+    """Map selement id -> (x, y) upper-left icon coordinates."""
+    positions = {}
+    for el in selements:
+        etype = int(el.get("elementtype", 0))
+        if etype == ELEMENT_TYPE_HOST:
+            box_id = "host-{}".format(el.get("hostid"))
+        else:
+            box_id = "isp-{}".format(el.get("label"))
+        positions[box_id] = (el["x"], el["y"])
+    return positions
+
+
+def _layout_visible_boxes(selements, links, positions_by_id):
+    """Build icon, element-label, and link-label boxes for collision checks."""
+    boxes = []
+    for el in selements:
+        etype = int(el.get("elementtype", 0))
+        if etype == ELEMENT_TYPE_HOST:
+            owner = str(el.get("hostid", ""))
+            box_id = "host-{}".format(owner)
+        else:
+            owner = el.get("label", "")
+            box_id = "isp-{}".format(owner)
+        pos = positions_by_id.get(box_id)
+        if pos is None:
+            continue
+        x, y = pos
+        boxes.append(_element_icon_box(x, y, "{}-icon".format(box_id), owner_id=owner))
+        label = el.get("label", "")
+        if label:
+            boxes.append(_element_label_box(
+                x,
+                y,
+                label,
+                el.get("label_location", LAYOUT_HOST_LABEL_LOCATION),
+                "{}-label".format(box_id),
+                owner_id=owner,
+            ))
+
+    for link in links:
+        sid1 = str(link.get("selementid1", ""))
+        sid2 = str(link.get("selementid2", ""))
+        pos1 = positions_by_id.get(sid1)
+        pos2 = positions_by_id.get(sid2)
+        if pos1 is None or pos2 is None:
+            continue
+        label = link.get("label", "")
+        if not label:
+            continue
+        boxes.append(_link_label_box(
+            pos1, pos2, label, link.get("id", "link"), endpoint_ids=(sid1, sid2),
+        ))
+    return boxes
+
+
+def _links_share_provider_endpoint(box_a, box_b):
+    """True when two link labels fan out from the same provider element."""
+    end_a = set(box_a.get("endpoint_ids") or ())
+    end_b = set(box_b.get("endpoint_ids") or ())
+    if not end_a or not end_b:
+        return False
+    shared = end_a & end_b
+    return any(str(endpoint).startswith("isp-") for endpoint in shared)
+
+
+def _links_share_host_endpoint(box_a, box_b):
+    """True when two link labels fan out from the same host element."""
+    end_a = set(box_a.get("endpoint_ids") or ())
+    end_b = set(box_b.get("endpoint_ids") or ())
+    if not end_a or not end_b:
+        return False
+    shared = end_a & end_b
+    return any(str(endpoint).startswith("host-") for endpoint in shared)
+
+
+def _box_selement_id(box):
+    """Map a visible box back to its offline selement id (host-101, isp-Cogent)."""
+    box_id = str(box.get("id", ""))
+    for suffix in ("-icon", "-label"):
+        if box_id.endswith(suffix):
+            return box_id[: -len(suffix)]
+    return box_id
+
+
+def _link_label_touches_endpoint(link_box, other_box):
+    """Link labels are anchored to two endpoints; skip collisions with those elements."""
+    if link_box.get("kind") != "link_label":
+        return False
+    endpoints = set(link_box.get("endpoint_ids") or ())
+    if not endpoints:
+        return False
+    return _box_selement_id(other_box) in endpoints
+
+
+def _link_label_same_provider_fan(link_box, other_box, isp_fan_hosts, link_isp_by_id):
+    """
+    Multiple uplinks to one provider share a fan; preview boxes may cross within the fan.
+    Still checked against unrelated providers/hosts.
+    """
+    if link_box.get("kind") != "link_label" or other_box["kind"] not in ("icon", "element_label"):
+        return False
+    isp = link_isp_by_id.get(link_box.get("id", ""))
+    if not isp or not isp_fan_hosts:
+        return False
+    return _box_selement_id(other_box) in isp_fan_hosts.get(isp, set())
+
+
+def _find_layout_collisions(
+    boxes,
+    gap=LAYOUT_LABEL_GAP,
+    skip_same_owner=True,
+    isp_fan_hosts=None,
+    link_isp_by_id=None,
+    host_providers=None,
+):
+    """Return collision pairs among visible boxes (conservative axis-aligned overlap)."""
+    isp_fan_hosts = isp_fan_hosts or {}
+    link_isp_by_id = link_isp_by_id or {}
+    host_providers = host_providers or {}
+    boxes_by_id = {box["id"]: box for box in boxes}
+    collisions = []
+    for i, box_a in enumerate(boxes):
+        ax1, ay1, ax2, ay2 = box_a["bounds"]
+        ax1 -= gap
+        ay1 -= gap
+        ax2 += gap
+        ay2 += gap
+        for box_b in boxes[i + 1 :]:
+            if skip_same_owner and box_a.get("owner_id") and box_a["owner_id"] == box_b.get("owner_id"):
+                continue
+            if box_a["kind"] == "link_label" and box_b["kind"] == "link_label":
+                if _links_share_provider_endpoint(box_a, box_b) or _links_share_host_endpoint(box_a, box_b):
+                    continue
+            if _link_label_touches_endpoint(box_a, box_b) or _link_label_touches_endpoint(box_b, box_a):
+                continue
+            if _link_label_same_provider_fan(box_a, box_b, isp_fan_hosts, link_isp_by_id):
+                continue
+            if _link_label_same_provider_fan(box_b, box_a, isp_fan_hosts, link_isp_by_id):
+                continue
+            if _shared_host_uplink_collision(box_a, box_b, host_providers, link_isp_by_id):
+                continue
+            if _shared_host_uplink_collision(box_b, box_a, host_providers, link_isp_by_id):
+                continue
+            bx1, by1, bx2, by2 = box_b["bounds"]
+            if ax1 < bx2 and bx1 < ax2 and ay1 < by2 and by1 < ay2:
+                collisions.append({
+                    "box_a": box_a["id"],
+                    "box_b": box_b["id"],
+                    "kind_a": box_a["kind"],
+                    "kind_b": box_b["kind"],
+                })
+    return collisions
+
+
+def _link_isp_by_id(links, selements):
+    """Map offline link id -> provider label."""
+    sid_to_isp = {
+        "isp-{}".format(el.get("label")): el.get("label")
+        for el in selements
+        if int(el.get("elementtype", 0)) == ELEMENT_TYPE_IMAGE
+    }
+    out = {}
+    for link in links:
+        isp_sid = str(link.get("selementid2", ""))
+        if isp_sid in sid_to_isp:
+            out[link.get("id", "")] = sid_to_isp[isp_sid]
+    return out
+
+
+def _isp_fan_host_ids(edges):
+    """Hosts that share a provider uplink fan (multiple links to the same ISP)."""
+    fan = {}
+    for _hostname, hostid, _iface, isp, *_rest in edges:
+        if isp:
+            fan.setdefault(isp, set()).add("host-{}".format(hostid))
+    return fan
+
+
+def _host_provider_names(edges):
+    """Map hostid -> set of provider names attached to that host."""
+    out = {}
+    for _hostname, hostid, _iface, isp, *_rest in edges:
+        if isp:
+            out.setdefault(str(hostid), set()).add(isp)
+    return out
+
+
+def _shared_host_uplink_collision(link_box, isp_box, host_providers, link_isp_by_id):
+    """
+    Shared-host orphan uplink: another provider's link preview may cross the orphan slot.
+    Skip only when both the link and orphan ISP belong to the same host.
+    """
+    if link_box.get("kind") != "link_label" or isp_box.get("kind") not in ("icon", "element_label"):
+        return False
+    isp_box_id = str(isp_box.get("id", ""))
+    if not isp_box_id.startswith("isp-"):
+        return False
+    orphan_isp = isp_box_id.split("-", 1)[1].rsplit("-", 1)[0]
+    link_isp = link_isp_by_id.get(link_box.get("id", ""))
+    if not link_isp or link_isp == orphan_isp:
+        return False
+    endpoints = set(link_box.get("endpoint_ids") or ())
+    host_endpoints = [ep for ep in endpoints if str(ep).startswith("host-")]
+    if len(host_endpoints) != 1:
+        return False
+    hostid = str(host_endpoints[0]).replace("host-", "", 1)
+    providers = host_providers.get(hostid, set())
+    return orphan_isp in providers and link_isp in providers
+
+
+def _validate_layout_model(
+    selements,
+    links,
+    gap=LAYOUT_LABEL_GAP,
+    isp_fan_hosts=None,
+    link_isp_by_id=None,
+    host_providers=None,
+):
+    positions = _layout_positions_from_model(selements)
+    boxes = _layout_visible_boxes(selements, links, positions)
+    return _find_layout_collisions(
+        boxes,
+        gap=gap,
+        isp_fan_hosts=isp_fan_hosts,
+        link_isp_by_id=link_isp_by_id,
+        host_providers=host_providers,
+    )
+
+
+def _validate_edges_layout(edges, host_pos, isp_pos):
+    selements, links, _, _ = _build_layout_model_from_edges(edges, host_pos, isp_pos)
+    return _validate_layout_model(
+        selements,
+        links,
+        isp_fan_hosts=_isp_fan_host_ids(edges),
+        link_isp_by_id=_link_isp_by_id(links, selements),
+        host_providers=_host_provider_names(edges),
+    )
+
+
+def _layout_required_dimensions(host_pos, isp_pos, edges=None):
+    """Map size from visible-box AABB plus margin and outer gap."""
     margin = LAYOUT_MARGIN
     gap = LAYOUT_ELEMENT_GAP
+    if edges is not None and host_pos and isp_pos:
+        selements, links, _, _ = _build_layout_model_from_edges(edges, host_pos, isp_pos)
+        positions = _layout_positions_from_model(selements)
+        boxes = _layout_visible_boxes(selements, links, positions)
+        if boxes:
+            max_right = max(box["bounds"][2] for box in boxes)
+            max_bottom = max(box["bounds"][3] for box in boxes)
+            return max_right + margin + gap, max_bottom + margin + gap
     max_right = margin
     max_bottom = margin
     for x, y in list(host_pos.values()) + list(isp_pos.values()):
         max_right = max(max_right, x + SELEMENT_WIDTH)
         max_bottom = max(max_bottom, y + SELEMENT_HEIGHT)
     return max_right + margin + gap, max_bottom + margin + gap
+
+
+def _apply_block_positions(block_x, block_y, isp, positions, host_pos, isp_pos):
+    for kind, key, rel_x, rel_y in positions:
+        abs_x = block_x + rel_x
+        abs_y = block_y + rel_y
+        if kind == "isp":
+            isp_pos[isp] = (abs_x, abs_y)
+        else:
+            host_pos[key] = (abs_x, abs_y)
+
+
+def _block_layout_valid(edges, isp, block_x, block_y, positions, host_pos, isp_pos):
+    trial_host = dict(host_pos)
+    trial_isp = dict(isp_pos)
+    _apply_block_positions(block_x, block_y, isp, positions, trial_host, trial_isp)
+    return _validate_edges_layout(edges, trial_host, trial_isp) == []
 
 
 def _selement_hostid(el):
@@ -403,85 +880,118 @@ def _is_free(cx, cy, occupied, gap=LAYOUT_ELEMENT_GAP):
     return True
 
 
-def _find_free_layout_position(near_x, near_y, host_pos, isp_pos, map_width=None, map_height=None):
-    """
-    Return (x, y) for a 200x200 element with LAYOUT_ELEMENT_GAP to every occupied rectangle.
-    Order: preferred point, left, right, top, bottom, further offsets, in-bounds grid, then
-    expanding grid beyond nominal map size (required_width/height grows accordingly).
-    """
-    occupied = _occupied_positions(host_pos, isp_pos)
-    gap = LAYOUT_ELEMENT_GAP
-    min_x = LAYOUT_MARGIN
-    min_y = LAYOUT_MARGIN
-    step = SELEMENT_WIDTH + gap
+def _validate_orphan_isp(edges, isp, host_pos, isp_pos, anchor_hostid=None):
+    """Validate only boxes/links belonging to one orphan provider."""
+    selements, links, _, _ = _build_layout_model_from_edges(edges, host_pos, isp_pos)
+    positions = _layout_positions_from_model(selements)
+    boxes = _layout_visible_boxes(selements, links, positions)
+    collisions = _find_layout_collisions(
+        boxes,
+        isp_fan_hosts=_isp_fan_host_ids(edges),
+        link_isp_by_id=_link_isp_by_id(links, selements),
+        host_providers=_host_provider_names(edges),
+    )
+    orphan_sid = "isp-{}".format(isp)
+    orphan_link_ids = {
+        link.get("id")
+        for link in links
+        if str(link.get("selementid2", "")) == orphan_sid
+    }
+    orphan_boxes = {
+        box["id"]
+        for box in boxes
+        if str(box.get("id", "")).startswith(orphan_sid)
+    }
+    orphan_boxes.update(orphan_link_ids)
+    return [
+        collision
+        for collision in collisions
+        if collision["box_a"] in orphan_boxes or collision["box_b"] in orphan_boxes
+    ]
 
-    max_x = (map_width - LAYOUT_MARGIN - SELEMENT_WIDTH) if map_width is not None else None
-    max_y = (map_height - LAYOUT_MARGIN - SELEMENT_HEIGHT) if map_height is not None else None
 
-    def _accepts(cx, cy):
-        if cx < min_x or cy < min_y:
-            return False
-        return _is_free(cx, cy, occupied, gap)
-
+def _orphan_provider_candidates(hx, hy):
+    """Deterministic nearby icon-slot candidates for orphan providers."""
+    step = _layout_icon_step()
+    above = _layout_provider_label_corridor() + LAYOUT_LABEL_GAP
     candidates = []
     seen = set()
 
     def _add(cx, cy):
+        cx = int(round(cx))
+        cy = int(round(cy))
         key = (cx, cy)
-        if key not in seen:
+        if key not in seen and cx >= LAYOUT_MARGIN and cy >= LAYOUT_MARGIN:
             seen.add(key)
             candidates.append(key)
 
-    _add(near_x, near_y)
+    for cx, cy in (
+        (hx + step, hy),
+        (hx - step, hy),
+        (hx, hy - step),
+        (hx + step, hy - above),
+        (hx - step, hy - above),
+        (hx, hy + step),
+        (hx + step + step, hy),
+        (hx - step - step, hy),
+        (hx, hy),
+    ):
+        _add(cx, cy)
     for dx, dy in (
         (-1, 0), (1, 0), (0, -1), (0, 1),
         (-1, -1), (1, -1), (-1, 1), (1, 1),
     ):
-        _add(near_x + dx * step, near_y + dy * step)
+        _add(hx + dx * step, hy + dy * step)
+    for mult in range(2, 12):
+        _add(hx - mult * step, hy)
+        _add(hx + mult * step, hy)
+        _add(hx, hy - mult * step)
+        _add(hx, hy + mult * step)
+    return candidates
 
-    for mult in range(2, 64):
-        _add(near_x - mult * step, near_y)
-        _add(near_x + mult * step, near_y)
-        _add(near_x, near_y - mult * step)
-        _add(near_x, near_y + mult * step)
 
-    if max_x is not None and max_y is not None:
-        for y in range(min_y, max_y + 1, step):
-            for x in range(min_x, max_x + 1, step):
-                _add(x, y)
+def _place_orphan_provider(edges, isp, anchor_hostid, host_pos, isp_pos, map_width, map_height):
+    """Place orphan provider deterministically using the offline visible-box model."""
+    hx, hy = host_pos.get(str(anchor_hostid), (LAYOUT_MARGIN, LAYOUT_MARGIN))
+    step = _layout_icon_step()
+    max_x = min(LAYOUT_MAX_WIDTH, max(map_width, LAYOUT_MAX_WIDTH)) - LAYOUT_MARGIN - SELEMENT_WIDTH
+    max_y = min(LAYOUT_MAX_HEIGHT, max(map_height, LAYOUT_MAX_HEIGHT)) - LAYOUT_MARGIN - SELEMENT_HEIGHT
+
+    candidates = list(_orphan_provider_candidates(hx, hy))
+    seen = set(candidates)
+    for radius in range(1, 16):
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if max(abs(dx), abs(dy)) != radius:
+                    continue
+                cx = int(round(hx + dx * step))
+                cy = int(round(hy + dy * step))
+                if cx < LAYOUT_MARGIN or cy < LAYOUT_MARGIN:
+                    continue
+                key = (cx, cy)
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append(key)
+
+    max_col = max(1, (max_x - LAYOUT_MARGIN) // step + 1)
+    max_row = max(1, (max_y - LAYOUT_MARGIN) // step + 1)
+    for row in range(max_row):
+        cy = LAYOUT_MARGIN + row * step
+        for col in range(max_col):
+            cx = LAYOUT_MARGIN + col * step
+            key = (cx, cy)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(key)
 
     for cx, cy in candidates:
-        if _accepts(cx, cy):
+        if cx > max_x or cy > max_y:
+            continue
+        trial_isp = dict(isp_pos)
+        trial_isp[isp] = (cx, cy)
+        if _validate_orphan_isp(edges, isp, host_pos, trial_isp, anchor_hostid=anchor_hostid) == []:
             return (cx, cy)
-
-    extent_cols = 64
-    row = 0
-    while row < 4096:
-        y = min_y + row * step
-        for col in range(extent_cols):
-            x = min_x + col * step
-            if _accepts(x, y):
-                return (x, y)
-        row += 1
-        if row % 64 == 0:
-            extent_cols += 64
-
-    raise RuntimeError("layout: no collision-free position found")
-
-
-def _place_single_host_provider(hx, hy, host_pos, isp_pos, map_width=None, map_height=None):
-    """Orphan single-host provider near an already-placed host."""
-    return _find_free_layout_position(hx, hy, host_pos, isp_pos, map_width, map_height)
-
-
-def _place_layout_element(preferred_x, preferred_y, host_pos, isp_pos, map_width=None, map_height=None):
-    """Place at preferred coordinates or find the nearest collision-free position."""
-    occupied = _occupied_positions(host_pos, isp_pos)
-    if _is_free(preferred_x, preferred_y, occupied):
-        return (preferred_x, preferred_y)
-    return _find_free_layout_position(
-        preferred_x, preferred_y, host_pos, isp_pos, map_width, map_height,
-    )
+    raise LayoutValidationError("layout: no collision-free orphan slot for {!r}".format(isp))
 
 
 def _compute_layout(edges, map_width, map_height):
@@ -511,7 +1021,6 @@ def _compute_layout(edges, map_width, map_height):
     max_x = map_width - LAYOUT_MARGIN
     max_row_width = 0 # max. width across all rows (for the final card size)
 
-    block_width = _layout_block_width()
     gap = LAYOUT_ELEMENT_GAP
     orphan_isps = []
 
@@ -538,25 +1047,24 @@ def _compute_layout(edges, map_width, map_height):
             continue
 
         num_placed = len(hosts_to_place)
+        block_width = _layout_block_width(single_host, num_placed)
         block_height = _layout_block_height(single_host, num_placed)
         positions = _layout_block_positions(single_host, hosts_to_place)
 
         if block_x + block_width > max_x and block_x > LAYOUT_MARGIN:
             _wrap_shelf()
 
-        while not _block_positions_fit(block_x, block_y, positions, host_pos, isp_pos):
+        attempts = 0
+        while not _block_layout_valid(edges, isp, block_x, block_y, positions, host_pos, isp_pos):
             if block_x + block_width + gap + block_width <= max_x + LAYOUT_MARGIN:
                 block_x += block_width + gap
             else:
                 _wrap_shelf()
+            attempts += 1
+            if attempts > 256:
+                raise LayoutValidationError("layout: cannot place block for {!r}".format(isp))
 
-        for kind, key, rel_x, rel_y in positions:
-            abs_x = block_x + rel_x
-            abs_y = block_y + rel_y
-            if kind == "isp":
-                isp_pos[isp] = (abs_x, abs_y)
-            else:
-                host_pos[key] = (abs_x, abs_y)
+        _apply_block_positions(block_x, block_y, isp, positions, host_pos, isp_pos)
         for _hostname, hostid in hosts_to_place:
             placed_hosts.add(hostid)
 
@@ -567,13 +1075,46 @@ def _compute_layout(edges, map_width, map_height):
     for isp in orphan_isps:
         hosts_in_block = sorted(isp_to_hosts[isp], key=lambda t: (t[0], t[1]))
         (_, anchor_hostid) = next(iter(hosts_in_block))
-        hx, hy = host_pos.get(str(anchor_hostid), (LAYOUT_MARGIN, LAYOUT_MARGIN))
-        isp_pos[isp] = _place_single_host_provider(
-            hx, hy, host_pos, isp_pos, map_width, map_height,
+        isp_pos[isp] = _place_orphan_provider(
+            edges, isp, anchor_hostid, host_pos, isp_pos, map_width, map_height,
         )
 
-    required_width, required_height = _layout_required_dimensions(host_pos, isp_pos)
+    required_width, required_height = _layout_required_dimensions(host_pos, isp_pos, edges=edges)
     return host_pos, isp_pos, required_width, required_height
+
+
+def _compute_layout_validated(edges, map_width=MAP_WIDTH, map_height=MAP_HEIGHT):
+    """
+    Compute layout and validate with the offline visible-box model.
+    Grows canvas within LAYOUT_MAX_* bounds; raises LayoutValidationError on failure.
+    """
+    grow_step = _layout_icon_step()
+    width = map_width
+    height = map_height
+    last_collisions = []
+    while width <= LAYOUT_MAX_WIDTH and height <= LAYOUT_MAX_HEIGHT:
+        host_pos, isp_pos, required_width, required_height = _compute_layout(edges, width, height)
+        collisions = _validate_edges_layout(edges, host_pos, isp_pos)
+        if not collisions:
+            return (
+                host_pos,
+                isp_pos,
+                max(width, required_width),
+                max(height, required_height),
+            )
+        last_collisions = collisions
+        next_width = max(width + grow_step, required_width, map_width)
+        next_height = max(height + grow_step, required_height, map_height)
+        if next_width == width and next_height == height:
+            break
+        width = min(next_width, LAYOUT_MAX_WIDTH)
+        height = min(next_height, LAYOUT_MAX_HEIGHT)
+    raise LayoutValidationError(
+        "layout model collisions remain ({}): {}".format(
+            len(last_collisions),
+            ", ".join("{}↔{}".format(c["box_a"], c["box_b"]) for c in last_collisions[:5]),
+        )
+    )
 
 
 def ensure_map_exists(url, token, debug=False, width=None, height=None):
@@ -702,9 +1243,22 @@ def update_uplinks_map(
             unique_isps.append(isp)
 
     # Positions by providers: from left to right, provider with max. connections - first
-    host_pos, isp_pos, required_width, required_height = _compute_layout(edges, MAP_WIDTH, MAP_HEIGHT)
+    try:
+        host_pos, isp_pos, required_width, required_height = _compute_layout_validated(
+            edges, MAP_WIDTH, MAP_HEIGHT,
+        )
+    except LayoutValidationError as exc:
+        return "layout validation failed: {}".format(exc), None
     map_width = max(MAP_WIDTH, required_width)
     map_height = max(MAP_HEIGHT, required_height)
+    layout_collisions = _validate_edges_layout(edges, host_pos, isp_pos)
+    if layout_collisions:
+        return "layout validation failed: {} collision(s) before map update".format(
+            len(layout_collisions),
+        ), None
+    host_label_locations, isp_label_locations = _assign_layout_label_locations(
+        edges, host_pos, isp_pos,
+    )
 
     # Get a map (create an empty one if not)
     existing, err = zabbix_request(url, token, "map.get", {
@@ -783,6 +1337,7 @@ def update_uplinks_map(
             "x": x,
             "y": y,
             "label": hostname,
+            "label_location": host_label_locations.get(str(hostid), LAYOUT_HOST_LABEL_LOCATION),
             "iconid_off": MAP_ICON_HOST,
             "urls": host_to_urls.get(str(hostid), []),
         })
@@ -795,7 +1350,7 @@ def update_uplinks_map(
             "elementid": 0,
             "elements": [],
             "label": isp,
-            "label_location": -1,
+            "label_location": isp_label_locations.get(isp, LAYOUT_PROVIDER_LABEL_LOCATION),
             "x": x,
             "y": y,
             "iconid_off": MAP_ICON_CLOUD,
@@ -812,11 +1367,17 @@ def update_uplinks_map(
                 pos = host_pos.get(eid)
                 if pos is not None:
                     el["x"], el["y"] = pos
+                el["label_location"] = host_label_locations.get(
+                    eid, LAYOUT_HOST_LABEL_LOCATION,
+                )
                 el["urls"] = host_to_urls.get(eid, [])
         elif etype == ELEMENT_TYPE_IMAGE:
             label = el.get("label", "")
             if label in isp_pos:
                 el["x"], el["y"] = isp_pos[label]
+                el["label_location"] = isp_label_locations.get(
+                    label, LAYOUT_PROVIDER_LABEL_LOCATION,
+                )
 
     # Removed/merged selements are still listed in the old map links → Zabbix with map.update(selements):
     # "Link selementid1 points to a nonexistent map selement." First we remove all links.
@@ -890,18 +1451,11 @@ def update_uplinks_map(
                     hostid, isp, sid1, sid2, list(host_to_selement.keys())[:10], list(isp_to_selement.keys())[:10]), file=sys.stderr)
             continue
         our_host_sids.add(sid1)
-        # Signature: interface + In/Out lines with macros {?last(/hostname/key)}
-        label_parts = [iface_name or "—"]
-        if key_in or key_out:
-            if key_in:
-                label_parts.append("In: {?last(/" + hostname + "/" + key_in + ")}")
-            if key_out:
-                label_parts.append("Out: {?last(/" + hostname + "/" + key_out + ")}")
         # New link: do not pass linkid (read-only in the API; linkid:0 gives Wrong fields for map link).
         link = {
             "selementid1": _api_map_id(sid1),
             "selementid2": _api_map_id(sid2),
-            "label": "\n".join(label_parts),
+            "label": _build_link_label(hostname, iface_name, key_in, key_out),
         }
         # Bind triggers to a link with priority:
         # 1) per-link commit (100/90), 2) provider aggregate (100/90).
