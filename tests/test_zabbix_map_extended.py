@@ -10,6 +10,7 @@ from tests.mocks.inventory_scope import (
     dry_ssh_minimal_inventory_context,
     write_dry_ssh_minimal_inventory,
 )
+from tests.mocks.map_state import MapStateTracker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from zabbix_map import MAP_NAME, ensure_map_exists, main, update_uplinks_map
 
@@ -84,17 +85,16 @@ def test_update_map_with_existing_selements(monkeypatch, zabbix_env):
         "links": [{"linkid": "9", "selementid1": "1", "selementid2": "2"}],
     }]
 
-    def map_get(params):
-        if params.get("sysmapids"):
-            return existing_map
-        if (params.get("filter") or {}).get("name") == MAP_NAME:
-            return existing_map
-        return []
+    map_tracker = MapStateTracker(
+        sysmapid="55",
+        selements=existing_map[0]["selements"],
+        links=existing_map[0]["links"],
+    )
 
     mocker = (
         build_standard_zabbix_mocker()
-        .on("map.get", map_get)
-        .on("map.update", lambda p: True)
+        .on("map.get", map_tracker.map_get)
+        .on("map.update", map_tracker.map_update)
     )
     mocker.activate(monkeypatch)
     err, sid = update_uplinks_map(
@@ -114,16 +114,13 @@ def test_update_map_with_existing_selements(monkeypatch, zabbix_env):
 def test_main_default_creates_map(monkeypatch, zabbix_env, tmp_path, capsys):
     hosts, items = _hosts_items()
 
-    def map_get(params):
-        if params.get("sysmapids"):
-            return [{"sysmapid": "1", "selements": [], "links": []}]
-        return []
+    map_tracker = MapStateTracker(sysmapid="1", exists=False)
 
     mocker = (
         build_standard_zabbix_mocker(hosts=hosts, items=items)
-        .on("map.get", map_get)
-        .on("map.create", lambda p: {"sysmapids": ["1"]})
-        .on("map.update", lambda p: True)
+        .on("map.get", map_tracker.map_get)
+        .on("map.create", map_tracker.map_create)
+        .on("map.update", map_tracker.map_update)
     )
     mocker.activate(monkeypatch)
     inv = write_dry_ssh_minimal_inventory(tmp_path)
@@ -141,4 +138,8 @@ def test_main_default_creates_map(monkeypatch, zabbix_env, tmp_path, capsys):
             ],
         )
         main()
-    assert "Map created" in capsys.readouterr().err or True
+    err_out = capsys.readouterr().err
+    assert map_tracker.creates or map_tracker.updates
+    assert map_tracker.width is not None and map_tracker.width >= 1
+    assert map_tracker.height is not None and map_tracker.height >= 1
+    assert "created" in err_out.lower() or "sysmapid" in err_out.lower()

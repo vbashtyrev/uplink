@@ -10,6 +10,7 @@ from tests.mocks.inventory_scope import (
     dry_ssh_minimal_inventory_context,
     write_dry_ssh_minimal_inventory,
 )
+from tests.mocks.map_state import MapStateTracker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from zabbix_map import MAP_NAME, update_uplinks_map, load_devices_json
 
@@ -40,24 +41,16 @@ def test_main_update_map(monkeypatch, zabbix_env, tmp_path, capsys):
     }
     desc_map = {"Uplink: Cogent 10G": "Cogent", "Uplink: Hurricane": "Hurricane"}
 
-    map_updates = []
-
-    def map_get(params):
-        sysmapids = params.get("sysmapids")
-        if sysmapids:
-            return [{"sysmapid": str(sysmapids[0]), "selements": [], "links": []}]
-        filt = (params.get("filter") or {}).get("name")
-        if filt == MAP_NAME:
-            return [{"sysmapid": "42", "selements": [], "links": []}]
-        return []
+    map_tracker = MapStateTracker(sysmapid="42")
 
     mocker = (
         build_standard_zabbix_mocker()
-        .on("map.get", map_get)
-        .on("map.update", lambda p: map_updates.append(p) or True)
-        .on("map.create", lambda p: {"sysmapids": ["42"]})
+        .on("map.get", map_tracker.map_get)
+        .on("map.update", map_tracker.map_update)
+        .on("map.create", map_tracker.map_create)
     )
     mocker.activate(monkeypatch)
+    map_updates = map_tracker.updates
 
     def fake_fetch(url, token, hostnames, debug=False):
         return host_id, items, None

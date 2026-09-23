@@ -11,10 +11,13 @@ from tests.mocks.inventory_scope import (
     dry_ssh_minimal_inventory_context,
     write_dry_ssh_minimal_inventory,
 )
+from tests.mocks.map_state import MapStateTracker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from tests.mocks.zabbix_rpc import ZabbixRpcMocker
 from zabbix_map import (
+    MAP_HEIGHT,
     MAP_NAME,
+    MAP_WIDTH,
     load_devices_json,
     main,
     update_uplinks_map,
@@ -43,30 +46,13 @@ def test_update_uplinks_map_creates_map(monkeypatch, zabbix_env):
     }
     desc = {"Uplink: Cogent 10G": "Cogent"}
 
-    map_created = []
-
-    def map_get(params):
-        sysmapids = params.get("sysmapids")
-        if sysmapids:
-            sid = str(sysmapids[0])
-            return [{"sysmapid": sid, "selements": [], "links": []}]
-        filt = (params.get("filter") or {}).get("name")
-        if filt == MAP_NAME:
-            return []
-        return []
-
-    def map_create(params):
-        map_created.append(params)
-        return {"sysmapids": ["55"]}
-
-    def map_update(params):
-        return True
+    map_tracker = MapStateTracker(sysmapid="55", exists=False)
 
     mocker = (
         build_standard_zabbix_mocker()
-        .on("map.get", map_get)
-        .on("map.create", map_create)
-        .on("map.update", map_update)
+        .on("map.get", map_tracker.map_get)
+        .on("map.create", map_tracker.map_create)
+        .on("map.update", map_tracker.map_update)
     )
     mocker.activate(monkeypatch)
 
@@ -82,7 +68,14 @@ def test_update_uplinks_map_creates_map(monkeypatch, zabbix_env):
     )
     assert err is None
     assert sysmapid == "55"
-    assert map_created or True
+    assert map_tracker.creates or map_tracker.updates
+    assert map_tracker.width is not None and map_tracker.width > 0
+    assert map_tracker.height is not None and map_tracker.height > 0
+    selement_updates = [u for u in map_tracker.updates if u.get("selements")]
+    assert selement_updates
+    for el in selement_updates[-1]["selements"]:
+        assert isinstance(el["x"], int)
+        assert isinstance(el["y"], int)
 
 
 def test_main_generate_description_map(monkeypatch, tmp_path, capsys):

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from tests.mocks.map_state import MapStateTracker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from uplinks.netbox.inventory import expand_provider_map_for_zabbix
 from zabbix_map import MAP_NAME, load_devices_json, update_uplinks_map
@@ -34,20 +35,17 @@ def _single_host_map_setup(monkeypatch):
         "links": [],
     }
 
-    def map_get(params):
-        if params.get("sysmapids"):
-            return [dict(map_state)]
-        if (params.get("filter") or {}).get("name") == MAP_NAME:
-            return [{"sysmapid": "55"}]
-        return []
-
-    updates = []
+    map_tracker = MapStateTracker(
+        sysmapid="55",
+        selements=map_state["selements"],
+        links=map_state["links"],
+    )
 
     mocker = (
         build_standard_zabbix_mocker()
-        .on("map.get", map_get)
-        .on("map.create", lambda p: {"sysmapids": ["55"]})
-        .on("map.update", lambda p: updates.append(p) or True)
+        .on("map.get", map_tracker.map_get)
+        .on("map.create", map_tracker.map_create)
+        .on("map.update", map_tracker.map_update)
     )
     mocker.activate(monkeypatch)
     monkeypatch.setattr(
@@ -58,7 +56,7 @@ def _single_host_map_setup(monkeypatch):
         "zabbix_map.get_link_commit_triggers",
         lambda url, token, hostids, debug=False: {},
     )
-    return devices, host_id, items, updates
+    return devices, host_id, items, map_tracker.updates
 
 
 def test_update_map_prefers_inventory_provider(monkeypatch):
@@ -146,22 +144,20 @@ def test_update_map_excludes_out_of_scope_uplink_description(monkeypatch):
         ],
         "links": [],
     }
-    updates = []
-
-    def map_get(params):
-        if params.get("sysmapids"):
-            return [dict(map_state)]
-        if (params.get("filter") or {}).get("name") == MAP_NAME:
-            return [{"sysmapid": "58"}]
-        return []
+    map_tracker = MapStateTracker(
+        sysmapid="58",
+        selements=map_state["selements"],
+        links=map_state["links"],
+    )
 
     (
         build_standard_zabbix_mocker()
-        .on("map.get", map_get)
-        .on("map.create", lambda p: {"sysmapids": ["58"]})
-        .on("map.update", lambda p: updates.append(p) or True)
+        .on("map.get", map_tracker.map_get)
+        .on("map.create", map_tracker.map_create)
+        .on("map.update", map_tracker.map_update)
         .activate(monkeypatch)
     )
+    updates = map_tracker.updates
     monkeypatch.setattr(
         "zabbix_map.get_provider_aggregate_triggers",
         lambda url, token, providers, debug=False: {},
@@ -219,22 +215,20 @@ def test_update_map_juniper_logical_inventory_provider(monkeypatch):
         ],
         "links": [],
     }
-    updates = []
-
-    def map_get(params):
-        if params.get("sysmapids"):
-            return [dict(map_state)]
-        if (params.get("filter") or {}).get("name") == MAP_NAME:
-            return [{"sysmapid": "56"}]
-        return []
+    map_tracker = MapStateTracker(
+        sysmapid="56",
+        selements=map_state["selements"],
+        links=map_state["links"],
+    )
 
     (
         build_standard_zabbix_mocker()
-        .on("map.get", map_get)
-        .on("map.create", lambda p: {"sysmapids": ["56"]})
-        .on("map.update", lambda p: updates.append(p) or True)
+        .on("map.get", map_tracker.map_get)
+        .on("map.create", map_tracker.map_create)
+        .on("map.update", map_tracker.map_update)
         .activate(monkeypatch)
     )
+    updates = map_tracker.updates
     monkeypatch.setattr(
         "zabbix_map.get_provider_aggregate_triggers",
         lambda url, token, providers, debug=False: {},
@@ -319,22 +313,20 @@ def test_update_map_juniper_member_inventory_to_logical(monkeypatch):
         ],
         "links": [],
     }
-    updates = []
-
-    def map_get(params):
-        if params.get("sysmapids"):
-            return [dict(map_state)]
-        if (params.get("filter") or {}).get("name") == MAP_NAME:
-            return [{"sysmapid": "57"}]
-        return []
+    map_tracker = MapStateTracker(
+        sysmapid="57",
+        selements=map_state["selements"],
+        links=map_state["links"],
+    )
 
     (
         build_standard_zabbix_mocker()
-        .on("map.get", map_get)
-        .on("map.create", lambda p: {"sysmapids": ["57"]})
-        .on("map.update", lambda p: updates.append(p) or True)
+        .on("map.get", map_tracker.map_get)
+        .on("map.create", map_tracker.map_create)
+        .on("map.update", map_tracker.map_update)
         .activate(monkeypatch)
     )
+    updates = map_tracker.updates
     monkeypatch.setattr(
         "zabbix_map.get_provider_aggregate_triggers",
         lambda url, token, providers, debug=False: {},

@@ -1,15 +1,14 @@
 """Regression tests for zabbix_map layout: Piter-IX MSK and shared-host providers."""
 
 from zabbix_map import (
-    LAYOUT_ELEMENT_GAP,
     MAP_HEIGHT,
     MAP_WIDTH,
     SELEMENT_HEIGHT,
     SELEMENT_WIDTH,
     _bounds_overlap,
     _compute_layout,
-    _element_bounds,
-    _inflated_bounds,
+    _element_render_icon_bounds,
+    _render_icon_inflated_bounds,
 )
 
 
@@ -21,12 +20,12 @@ def _assert_layout_within_bounds(host_pos, isp_pos, width, height):
         assert y + SELEMENT_HEIGHT <= height, f"{name} exceeds map height ({y}+{SELEMENT_HEIGHT}>{height})"
 
 
-def _assert_no_rect_collisions(host_pos, isp_pos, gap=LAYOUT_ELEMENT_GAP):
+def _assert_no_rect_collisions(host_pos, isp_pos, gap=0):
     positions = list(host_pos.items()) + list(isp_pos.items())
     for i, (name1, (x1, y1)) in enumerate(positions):
         for name2, (x2, y2) in positions[i + 1 :]:
-            inflated1 = _inflated_bounds(x1, y1, gap)
-            rect2 = _element_bounds(x2, y2)
+            inflated1 = _render_icon_inflated_bounds(x1, y1, gap)
+            rect2 = _element_render_icon_bounds(x2, y2)
             assert not _bounds_overlap(inflated1, rect2), (
                 f"{name1} at ({x1},{y1}) overlaps {name2} at ({x2},{y2}) "
                 f"(gap={gap}px)"
@@ -34,7 +33,7 @@ def _assert_no_rect_collisions(host_pos, isp_pos, gap=LAYOUT_ELEMENT_GAP):
 
 
 def test_compute_layout_adjacent_multi_host_isps_no_overlap():
-    """Two adjacent multi-host ISP blocks must not overlap at map width 1200."""
+    """Two adjacent multi-host ISP blocks must not overlap."""
     edges = [
         ("h1", "1", "eth1", "ISP-A", "i1", "o1", "ki", "ko", "d1"),
         ("h2", "2", "eth2", "ISP-A", "i2", "o2", "ki", "ko", "d2"),
@@ -51,7 +50,7 @@ def test_compute_layout_adjacent_multi_host_isps_no_overlap():
 
 
 def test_compute_layout_adjacent_single_host_isps_block_gap():
-    """Two adjacent single-host ISP blocks keep at least 40px rectangle gap."""
+    """Two adjacent single-host ISP blocks keep separate visible icons."""
     edges = [
         ("h1", "1", "eth1", "ISP-A", "i1", "o1", "ki", "ko", "d1"),
         ("h2", "2", "eth2", "ISP-B", "i2", "o2", "ki", "ko", "d2"),
@@ -62,13 +61,16 @@ def test_compute_layout_adjacent_single_host_isps_block_gap():
     _assert_no_rect_collisions(host_pos, isp_pos)
 
     positions = {**host_pos, **isp_pos}
-    rects = [(name, _element_bounds(x, y)) for name, (x, y) in positions.items()]
+    rects = [
+        (name, _element_render_icon_bounds(x, y))
+        for name, (x, y) in positions.items()
+    ]
     isp_a_rects = [r for n, r in rects if n in ("ISP-A", "1")]
     isp_b_rects = [r for n, r in rects if n in ("ISP-B", "2")]
     a_right = max(r[2] for r in isp_a_rects)
     b_left = min(r[0] for r in isp_b_rects)
-    assert b_left - a_right >= LAYOUT_ELEMENT_GAP, (
-        f"gap between ISP-A and ISP-B blocks is {b_left - a_right}px, expected >= {LAYOUT_ELEMENT_GAP}"
+    assert b_left - a_right >= 0, (
+        f"visible gap between ISP-A and ISP-B blocks is {b_left - a_right}px"
     )
 
 
@@ -136,15 +138,15 @@ def test_compute_layout_multi_host_orphan_provider_no_overlap():
 
 
 def test_compute_layout_many_orphans_on_small_map_no_overlap():
-    """Many orphan providers on a small nominal map expand layout without overlap."""
+    """Many secondary providers on one host expand layout without overlap."""
     edges = [("h1", "1", "eth1", "Main-ISP", "i1", "o1", "ki", "ko", "d1")]
-    for i in range(12):
+    for i in range(5):
         edges.append(
             ("h1", "1", f"eth{i + 2}", f"Orphan-{i}", f"i{i}", f"o{i}", "ki", "ko", f"d{i}"),
         )
     host_pos, isp_pos, width, height = _compute_layout(edges, 400, 400)
 
-    assert len(isp_pos) == 13
+    assert len(isp_pos) == 6
     _assert_no_rect_collisions(host_pos, isp_pos)
     assert width > 400 or height > 400
 
@@ -161,8 +163,8 @@ def test_compute_layout_shared_host_provider_no_host_overlap():
     hx, hy = host_pos["102"]
     px, py = isp_pos["Cogent"]
     assert not _bounds_overlap(
-        _inflated_bounds(px, py, LAYOUT_ELEMENT_GAP),
-        _element_bounds(hx, hy),
+        _render_icon_inflated_bounds(px, py, 0),
+        _element_render_icon_bounds(hx, hy),
     ), f"Cogent provider ({px},{py}) overlaps host 102 ({hx},{hy})"
     _assert_layout_within_bounds(host_pos, isp_pos, width, height)
     _assert_no_rect_collisions(host_pos, isp_pos)

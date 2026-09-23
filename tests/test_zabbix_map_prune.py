@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
+from tests.mocks.map_state import MapStateTracker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from zabbix_map import load_devices_json, update_uplinks_map
 
@@ -40,18 +41,19 @@ def test_update_map_prunes_obsolete_selements(monkeypatch, zabbix_env):
         "links": [],
     }
 
-    def map_get(params):
-        if params.get("sysmapids"):
-            return [dict(map_state)]
-        return [{"sysmapid": "55"}]
+    map_tracker = MapStateTracker(
+        sysmapid="55",
+        selements=map_state["selements"],
+        links=map_state["links"],
+    )
 
-    updates = []
     (
         build_standard_zabbix_mocker()
-        .on("map.get", map_get)
-        .on("map.update", lambda p: updates.append(p) or True)
-        .on("map.create", lambda p: {"sysmapids": ["55"]})
+        .on("map.get", map_tracker.map_get)
+        .on("map.update", map_tracker.map_update)
+        .on("map.create", map_tracker.map_create)
     ).activate(monkeypatch)
+    updates = map_tracker.updates
     monkeypatch.setattr("zabbix_map.get_provider_aggregate_triggers", lambda *a, **k: {})
     monkeypatch.setattr("zabbix_map.get_link_commit_triggers", lambda *a, **k: {})
 
@@ -67,7 +69,6 @@ def test_update_map_prunes_obsolete_selements(monkeypatch, zabbix_env):
     )
     assert err is None
     assert updates
-    selements = updates[-1].get("selements", [])
-    labels = {s.get("label") for s in selements}
+    labels = {s.get("label") for s in map_tracker.selements}
     assert "OLD-HOST" not in labels
     assert "Stale-ISP" not in labels

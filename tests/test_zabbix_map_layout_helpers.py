@@ -2,30 +2,22 @@
 
 from zabbix_map import (
     LAYOUT_ELEMENT_GAP,
+    RENDER_ICON_INSET,
+    RENDER_ICON_SIZE,
+    SELEMENT_HEIGHT,
     SELEMENT_WIDTH,
     _bounds_overlap,
     _compute_layout_validated,
     _element_bounds,
+    _element_render_icon_bounds,
     _find_layout_collisions,
     _inflated_bounds,
-    _is_free,
     _layout_visible_boxes,
-    _occupied_positions,
+    _render_icon_inflated_bounds,
     _validate_edges_layout,
+    _validate_layout_segment_collisions,
+    _build_layout_model_from_edges,
 )
-
-
-def test_occupied_and_is_free():
-    host_pos = {"h1": (100, 100)}
-    isp_pos = {"ISP": (300, 100)}
-    occ = _occupied_positions(host_pos, isp_pos)
-    assert (100, 100) in occ
-    assert _is_free(540, 100, occ) is True
-    assert _is_free(110, 100, occ) is False
-    host_only = [(100, 100)]
-    assert _is_free(350, 100, host_only, gap=50) is True
-    assert _is_free(340, 100, host_only, gap=50) is False
-    assert _is_free(100 + SELEMENT_WIDTH + LAYOUT_ELEMENT_GAP, 100, host_only) is True
 
 
 def test_orphan_provider_validated_without_icon_overlap():
@@ -36,6 +28,8 @@ def test_orphan_provider_validated_without_icon_overlap():
     host_pos, isp_pos, w, h = _compute_layout_validated(edges, 1200, 800)
     assert "Orphan-ISP" in isp_pos
     assert _validate_edges_layout(edges, host_pos, isp_pos) == []
+    links = _build_layout_model_from_edges(edges, host_pos, isp_pos)[1]
+    assert _validate_layout_segment_collisions(host_pos, isp_pos, links) == []
 
 
 def test_find_layout_collisions_never_returns_overlapping_boxes():
@@ -55,3 +49,19 @@ def test_compute_layout_single_host_per_isp():
     assert "1" in host_pos
     assert "ISP-A" in isp_pos
     assert _validate_edges_layout(edges, host_pos, isp_pos) == []
+
+
+def test_icon_bounds_and_inflated_bounds_helpers():
+    rect = _element_bounds(100, 100)
+    assert rect == (100, 100, 100 + SELEMENT_WIDTH, 100 + SELEMENT_HEIGHT)
+    inflated = _inflated_bounds(100, 100, 10)
+    assert _bounds_overlap(inflated, rect)
+    render = _element_render_icon_bounds(100, 100)
+    assert render == (
+        100 + RENDER_ICON_INSET,
+        100 + RENDER_ICON_INSET,
+        100 + RENDER_ICON_INSET + RENDER_ICON_SIZE,
+        100 + RENDER_ICON_INSET + RENDER_ICON_SIZE,
+    )
+    render_inflated = _render_icon_inflated_bounds(100, 100, 10)
+    assert _bounds_overlap(render_inflated, render)

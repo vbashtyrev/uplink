@@ -10,6 +10,7 @@ from tests.mocks.inventory_scope import (
     dry_ssh_minimal_inventory_context,
     write_dry_ssh_minimal_inventory,
 )
+from tests.mocks.map_state import MapStateTracker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from zabbix_map import MAP_NAME, main as map_main
 
@@ -17,16 +18,12 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def test_main_default_creates_map_when_absent(monkeypatch, zabbix_env, tmp_path, capsys):
-    created = []
-
-    def map_get(params):
-        if params.get("filter", {}).get("name") == MAP_NAME:
-            return []
-        return [{"sysmapid": "55", "selements": [], "links": []}]
+    map_tracker = MapStateTracker(sysmapid="55", exists=False)
 
     mocker = build_standard_zabbix_mocker()
-    mocker.on("map.get", map_get).on("map.create", lambda p: created.append(p) or {"sysmapids": ["55"]})
-    mocker.on("map.update", lambda p: True).activate(monkeypatch)
+    mocker.on("map.get", map_tracker.map_get).on("map.create", map_tracker.map_create)
+    mocker.on("map.update", map_tracker.map_update).activate(monkeypatch)
+    created = map_tracker.updates
     monkeypatch.setattr("zabbix_map.get_provider_aggregate_triggers", lambda *a, **k: {})
     monkeypatch.setattr("zabbix_map.get_link_commit_triggers", lambda *a, **k: {})
     host_id = {"ALA-KZT-7280TR-1": "101", "FRN-MX-1": "102"}

@@ -285,17 +285,21 @@ def get_link_commit_triggers(url, token, hostids, debug=False):
 MAP_WIDTH = 1460
 MAP_HEIGHT = 800
 LAYOUT_MAX_WIDTH = 1800
-LAYOUT_MAX_HEIGHT = 1600
+LAYOUT_MAX_HEIGHT = 2600
 ELEMENT_TYPE_HOST = 0
 # In API: 0=host, 4=image (picture with caption)
 ELEMENT_TYPE_IMAGE = 4
 
 # Icon placement slot: Zabbix map (x,y) is the upper-left of the element area; icons render inside it.
 LAYOUT_MARGIN = 30
-LAYOUT_HOST_COLUMNS = 2
-LAYOUT_ELEMENT_GAP = 40
+LAYOUT_ELEMENT_GAP = 8
+# Dynamic empty space between the occupied bounds and each canvas edge.
+LAYOUT_CANVAS_PADDING = 100
 SELEMENT_HEIGHT = 200
 SELEMENT_WIDTH = 200
+# Zabbix map icons Router_symbol_(64) and Cloud_(64) render at 64x64 inside the slot.
+RENDER_ICON_SIZE = 64
+RENDER_ICON_INSET = (SELEMENT_WIDTH - RENDER_ICON_SIZE) / 2.0
 
 # Zabbix map label_location: 0 bottom, 1 left, 2 right, 3 top, -1 map default.
 LABEL_LOCATION_BOTTOM = 0
@@ -315,20 +319,63 @@ LINK_LABEL_LINE_HEIGHT_PX = 14
 LINK_LABEL_PREVIEW_WIDTH_PX = 220
 LINK_LABEL_PREVIEW_HEIGHT_PX = 54
 LAYOUT_LABEL_GAP = 8
+# Horizontal component spacing observed on the compact view-mode map.
+LAYOUT_COLUMN_STEP = 200
+# Dense lattice for component packing; the reference map uses 100px row bands.
+LAYOUT_LATTICE_ROW_STEP = 100
+# In-tile star host-row spacing observed on the compact view-mode map.
+LAYOUT_STAR_ROW_STEP = 100
+# Fail-closed cap on provider slot backtracking for dense single-host fans.
+LAYOUT_SLOT_SEARCH_MAX_CANDIDATES = 256
+# Bounded lattice scan for hole-filling tile packing (deterministic, no infinite loops).
+LAYOUT_PACK_MAX_GRID_COLS = 12
+LAYOUT_PACK_MAX_GRID_ROWS = 12
+# Bounded fine-Y refinement when a coarse lattice row fails validation.
+LAYOUT_PACK_FINE_Y_RADIUS = 16
+LAYOUT_PACK_FINE_Y_STEP = 2
+# Bounded vertical link-corridor scales (tightest first); full 220x54 labels stay centered.
+LAYOUT_VERTICAL_LINK_SCALES = (0.5, 1.0)
 
 
 class LayoutValidationError(RuntimeError):
     """Raised when the offline layout model still detects collisions."""
 
 
+def _layout_int(value):
+    """Round layout scalar to integer for Zabbix map API payloads."""
+    return int(round(value))
+
+
+def _layout_int_pos(pos):
+    return (_layout_int(pos[0]), _layout_int(pos[1]))
+
+
+def _layout_normalize_positions(host_pos, isp_pos):
+    """Normalize icon coordinates to integers while preserving geometry."""
+    return (
+        {hid: _layout_int_pos(pos) for hid, pos in host_pos.items()},
+        {isp: _layout_int_pos(pos) for isp, pos in isp_pos.items()},
+    )
+
+
+def _layout_render_extent():
+    """Editor-slot origin to render-icon far edge (icons are centered in the slot)."""
+    return RENDER_ICON_INSET + RENDER_ICON_SIZE
+
+
 def _layout_icon_step():
-    """Horizontal/vertical distance between adjacent icon upper-left corners."""
-    return SELEMENT_WIDTH + LAYOUT_ELEMENT_GAP
+    """Horizontal/vertical distance between adjacent editor-slot upper-left corners."""
+    return RENDER_ICON_SIZE + LAYOUT_ELEMENT_GAP
 
 
-def _layout_step():
-    """Backward-compatible alias for icon step."""
-    return _layout_icon_step()
+def _layout_column_step():
+    """Horizontal component spacing for visible icons and topology templates."""
+    return max(_layout_icon_step(), LAYOUT_COLUMN_STEP)
+
+
+def _layout_star_row_step():
+    """Vertical spacing between star-pattern host rows inside a component tile."""
+    return LAYOUT_STAR_ROW_STEP
 
 
 def _layout_provider_label_corridor():
@@ -341,83 +388,1039 @@ def _layout_host_label_corridor():
     return LABEL_LINE_HEIGHT_PX + 2 * LABEL_PADDING_PX + LAYOUT_LABEL_GAP
 
 
-def _layout_link_corridor():
+def _layout_vertical_link_height(link_scale=1.0):
+    """Scaled link-label corridor height; full preview stays 54px at link_scale=1."""
+    if link_scale >= 1.0:
+        return LINK_LABEL_PREVIEW_HEIGHT_PX
+    return max(LAYOUT_LABEL_GAP, _layout_int(LINK_LABEL_PREVIEW_HEIGHT_PX * link_scale))
+
+
+def _layout_link_corridor_for(link_scale=1.0):
     """Vertical gap between provider and host icon rows for a 3-line link label."""
-    return LINK_LABEL_PREVIEW_HEIGHT_PX + 2 * LAYOUT_LABEL_GAP
+    return _layout_vertical_link_height(link_scale) + 2 * LAYOUT_LABEL_GAP
+
+
+def _layout_link_corridor():
+    """Default compact vertical link corridor (tightest scale)."""
+    return _layout_link_corridor_for(LAYOUT_VERTICAL_LINK_SCALES[0])
+
+
+def _layout_provider_below_host_row_for(host_ry, link_scale=1.0):
+    """
+    Relative Y for a provider icon directly below a host row.
+    Compact scale keeps render/label clearance; full scale reserves link corridor.
+    """
+    base = (
+        host_ry
+        + _layout_render_extent()
+        + _layout_host_label_corridor()
+        + LAYOUT_LABEL_GAP
+    )
+    if link_scale >= 1.0:
+        return base + LINK_LABEL_PREVIEW_HEIGHT_PX + LAYOUT_LABEL_GAP + _layout_provider_label_corridor()
+    return base + _layout_provider_label_corridor()
+
+
+def _layout_provider_below_host_row(host_ry):
+    """Default compact provider-below-host row offset."""
+    return _layout_provider_below_host_row_for(host_ry, LAYOUT_VERTICAL_LINK_SCALES[0])
+
+
+def _layout_provider_below_shared_host_for(host_ry, link_scale=1.0):
+    """
+    Tight provider Y below a same-column shared host: clears the host bottom label
+    and the centered vertical link-label preview without extra shelf padding.
+    """
+    base = (
+        host_ry
+        + _layout_render_extent()
+        + _layout_host_label_corridor()
+        + LINK_LABEL_PREVIEW_HEIGHT_PX
+    )
+    if link_scale >= 1.0:
+        return base + LAYOUT_LABEL_GAP + _layout_provider_label_corridor()
+    return base + LAYOUT_LABEL_GAP
+
+
+def _layout_host_row_offset_for(link_scale=1.0):
+    """
+    Y offset from block top to the host icon row.
+    Compact scale keeps render-icon clearance only; full scale reserves link corridor.
+    """
+    provider_y = _layout_provider_label_corridor()
+    base = provider_y + _layout_render_extent() + LAYOUT_LABEL_GAP
+    if link_scale >= 1.0:
+        return base + LINK_LABEL_PREVIEW_HEIGHT_PX + LAYOUT_LABEL_GAP
+    return base
 
 
 def _layout_host_row_offset():
-    """
-    Y offset from block top to the first host icon row.
-    Sized so a preview link label centered on icon centers clears both icons.
-    """
-    provider_y = _layout_provider_label_corridor()
-    return provider_y + SELEMENT_HEIGHT + LINK_LABEL_PREVIEW_HEIGHT_PX + 2 * LAYOUT_LABEL_GAP
+    """Default compact host-row Y offset from block top."""
+    return _layout_host_row_offset_for(LAYOUT_VERTICAL_LINK_SCALES[0])
 
 
-def _layout_host_row_step():
-    """Y distance between host icon rows inside a multi-host block."""
-    return SELEMENT_HEIGHT + _layout_host_label_corridor() + LAYOUT_ELEMENT_GAP
-
-
-def _layout_single_host_horizontal_offset():
-    """X offset between provider and host icons in a single-host block."""
-    return SELEMENT_WIDTH + max(LAYOUT_ELEMENT_GAP, LINK_LABEL_PREVIEW_WIDTH_PX // 2 + LAYOUT_LABEL_GAP)
-
-
-def _layout_block_width(single_host=False, num_placed=1):
-    """Content width of one provider block icon slots."""
-    if single_host:
-        return _layout_single_host_horizontal_offset() + SELEMENT_WIDTH
-    if num_placed <= 1:
-        return SELEMENT_WIDTH
-    return (LAYOUT_HOST_COLUMNS - 1) * _layout_icon_step() + SELEMENT_WIDTH
-
-
-def _layout_block_height(single_host, num_placed):
-    """Reserved vertical extent of a placed provider block (icons + label/link corridors)."""
-    if num_placed <= 0:
-        return 0
-    if single_host:
-        return _layout_provider_label_corridor() + SELEMENT_HEIGHT + _layout_host_label_corridor()
-    host_rows = math.ceil(num_placed / LAYOUT_HOST_COLUMNS)
+def _layout_host_row_step_for(link_scale=1.0):
+    """Y distance between host editor-slot rows (render icon + labels + link corridor)."""
     return (
-        _layout_host_row_offset()
-        + (host_rows - 1) * _layout_host_row_step()
-        + SELEMENT_HEIGHT
+        _layout_render_extent()
         + _layout_host_label_corridor()
+        + _layout_link_corridor_for(link_scale)
+        + LAYOUT_LABEL_GAP
     )
 
 
-def _layout_block_positions(single_host, hosts_to_place):
-    """Relative (rx, ry) icon positions for provider and hosts inside one block."""
-    col_step = _layout_icon_step()
+def _layout_host_row_step():
+    """Default compact Y distance between host rows."""
+    return _layout_host_row_step_for(LAYOUT_VERTICAL_LINK_SCALES[0])
+
+
+def _layout_component_row_ys(link_scale=1.0):
+    """Deterministic host/provider row anchors for one vertical link scale."""
+    row_offset = _layout_host_row_offset_for(link_scale)
+    row_step = _layout_host_row_step_for(link_scale)
+    return {
+        "link_scale": link_scale,
+        "provider_y": _layout_provider_label_corridor(),
+        "row_offset": row_offset,
+        "row_step": row_step,
+        "row1_y": row_offset,
+        "row2_y": row_offset + row_step,
+        "row3_y": row_offset + 2 * row_step,
+        "row4_y": row_offset + 3 * row_step,
+    }
+
+
+def _layout_multi_host_grid(num_placed):
+    """Column/row packing for provider-centered tiles (3 columns for cross layouts)."""
+    if num_placed <= 1:
+        return 1, 1
+    if num_placed == 2:
+        return 3, 1
+    if num_placed == 3:
+        return 3, 2
+    return 3, 2
+
+
+def _layout_single_host_horizontal_offset(provider_name=None):
+    """
+    X offset between provider and host editor slots in a same-row single-host block.
+    Must clear the provider top label (render-icon model) with LAYOUT_LABEL_GAP clearance.
+    """
+    icon_step = _layout_icon_step()
+    if not provider_name:
+        return icon_step
+    provider_cx = RENDER_ICON_INSET + RENDER_ICON_SIZE / 2.0
+    label_width, _ = _label_text_metrics(provider_name)
+    min_for_label = (
+        provider_cx
+        + label_width / 2.0
+        + LAYOUT_LABEL_GAP * 2
+        + RENDER_ICON_INSET
+    )
+    return max(icon_step, _layout_int(min_for_label))
+
+
+def _layout_block_width(single_host=False, num_placed=1, primary_isp=None, hosts_to_place=None, edges=None):
+    """Content width of one provider-centered block (3-column cross when multi-host)."""
+    if single_host:
+        return _layout_single_host_horizontal_offset(primary_isp) + _layout_render_extent()
+    if num_placed <= 1:
+        return _layout_render_extent()
+    col_step = _layout_column_step()
+    cols, _rows = _layout_multi_host_grid(num_placed)
+    return (cols - 1) * col_step + _layout_render_extent()
+
+
+def _layout_block_height(single_host, num_placed, primary_isp=None, hosts_to_place=None, edges=None, link_scale=1.0):
+    """Reserved vertical extent of a placed provider-centered block."""
+    if num_placed <= 0:
+        return 0
     provider_y = _layout_provider_label_corridor()
-    positions = [("isp", None, 0, provider_y)]
+    if single_host:
+        link_tail = (
+            LAYOUT_LABEL_GAP + LINK_LABEL_PREVIEW_HEIGHT_PX
+            if link_scale >= 1.0
+            else LAYOUT_LABEL_GAP
+        )
+        return (
+            provider_y
+            + _layout_render_extent()
+            + _layout_host_label_corridor()
+            + link_tail
+        )
+    row_offset = _layout_host_row_offset_for(link_scale)
+    row_step = _layout_host_row_step_for(link_scale)
+    star_step = _layout_star_row_step()
+    if num_placed == 2:
+        return provider_y + _layout_render_extent() + _layout_host_label_corridor()
+    if num_placed == 3:
+        return provider_y + star_step + _layout_render_extent() + _layout_host_label_corridor()
+    return provider_y + star_step + _layout_render_extent() + _layout_host_label_corridor()
+
+
+def _layout_block_positions(single_host, hosts_to_place, primary_isp=None, edges=None, link_scale=1.0):
+    """Relative (rx, ry) positions for a provider-centered star block."""
+    provider_y = _layout_provider_label_corridor()
+    col_step = _layout_column_step()
     if single_host:
         (_hostname, hostid) = hosts_to_place[0]
+        return [
+            ("isp", None, 0, provider_y),
+            ("host", str(hostid), _layout_single_host_horizontal_offset(primary_isp), provider_y),
+        ]
+
+    num_placed = len(hosts_to_place)
+    star_step = _layout_star_row_step()
+    if num_placed == 2:
+        positions = [("isp", None, col_step, provider_y)]
+        (_h0, hid0), (_h1, hid1) = hosts_to_place
+        positions.extend([
+            ("host", str(hid0), 0, provider_y),
+            ("host", str(hid1), 2 * col_step, provider_y),
+        ])
+        return positions
+    if num_placed == 3:
+        bot_y = provider_y + star_step
+        positions = [("isp", None, col_step, provider_y)]
+        for idx, (_hostname, hostid) in enumerate(hosts_to_place[:2]):
+            positions.append(("host", str(hostid), idx * 2 * col_step, provider_y))
+        positions.append(("host", str(hosts_to_place[2][1]), col_step, bot_y))
+        return positions
+    bot_y = provider_y + star_step
+    positions = [("isp", None, col_step, provider_y)]
+    corner_cols = (0, 2 * col_step)
+    for idx, (_hostname, hostid) in enumerate(hosts_to_place[:4]):
         positions.append((
             "host",
             str(hostid),
-            _layout_single_host_horizontal_offset(),
-            provider_y,
+            corner_cols[idx % 2],
+            provider_y if idx < 2 else bot_y,
         ))
-    else:
-        row_offset = _layout_host_row_offset()
-        row_step = _layout_host_row_step()
-        for idx, (_hostname, hostid) in enumerate(hosts_to_place):
-            row, subcol = divmod(idx, LAYOUT_HOST_COLUMNS)
-            positions.append((
-                "host",
-                str(hostid),
-                subcol * col_step,
-                row_offset + row * row_step,
-            ))
     return positions
 
 
+def _layout_graph_indices(edges):
+    """Build host/provider adjacency maps from edge list."""
+    host_to_providers = {}
+    provider_to_hosts = {}
+    host_names = {}
+    for hostname, hostid, _iface, isp, *_rest in edges:
+        if not isp:
+            continue
+        hid = str(hostid)
+        host_names[hid] = hostname
+        host_to_providers.setdefault(hid, set()).add(isp)
+        provider_to_hosts.setdefault(isp, set()).add(hid)
+    return host_to_providers, provider_to_hosts, host_names
+
+
+def _layout_connected_components(edges):
+    """Partition edges into connected provider-router components."""
+    host_to_providers, provider_to_hosts, _host_names = _layout_graph_indices(edges)
+    parent = {}
+
+    def _find(node):
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def _union(left, right):
+        root_left = _find(left)
+        root_right = _find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    nodes = set()
+    for hid, providers in host_to_providers.items():
+        nodes.add(("host", hid))
+        for isp in providers:
+            nodes.add(("provider", isp))
+    for node in nodes:
+        parent[node] = node
+    for hid, providers in host_to_providers.items():
+        host_node = ("host", hid)
+        for isp in providers:
+            _union(host_node, ("provider", isp))
+
+    groups = {}
+    for node in nodes:
+        groups.setdefault(_find(node), set()).add(node)
+
+    components = []
+    for members in sorted(groups.values(), key=lambda group: (-len(group), sorted(group)[0])):
+        providers = sorted(isp for kind, isp in members if kind == "provider")
+        hosts = sorted(hid for kind, hid in members if kind == "host")
+        comp_edges = [
+            edge for edge in edges
+            if str(edge[1]) in hosts and edge[3] in providers
+        ]
+        components.append({
+            "providers": providers,
+            "hosts": hosts,
+            "edges": comp_edges,
+            "host_to_providers": {
+                hid: host_to_providers.get(hid, set()) & set(providers)
+                for hid in hosts
+            },
+            "provider_to_hosts": {
+                isp: provider_to_hosts.get(isp, set()) & set(hosts)
+                for isp in providers
+            },
+        })
+    return components
+
+
+def _layout_component_star(component, link_scale=1.0):
+    """Single-provider star tile: provider central, exclusive hosts in a grid below."""
+    provider = component["providers"][0]
+    host_pos = {}
+    isp_pos = {}
+    host_entries = []
+    for hid in component["hosts"]:
+        hostname = next(edge[0] for edge in component["edges"] if str(edge[1]) == hid)
+        host_entries.append((hostname, hid))
+    single_host = len(host_entries) == 1
+    positions = _layout_block_positions(
+        single_host, host_entries, primary_isp=provider, edges=component["edges"],
+        link_scale=link_scale,
+    )
+    for kind, key, rel_x, rel_y in positions:
+        if kind == "isp":
+            isp_pos[provider] = (rel_x, rel_y)
+        else:
+            host_pos[key] = (rel_x, rel_y)
+    return host_pos, isp_pos
+
+
+def _layout_providers_by_exclusive_hosts(providers, host_to_providers):
+    """Primary provider first: highest hub score, then stable name order."""
+    def _hub_score(isp):
+        return sum(
+            len(provider_set)
+            for _hid, provider_set in host_to_providers.items()
+            if isp in provider_set
+        )
+    return sorted(providers, key=lambda isp: (-_hub_score(isp), isp))
+
+
+def _layout_component_pair(component, link_scale=1.0):
+    """
+    Two-provider tile with a 3-column provider-centered grid.
+    Hurricane shape: [L0] [P_left] [L1] / [L2] [shared] [P_right].
+    """
+    provider_left, provider_right = _layout_providers_by_exclusive_hosts(
+        component["providers"], component["host_to_providers"],
+    )
+    host_to_providers = component["host_to_providers"]
+    col_step = _layout_column_step()
+    rows = _layout_component_row_ys(link_scale)
+    provider_y = rows["provider_y"]
+    row1_y = rows["row1_y"]
+    row2_y = rows["row2_y"]
+    row_step = rows["row_step"]
+    host_pos = {}
+    isp_pos = {}
+
+    shared_hosts = sorted(
+        hid for hid, providers in host_to_providers.items()
+        if provider_left in providers and provider_right in providers
+    )
+    left_only = sorted(
+        hid for hid, providers in host_to_providers.items()
+        if providers == {provider_left}
+    )
+    right_only = sorted(
+        hid for hid, providers in host_to_providers.items()
+        if providers == {provider_right}
+    )
+
+    if shared_hosts and not left_only and not right_only:
+        if len(shared_hosts) == 2:
+            host_pos[shared_hosts[0]] = (0, row1_y)
+            host_pos[shared_hosts[1]] = (2 * col_step, row1_y)
+            isp_pos[provider_left] = (col_step, provider_y)
+            isp_pos[provider_right] = (col_step, row2_y)
+            return host_pos, isp_pos
+        host_entries = []
+        for hid in shared_hosts:
+            hostname = next(
+                edge[0] for edge in component["edges"] if str(edge[1]) == hid
+            )
+            host_entries.append((hostname, hid))
+        positions = _layout_block_positions(
+            len(host_entries) == 1,
+            host_entries,
+            primary_isp=provider_left,
+            edges=component["edges"],
+            link_scale=link_scale,
+        )
+        for kind, key, rel_x, rel_y in positions:
+            if kind == "host":
+                host_pos[key] = (rel_x, rel_y)
+            else:
+                isp_pos[provider_left] = (rel_x, rel_y)
+        anchor_host = shared_hosts[0]
+        anchor_x, anchor_y = host_pos[anchor_host]
+        isp_pos[provider_right] = (anchor_x + 2 * col_step, anchor_y)
+        return host_pos, isp_pos
+
+    if len(left_only) >= 3 and shared_hosts:
+        top_y = provider_y
+        bot_y = top_y + _layout_star_row_step()
+        mid_x = col_step
+        isp_pos[provider_left] = (mid_x, top_y)
+        isp_pos[provider_right] = (mid_x, bot_y)
+        host_pos[left_only[0]] = (0, top_y)
+        host_pos[left_only[1]] = (2 * col_step, top_y)
+        host_pos[left_only[2]] = (0, bot_y)
+        host_pos[shared_hosts[0]] = (2 * col_step, bot_y)
+        return host_pos, isp_pos
+
+    if len(left_only) == 1 and len(shared_hosts) == 1 and not right_only:
+        host_pos[left_only[0]] = (0, row1_y)
+        host_pos[shared_hosts[0]] = (2 * col_step, row1_y)
+        isp_pos[provider_left] = (col_step, provider_y)
+        isp_pos[provider_right] = (3 * col_step, row1_y)
+        return host_pos, isp_pos
+
+    isp_pos[provider_left] = (col_step, row1_y)
+    if len(left_only) >= 1:
+        host_pos[left_only[0]] = (0, row1_y)
+    if len(left_only) >= 2:
+        host_pos[left_only[1]] = (2 * col_step, row1_y)
+
+    shared_y = row2_y if len(left_only) >= 2 else row1_y
+    for idx, hid in enumerate(shared_hosts):
+        shared_col = col_step if len(left_only) >= 2 else (idx + 1) * col_step
+        host_pos[hid] = (shared_col, shared_y)
+
+    if right_only:
+        right_y = row2_y if shared_hosts or len(left_only) >= 2 else row1_y
+        for idx, hid in enumerate(right_only):
+            host_pos[hid] = ((idx + 2) * col_step, right_y)
+        isp_pos[provider_right] = (2 * col_step, right_y)
+    elif shared_hosts:
+        isp_pos[provider_right] = (2 * col_step, shared_y)
+    else:
+        isp_pos[provider_right] = (2 * col_step, row1_y)
+    return host_pos, isp_pos
+
+
+def _layout_component_pair_single_host(component):
+    """Two-provider tile with one shared host: providers flank the host."""
+    provider_primary, provider_secondary = _layout_providers_by_exclusive_hosts(
+        component["providers"], component["host_to_providers"],
+    )
+    host_id = component["hosts"][0]
+    provider_y = _layout_provider_label_corridor()
+    col_step = _layout_column_step()
+    host_pos = {host_id: (col_step, provider_y)}
+    isp_pos = {
+        provider_primary: (0, provider_y),
+        provider_secondary: (2 * col_step, provider_y),
+    }
+    return host_pos, isp_pos
+
+
+def _layout_component_is_dedicated_secondary_pattern(component):
+    """True when each secondary provider links to one shared primary host."""
+    providers = _layout_providers_by_exclusive_hosts(
+        component["providers"], component["host_to_providers"],
+    )
+    if len(providers) < 2:
+        return False
+    primary = providers[0]
+    host_to_providers = component["host_to_providers"]
+    for isp in providers[1:]:
+        anchor_hosts = [
+            hid for hid, provider_set in host_to_providers.items()
+            if isp in provider_set
+        ]
+        if len(anchor_hosts) != 1:
+            return False
+        if primary not in host_to_providers[anchor_hosts[0]]:
+            return False
+    return True
+
+
+def _layout_component_dedicated_secondary(component, link_scale=1.0):
+    """
+    Shared hosts flanking a centered primary provider; dedicated secondaries below
+    their anchor host. Target: [MSK1] [Piter] [MSK2] / [Beeline] [Ertelecom].
+    """
+    providers = _layout_providers_by_exclusive_hosts(
+        component["providers"], component["host_to_providers"],
+    )
+    primary = providers[0]
+    host_to_providers = component["host_to_providers"]
+    secondary_anchors = {}
+    for isp in providers[1:]:
+        anchor = next(
+            hid for hid, provider_set in host_to_providers.items()
+            if isp in provider_set
+        )
+        secondary_anchors[isp] = anchor
+
+    # Put the first secondary anchor on the right and the second on the left;
+    # this keeps each secondary label inside its anchor pair without crossing
+    # the opposite host label.
+    shared_hosts = list(reversed(sorted(set(secondary_anchors.values()))))
+    exclusive_hosts = sorted(
+        hid for hid in component["hosts"] if hid not in shared_hosts
+    )
+    col_step = _layout_column_step()
+    rows = _layout_component_row_ys(link_scale)
+    provider_y = rows["provider_y"]
+    row1_y = rows["row1_y"]
+    row2_y = rows["row2_y"]
+    row3_y = rows["row3_y"]
+    host_pos = {}
+    isp_pos = {}
+
+    if exclusive_hosts:
+        host_pos[shared_hosts[0]] = (col_step, row1_y)
+        host_pos[shared_hosts[1]] = (2 * col_step, row1_y)
+        isp_pos[primary] = (col_step, row2_y)
+        for isp, anchor in sorted(secondary_anchors.items()):
+            if anchor == shared_hosts[0]:
+                isp_pos[isp] = (0, row1_y)
+            else:
+                isp_pos[isp] = (3 * col_step, row1_y)
+        host_pos[exclusive_hosts[0]] = (0, row2_y)
+        if len(exclusive_hosts) > 1:
+            host_pos[exclusive_hosts[1]] = (2 * col_step, row2_y)
+        return host_pos, isp_pos
+
+    row_y = provider_y
+    secondary_y = row_y + LAYOUT_STAR_ROW_STEP
+    host_pos[shared_hosts[0]] = (0, row_y)
+    host_pos[shared_hosts[1]] = (2 * col_step, row_y)
+    isp_pos[primary] = (col_step, row_y)
+    secondary_inset = (3 * col_step) // 4
+    for isp, anchor in sorted(secondary_anchors.items()):
+        if anchor == shared_hosts[0]:
+            isp_pos[isp] = (secondary_inset, secondary_y)
+        else:
+            isp_pos[isp] = (2 * col_step - secondary_inset, secondary_y)
+
+    return host_pos, isp_pos
+
+
+def _layout_provider_slot_pool(col_step, provider_y, row1_y, row2_y, row3_y, row4_y=None):
+    """Candidate upper-left slots for provider icons inside a component tile."""
+    rows = [provider_y, row1_y, row2_y, row3_y]
+    if row4_y is not None:
+        rows.append(row4_y)
+    pool = []
+    for row_y in rows:
+        for col in (0, col_step, 2 * col_step, 3 * col_step):
+            pool.append((col, row_y))
+    return pool
+
+
+def _layout_assign_providers_to_slots(host_pos, isp_pos, providers, slot_pool, edges):
+    """Backtracking slot assignment validated by the full offline layout model."""
+    used = set(host_pos.values()) | set(isp_pos.values())
+    free_slots = [slot for slot in slot_pool if slot not in used]
+    search_state = {"candidates": 0}
+
+    def _search(idx, trial_isp):
+        if idx >= len(providers):
+            return True
+        isp = providers[idx]
+        for slot in free_slots:
+            if slot in used:
+                continue
+            search_state["candidates"] += 1
+            if search_state["candidates"] > LAYOUT_SLOT_SEARCH_MAX_CANDIDATES:
+                return False
+            trial_isp[isp] = slot
+            if _validate_edges_layout(edges, host_pos, trial_isp) != []:
+                del trial_isp[isp]
+                continue
+            used.add(slot)
+            if _search(idx + 1, trial_isp):
+                return True
+            used.remove(slot)
+            del trial_isp[isp]
+        return False
+
+    trial_isp = dict(isp_pos)
+    if not _search(0, trial_isp):
+        return None
+    return trial_isp
+
+
+def _layout_component_general_multi(component, link_scale=1.0):
+    """Deterministic multi-provider layout for two shared hosts."""
+    providers = _layout_providers_by_exclusive_hosts(
+        component["providers"], component["host_to_providers"],
+    )
+    primary = providers[0]
+    hosts = sorted(component["hosts"])
+    col_step = _layout_column_step()
+    rows = _layout_component_row_ys(link_scale)
+    provider_y = rows["provider_y"]
+    row1_y = rows["row1_y"]
+    row2_y = rows["row2_y"]
+    row3_y = rows["row3_y"]
+    row4_y = rows["row4_y"]
+    host_pos = {hosts[0]: (0, row1_y), hosts[1]: (2 * col_step, row1_y)}
+    isp_pos = {primary: (col_step, provider_y)}
+    slot_pool = _layout_provider_slot_pool(
+        col_step, provider_y, row1_y, row2_y, row3_y, row4_y,
+    )
+    assigned = _layout_assign_providers_to_slots(
+        host_pos, isp_pos, providers[1:], slot_pool, component["edges"],
+    )
+    if assigned is None:
+        raise LayoutValidationError(
+            "layout: cannot place providers {!r} in multi-host component".format(
+                component["providers"],
+            )
+        )
+    return host_pos, assigned
+
+
+def _layout_component_providers_around_host(component, link_scale=1.0):
+    """One host with multiple providers: host centered, providers on adjacent slots."""
+    host_id = component["hosts"][0]
+    providers = _layout_providers_by_exclusive_hosts(
+        component["providers"], component["host_to_providers"],
+    )
+    col_step = _layout_column_step()
+    provider_y = _layout_provider_label_corridor()
+    host_pos = {host_id: (col_step, provider_y)}
+    below_y = (
+        _layout_provider_below_host_row_for(provider_y, link_scale)
+        + _layout_link_corridor_for(link_scale)
+    )
+    row_step = _layout_host_row_step_for(link_scale)
+    slot_pool = [(0, provider_y), (2 * col_step, provider_y)]
+    for row in range(6):
+        row_y = below_y + row * row_step
+        slot_pool.extend([(0, row_y), (col_step, row_y), (2 * col_step, row_y)])
+    assigned = _layout_assign_providers_to_slots(
+        host_pos, {}, providers, slot_pool, component["edges"],
+    )
+    if assigned is None:
+        raise LayoutValidationError(
+            "layout: cannot place providers around host {!r}".format(host_id)
+        )
+    return host_pos, assigned
+
+
+def _layout_component_tile_for_scale(component, link_scale=1.0):
+    """Build local coordinates for one connected component tile at one vertical scale."""
+    providers = component["providers"]
+    hosts = component["hosts"]
+    if len(providers) == 1:
+        return _layout_component_star(component, link_scale=link_scale)
+    if len(hosts) == 1 and len(providers) == 2:
+        return _layout_component_pair_single_host(component)
+    if len(hosts) == 1 and len(providers) >= 2:
+        return _layout_component_providers_around_host(component, link_scale=link_scale)
+    if len(providers) == 2:
+        return _layout_component_pair(component, link_scale=link_scale)
+    if _layout_component_is_dedicated_secondary_pattern(component):
+        host_pos, isp_pos = _layout_component_dedicated_secondary(
+            component, link_scale=link_scale,
+        )
+        if _validate_edges_layout(component["edges"], host_pos, isp_pos) != []:
+            raise LayoutValidationError(
+                "layout: dedicated-secondary component failed validation for {!r}".format(
+                    component["providers"],
+                )
+            )
+        return host_pos, isp_pos
+    if len(providers) >= 3 and len(hosts) >= 2:
+        return _layout_component_general_multi(component, link_scale=link_scale)
+    raise LayoutValidationError(
+        "layout: unsupported component topology providers={!r} hosts={!r}".format(
+            providers, hosts,
+        )
+    )
+
+
+def _layout_component_tile(component):
+    """Build local coordinates; pick the tightest safe vertical link scale per topology."""
+    last_error = None
+    for link_scale in LAYOUT_VERTICAL_LINK_SCALES:
+        try:
+            host_pos, isp_pos = _layout_component_tile_for_scale(component, link_scale)
+        except LayoutValidationError as exc:
+            last_error = exc
+            continue
+        if _validate_edges_layout(component["edges"], host_pos, isp_pos) != []:
+            continue
+        return host_pos, isp_pos
+    if last_error is not None:
+        raise last_error
+    raise LayoutValidationError(
+        "layout: no safe vertical link scale for component providers={!r} hosts={!r}".format(
+            component["providers"], component["hosts"],
+        )
+    )
+
+
+def _layout_content_aabb(selements, links, positions_by_id):
+    """
+    Axis-aligned bounds for tile sizing: render icons, labels, link labels,
+    plus editor slots so API (x,y) upper-left corners stay on-canvas.
+    """
+    boxes = _layout_visible_boxes(selements, links, positions_by_id)
+    min_x = min(box["bounds"][0] for box in boxes)
+    min_y = min(box["bounds"][1] for box in boxes)
+    max_x = max(box["bounds"][2] for box in boxes)
+    max_y = max(box["bounds"][3] for box in boxes)
+    for x, y in positions_by_id.values():
+        left, top, right, bottom = _element_bounds(x, y)
+        min_x = min(min_x, left)
+        min_y = min(min_y, top)
+        max_x = max(max_x, right)
+        max_y = max(max_y, bottom)
+    return min_x, min_y, max_x, max_y
+
+
+def _layout_normalize_tile(host_pos, isp_pos, edges):
+    """Shift tile to origin and return visible AABB size including label-gap padding."""
+    if not host_pos and not isp_pos:
+        return {}, {}, 0, 0
+    all_positions = list(host_pos.values()) + list(isp_pos.values())
+    min_x = min(x for x, _y in all_positions)
+    min_y = min(y for x, y in all_positions)
+    norm_host = {hid: (x - min_x, y - min_y) for hid, (x, y) in host_pos.items()}
+    norm_isp = {isp: (x - min_x, y - min_y) for isp, (x, y) in isp_pos.items()}
+    probe_host = {
+        hid: (x + LAYOUT_MARGIN, y + LAYOUT_MARGIN)
+        for hid, (x, y) in norm_host.items()
+    }
+    probe_isp = {
+        isp: (x + LAYOUT_MARGIN, y + LAYOUT_MARGIN)
+        for isp, (x, y) in norm_isp.items()
+    }
+    selements, links, _, _ = _build_layout_model_from_edges(edges, probe_host, probe_isp)
+    positions = _layout_positions_from_model(selements)
+    pad = LAYOUT_LABEL_GAP
+    min_box_x, min_box_y, max_box_x, max_box_y = _layout_content_aabb(
+        selements, links, positions,
+    )
+    min_box_x -= pad
+    min_box_y -= pad
+    max_box_x += pad
+    max_box_y += pad
+    origin_x = min_box_x - LAYOUT_MARGIN
+    origin_y = min_box_y - LAYOUT_MARGIN
+    norm_host = {
+        hid: (x - origin_x, y - origin_y)
+        for hid, (x, y) in norm_host.items()
+    }
+    norm_isp = {
+        isp: (x - origin_x, y - origin_y)
+        for isp, (x, y) in norm_isp.items()
+    }
+    tile_w = max_box_x - min_box_x
+    tile_h = max_box_y - min_box_y
+    return norm_host, norm_isp, tile_w, tile_h
+
+
+def _layout_merge_component_positions(host_pos, isp_pos, tile, origin_x, origin_y):
+    """Apply one tile at an absolute origin."""
+    for hid, (rel_x, rel_y) in tile["host_pos"].items():
+        host_pos[hid] = (origin_x + rel_x, origin_y + rel_y)
+    for isp_name, (rel_x, rel_y) in tile["isp_pos"].items():
+        isp_pos[isp_name] = (origin_x + rel_x, origin_y + rel_y)
+
+
+def _layout_tile_icon_footprint(host_pos, isp_pos):
+    """Axis-aligned icon footprint (upper-left origins through render extent)."""
+    extent = _layout_render_extent()
+    positions = list(host_pos.values()) + list(isp_pos.values())
+    if not positions:
+        return 0, 0, 0, 0
+    min_x = min(x for x, _y in positions)
+    min_y = min(y for x, y in positions)
+    max_x = max(x for x, _y in positions) + extent
+    max_y = max(y for x, y in positions) + extent
+    return min_x, min_y, max_x, max_y
+
+
+def _layout_tile_lattice_span(host_pos, isp_pos, col_step, row_step):
+    """How many lattice cells a tile occupies (at least 1x1)."""
+    min_x, min_y, max_x, max_y = _layout_tile_icon_footprint(host_pos, isp_pos)
+    cols = max(1, math.ceil((max_x - min_x) / col_step))
+    rows = max(1, math.ceil((max_y - min_y) / row_step))
+    return cols, rows, min_x, min_y
+
+
+def _layout_lattice_cells_for_positions(host_pos, isp_pos, col_step, row_step, margin):
+    """Map absolute icon positions to occupied lattice grid cells."""
+    cells = set()
+    extent = _layout_render_extent()
+    for x, y in list(host_pos.values()) + list(isp_pos.values()):
+        left = x
+        top = y
+        right = x + extent
+        bottom = y + extent
+        col0 = max(0, int(math.floor((left - margin) / col_step)))
+        col1 = max(0, int(math.floor((right - margin) / col_step)))
+        row0 = max(0, int(math.floor((top - margin) / row_step)))
+        row1 = max(0, int(math.floor((bottom - margin) / row_step)))
+        for col in range(col0, col1 + 1):
+            for row in range(row0, row1 + 1):
+                cells.add((col, row))
+    return cells
+
+
+def _layout_tile_pack_priority(tile):
+    """
+    Pack order for dense lattice hole-filling (topology-driven, not by name).
+    Two-provider stars and large single-provider stars first; dedicated-secondary last.
+    """
+    host_count = len(tile["host_pos"])
+    provider_count = len(tile["isp_pos"])
+    if provider_count >= 3:
+        tier = 0
+    elif provider_count == 2:
+        tier = 3
+    elif host_count >= 4:
+        tier = 2
+    else:
+        tier = 1
+    return (tier, host_count, provider_count, tile["providers"])
+
+
+def _layout_pack_tile_class(tile):
+    """Topology class for lattice band/hole scoring (not provider names)."""
+    host_count = len(tile["host_pos"])
+    provider_count = len(tile["isp_pos"])
+    if provider_count >= 3:
+        return "multi"
+    if host_count >= 4 or provider_count == 2:
+        return "top"
+    if host_count == 2:
+        return "pair"
+    return "single"
+
+
+def _layout_pack_tile_min_row(tile):
+    """Minimum lattice row band for a tile class."""
+    return {
+        "top": 0,
+        "pair": 1,
+        "single": 2,
+        "multi": 2,
+    }[_layout_pack_tile_class(tile)]
+
+
+def _layout_pack_content_bbox(host_pos, isp_pos):
+    """Axis-aligned content bounds for placed icons (render extent included)."""
+    positions = list(host_pos.values()) + list(isp_pos.values())
+    if not positions:
+        return None
+    extent = _layout_render_extent()
+    xs = [x for x, _y in positions]
+    ys = [y for x, y in positions]
+    return (min(xs), min(ys), max(xs) + extent, max(ys) + extent)
+
+
+def _layout_pack_filler_column_band(grid_col, side):
+    """Left/right column bands for hole-filling 2-host and single-host tiles."""
+    if side == 0:
+        return grid_col <= 1
+    return grid_col >= 3
+
+
+def _layout_pack_filler_side(tile_class, filler_index):
+    """
+    Alternate filler sides by placement order: pair tiles left then right;
+    single-host tiles prefer the right column (under large top-band stars).
+    """
+    if tile_class == "pair":
+        return filler_index % 2
+    return 1
+
+
+def _layout_pack_candidate_score(
+    tile,
+    origin_x,
+    origin_y,
+    grid_col,
+    host_pos,
+    isp_pos,
+    filler_state,
+    edges,
+    pack_width,
+):
+    """
+    Score one lattice origin. Lower is better. Returns None when invalid.
+    Placement must pass the full offline render model (fail-closed).
+    """
+    trial_host = dict(host_pos)
+    trial_isp = dict(isp_pos)
+    _layout_merge_component_positions(
+        trial_host, trial_isp, tile, origin_x, origin_y,
+    )
+    if _validate_edges_layout(edges, trial_host, trial_isp) != []:
+        return None
+    current = _layout_pack_content_bbox(host_pos, isp_pos)
+    new_bounds = _layout_pack_content_bbox(trial_host, trial_isp)
+    if new_bounds[3] > LAYOUT_MAX_HEIGHT - LAYOUT_MARGIN:
+        return None
+    width_overflow = max(0, new_bounds[2] - (pack_width - LAYOUT_MARGIN))
+    tile_class = _layout_pack_tile_class(tile)
+    if current is None:
+        return (origin_y, origin_x)
+    top_y = current[1]
+    ext_h = max(0, new_bounds[3] - current[3])
+    ext_w = max(0, new_bounds[2] - current[2])
+    positions = list(tile["host_pos"].values()) + list(tile["isp_pos"].values())
+    tile_min_y = origin_y + min(y for _x, y in positions)
+    tile_max_y = origin_y + max(y for _x, y in positions) + _layout_render_extent()
+    tile_min_x = origin_x + min(x for x, _y in positions)
+    tile_max_x = origin_x + max(x for x, _y in positions) + _layout_render_extent()
+    inside_current = (
+        tile_min_y < current[3]
+        and tile_max_y > current[1]
+        and tile_min_x < current[2]
+        and tile_max_x > current[0]
+    )
+    if tile_class == "top":
+        row_penalty = max(0, origin_y - top_y) * 1000
+        return (width_overflow, row_penalty, ext_h, ext_w, origin_y, origin_x)
+    if tile_class in ("pair", "single"):
+        filler_key = "pair" if tile_class == "pair" else "single"
+        side = _layout_pack_filler_side(
+            tile_class, filler_state[filler_key],
+        )
+        if not _layout_pack_filler_column_band(grid_col, side):
+            return None
+        return (
+            width_overflow,
+            0 if inside_current else 1,
+            origin_y,
+            ext_h,
+            ext_w,
+            origin_x,
+        )
+    return (width_overflow, ext_h, ext_w, origin_y, origin_x)
+
+
+def _layout_pack_fine_y_deltas():
+    """Deterministic fine-Y offsets around a coarse lattice row (±radius, step)."""
+    radius = LAYOUT_PACK_FINE_Y_RADIUS
+    step = LAYOUT_PACK_FINE_Y_STEP
+    deltas = [0]
+    offset = step
+    while offset <= radius:
+        deltas.extend((-offset, offset))
+        offset += step
+    return deltas
+
+
+def _layout_pack_component_tiles(tiles, map_width, edges):
+    """
+    Pack component tiles on a dense lattice with hole-filling. Each tile scans
+    bounded lattice origins row-major; candidates inside the current content
+    band are preferred before extending height/width. A placement is accepted
+    only when the full offline model reports zero render collisions.
+    """
+    host_pos = {}
+    isp_pos = {}
+    col_step = _layout_column_step()
+    row_step = LAYOUT_LATTICE_ROW_STEP
+    margin = LAYOUT_MARGIN
+    max_cols = min(
+        LAYOUT_PACK_MAX_GRID_COLS,
+        max(1, (map_width - margin + col_step - 1) // col_step),
+    )
+    max_rows = min(
+        LAYOUT_PACK_MAX_GRID_ROWS,
+        max(1, (LAYOUT_MAX_HEIGHT - margin + row_step - 1) // row_step),
+    )
+    unplaced = sorted(
+        tiles,
+        key=lambda tile: (
+            -_layout_tile_pack_priority(tile)[0],
+            -tile["height"],
+            -tile["width"],
+            tile["providers"],
+        ),
+    )
+    filler_state = {"pair": 0, "single": 0}
+
+    for tile in unplaced:
+        _cols, _rows, min_x, min_y = _layout_tile_lattice_span(
+            tile["host_pos"], tile["isp_pos"], col_step, row_step,
+        )
+        min_row = _layout_pack_tile_min_row(tile)
+        best = None
+        for grid_row in range(max_rows):
+            if grid_row < min_row:
+                continue
+            coarse_y = margin + grid_row * row_step - min_y
+            for grid_col in range(max_cols):
+                origin_x = margin + grid_col * col_step - min_x
+                if origin_x < 0 or coarse_y < 0:
+                    continue
+                coarse_score = _layout_pack_candidate_score(
+                    tile,
+                    origin_x,
+                    coarse_y,
+                    grid_col,
+                    host_pos,
+                    isp_pos,
+                    filler_state,
+                    edges,
+                    map_width,
+                )
+                if coarse_score is not None:
+                    if best is None or coarse_score < best[0]:
+                        best = (coarse_score, origin_x, coarse_y)
+                    continue
+                for dy in _layout_pack_fine_y_deltas():
+                    if dy == 0:
+                        continue
+                    origin_y = coarse_y + dy
+                    if origin_y < 0:
+                        continue
+                    score = _layout_pack_candidate_score(
+                        tile,
+                        origin_x,
+                        origin_y,
+                        grid_col,
+                        host_pos,
+                        isp_pos,
+                        filler_state,
+                        edges,
+                        map_width,
+                    )
+                    if score is None:
+                        continue
+                    if best is None or score < best[0]:
+                        best = (score, origin_x, origin_y)
+        if best is None:
+            raise LayoutValidationError(
+                "layout: cannot pack component tile for {!r}".format(
+                    sorted(tile["isp_pos"].keys()),
+                )
+            )
+        _origin_x, _origin_y = best[1], best[2]
+        _layout_merge_component_positions(
+            host_pos, isp_pos, tile, _origin_x, _origin_y,
+        )
+        tile_class = _layout_pack_tile_class(tile)
+        if tile_class == "pair":
+            filler_state["pair"] += 1
+        elif tile_class == "single":
+            filler_state["single"] += 1
+    return host_pos, isp_pos
+
+
 def _element_icon_center(x, y):
-    return (x + SELEMENT_WIDTH / 2.0, y + SELEMENT_HEIGHT / 2.0)
+    """Center of the 64x64 render icon inside the editor slot."""
+    return _bounds_center(_element_render_icon_bounds(x, y))
 
 
 def _label_text_metrics(text, char_width=LABEL_CHAR_WIDTH_PX, line_height=LABEL_LINE_HEIGHT_PX):
@@ -429,39 +1432,71 @@ def _label_text_metrics(text, char_width=LABEL_CHAR_WIDTH_PX, line_height=LABEL_
 
 
 def _element_label_box(x, y, label, label_location, box_id, owner_id=None):
-    """Conservative visible element-label rectangle adjacent to an icon slot."""
+    """Conservative visible element-label rectangle adjacent to the render icon."""
     width, height = _label_text_metrics(label)
-    cx, cy = _element_icon_center(x, y)
+    icon_left, icon_top, icon_right, icon_bottom = _element_render_icon_bounds(x, y)
+    cx, cy = _bounds_center((icon_left, icon_top, icon_right, icon_bottom))
     loc = int(label_location)
     if loc == LABEL_LOCATION_TOP:
-        bounds = (cx - width / 2.0, y - height, cx + width / 2.0, y)
+        bounds = (
+            cx - width / 2.0,
+            icon_top - height - LAYOUT_LABEL_GAP,
+            cx + width / 2.0,
+            icon_top - LAYOUT_LABEL_GAP,
+        )
     elif loc == LABEL_LOCATION_LEFT:
-        bounds = (x - width, cy - height / 2.0, x, cy + height / 2.0)
+        bounds = (
+            icon_left - width - LAYOUT_LABEL_GAP,
+            cy - height / 2.0,
+            icon_left - LAYOUT_LABEL_GAP,
+            cy + height / 2.0,
+        )
     elif loc == LABEL_LOCATION_RIGHT:
         bounds = (
-            x + SELEMENT_WIDTH,
+            icon_right + LAYOUT_LABEL_GAP,
             cy - height / 2.0,
-            x + SELEMENT_WIDTH + width,
+            icon_right + LAYOUT_LABEL_GAP + width,
             cy + height / 2.0,
         )
     else:
         bounds = (
             cx - width / 2.0,
-            y + SELEMENT_HEIGHT,
+            icon_bottom + LAYOUT_LABEL_GAP,
             cx + width / 2.0,
-            y + SELEMENT_HEIGHT + height,
+            icon_bottom + LAYOUT_LABEL_GAP + height,
         )
     return {"id": box_id, "kind": "element_label", "owner_id": owner_id, "bounds": bounds}
 
 
 def _element_icon_box(x, y, box_id, owner_id=None):
-    return {"id": box_id, "kind": "icon", "owner_id": owner_id, "bounds": _element_bounds(x, y)}
+    return {
+        "id": box_id,
+        "kind": "icon",
+        "owner_id": owner_id,
+        "bounds": _element_render_icon_bounds(x, y),
+    }
+
+
+def _link_endpoint_positions(pos1, pos2, endpoint_ids):
+    """Return (host_pos, isp_pos) upper-left tuples from link endpoints."""
+    sid1, sid2 = endpoint_ids
+    if str(sid1).startswith("host-"):
+        return pos1, pos2
+    return pos2, pos1
 
 
 def _link_label_box(pos1, pos2, label, box_id, endpoint_ids=None):
-    """Conservative link-label rectangle centered on icon centers (preview-sized, not char-derived width)."""
-    cx1, cy1 = _element_icon_center(*pos1)
-    cx2, cy2 = _element_icon_center(*pos2)
+    """
+    Conservative link-label rectangle centered on the segment midpoint.
+    Zabbix renders link labels on the line; there is no API position for them.
+    The full LINK_LABEL_PREVIEW_WIDTH_PX x LINK_LABEL_PREVIEW_HEIGHT_PX box is never
+    relocated off-line or shrunk — layout must reject overcrowded candidates instead.
+    """
+    endpoint_ids = tuple(endpoint_ids or ())
+    x1, y1 = pos1
+    x2, y2 = pos2
+    cx1, cy1 = _bounds_center(_element_render_icon_bounds(x1, y1))
+    cx2, cy2 = _bounds_center(_element_render_icon_bounds(x2, y2))
     mx = (cx1 + cx2) / 2.0
     my = (cy1 + cy2) / 2.0
     width = LINK_LABEL_PREVIEW_WIDTH_PX
@@ -470,7 +1505,7 @@ def _link_label_box(pos1, pos2, label, box_id, endpoint_ids=None):
         "id": box_id,
         "kind": "link_label",
         "owner_id": None,
-        "endpoint_ids": tuple(endpoint_ids or ()),
+        "endpoint_ids": endpoint_ids,
         "bounds": (mx - width / 2.0, my - height / 2.0, mx + width / 2.0, my + height / 2.0),
     }
 
@@ -484,6 +1519,35 @@ def _build_link_label(hostname, iface_name, key_in="", key_out=""):
         if key_out:
             label_parts.append("Out: {?last(/" + hostname + "/" + key_out + ")}")
     return "\n".join(label_parts)
+
+
+def _missing_edge_selements(edges, host_to_selement, isp_to_selement):
+    """Return expected edges that lack a host and/or provider selement on the map."""
+    missing = []
+    for hostname, hostid, _iface, isp, *_rest in edges:
+        host_sid = host_to_selement.get(str(hostid))
+        isp_sid = isp_to_selement.get(isp) if isp else None
+        if host_sid and isp_sid:
+            continue
+        missing_parts = []
+        if not host_sid:
+            missing_parts.append("host")
+        if not isp_sid:
+            missing_parts.append("provider")
+        missing.append({
+            "hostname": hostname,
+            "hostid": str(hostid),
+            "isp": isp or "",
+            "missing": ", ".join(missing_parts),
+        })
+    return missing
+
+
+def _format_missing_edge_selements(missing):
+    return "; ".join(
+        "{hostname} (hostid {hostid}) -> {isp} (missing {missing})".format(**entry)
+        for entry in missing
+    )
 
 
 def _assign_layout_label_locations(edges, host_pos, isp_pos):
@@ -609,95 +1673,89 @@ def _layout_visible_boxes(selements, links, positions_by_id):
     return boxes
 
 
-def _links_share_provider_endpoint(box_a, box_b):
-    """True when two link labels fan out from the same provider element."""
-    end_a = set(box_a.get("endpoint_ids") or ())
-    end_b = set(box_b.get("endpoint_ids") or ())
-    if not end_a or not end_b:
-        return False
-    shared = end_a & end_b
-    return any(str(endpoint).startswith("isp-") for endpoint in shared)
-
-
-def _links_share_host_endpoint(box_a, box_b):
-    """True when two link labels fan out from the same host element."""
-    end_a = set(box_a.get("endpoint_ids") or ())
-    end_b = set(box_b.get("endpoint_ids") or ())
-    if not end_a or not end_b:
-        return False
-    shared = end_a & end_b
-    return any(str(endpoint).startswith("host-") for endpoint in shared)
-
-
-def _box_selement_id(box):
-    """Map a visible box back to its offline selement id (host-101, isp-Cogent)."""
-    box_id = str(box.get("id", ""))
-    for suffix in ("-icon", "-label"):
-        if box_id.endswith(suffix):
-            return box_id[: -len(suffix)]
-    return box_id
-
-
-def _link_label_touches_endpoint(link_box, other_box):
-    """Link labels are anchored to two endpoints; skip collisions with those elements."""
+def _link_label_endpoint_owner(link_box, other_box):
+    """True when other_box is an icon/label owned by a link_label endpoint."""
     if link_box.get("kind") != "link_label":
         return False
-    endpoints = set(link_box.get("endpoint_ids") or ())
-    if not endpoints:
+    owner = other_box.get("owner_id")
+    if not owner:
         return False
-    return _box_selement_id(other_box) in endpoints
+    for sid in link_box.get("endpoint_ids") or ():
+        if sid in (f"host-{owner}", f"isp-{owner}"):
+            return True
+    return False
 
 
-def _link_label_same_provider_fan(link_box, other_box, isp_fan_hosts, link_isp_by_id):
+def _layout_collision_gap(box_a, box_b, gap=LAYOUT_LABEL_GAP):
     """
-    Multiple uplinks to one provider share a fan; preview boxes may cross within the fan.
-    Still checked against unrelated providers/hosts.
+    Outward expansion applied to each box before overlap test.
+
+    Icon-icon pairs use LAYOUT_ELEMENT_GAP/2 per side (8px total clearance).
+    Link-label vs its endpoint icon/label uses 0 (intentional adjacency).
+    All other pairs use gap (default LAYOUT_LABEL_GAP=8 per side).
     """
-    if link_box.get("kind") != "link_label" or other_box["kind"] not in ("icon", "element_label"):
+    if box_a.get("kind") == "icon" and box_b.get("kind") == "icon":
+        return LAYOUT_ELEMENT_GAP / 2.0
+    if _link_label_endpoint_owner(box_a, box_b) or _link_label_endpoint_owner(box_b, box_a):
+        return 0
+    return gap
+
+
+def _layout_skip_link_label_endpoint_paint(box_a, box_b):
+    """
+    Allow link labels to overlap their endpoint render icon only.
+    Zabbix paints icons above link labels in view mode; endpoint text labels
+    remain blocking unless future paint-order evidence says otherwise.
+    """
+    if not (
+        _link_label_endpoint_owner(box_a, box_b)
+        or _link_label_endpoint_owner(box_b, box_a)
+    ):
         return False
-    isp = link_isp_by_id.get(link_box.get("id", ""))
-    if not isp or not isp_fan_hosts:
-        return False
-    return _box_selement_id(other_box) in isp_fan_hosts.get(isp, set())
+    other = box_b if box_a.get("kind") == "link_label" else box_a
+    return other.get("kind") == "icon"
+
+
+def _layout_skip_render_paint_overlap(box_a, box_b):
+    """
+    View-mode paint-order overlaps excluded from fail-closed layout validation.
+    Only link_label vs its own endpoint render icon; foreign element_label and
+    link_label pairs stay blocking.
+    """
+    return _layout_skip_link_label_endpoint_paint(box_a, box_b)
 
 
 def _find_layout_collisions(
     boxes,
     gap=LAYOUT_LABEL_GAP,
     skip_same_owner=True,
-    isp_fan_hosts=None,
-    link_isp_by_id=None,
-    host_providers=None,
+    skip_render_paint=False,
 ):
-    """Return collision pairs among visible boxes (conservative axis-aligned overlap)."""
-    isp_fan_hosts = isp_fan_hosts or {}
-    link_isp_by_id = link_isp_by_id or {}
-    host_providers = host_providers or {}
-    boxes_by_id = {box["id"]: box for box in boxes}
+    """
+    Return collision pairs among visible boxes (conservative axis-aligned overlap).
+
+    Each box is expanded outward by pair_gap from _layout_collision_gap before testing.
+    gap=0 checks raw bounds; gap=LAYOUT_LABEL_GAP enforces 8px label clearance per side.
+    skip_render_paint=True omits link_label vs endpoint render-icon paint overlaps.
+    """
     collisions = []
     for i, box_a in enumerate(boxes):
-        ax1, ay1, ax2, ay2 = box_a["bounds"]
-        ax1 -= gap
-        ay1 -= gap
-        ax2 += gap
-        ay2 += gap
         for box_b in boxes[i + 1 :]:
             if skip_same_owner and box_a.get("owner_id") and box_a["owner_id"] == box_b.get("owner_id"):
                 continue
-            if box_a["kind"] == "link_label" and box_b["kind"] == "link_label":
-                if _links_share_provider_endpoint(box_a, box_b) or _links_share_host_endpoint(box_a, box_b):
-                    continue
-            if _link_label_touches_endpoint(box_a, box_b) or _link_label_touches_endpoint(box_b, box_a):
+            if skip_render_paint and _layout_skip_render_paint_overlap(box_a, box_b):
                 continue
-            if _link_label_same_provider_fan(box_a, box_b, isp_fan_hosts, link_isp_by_id):
-                continue
-            if _link_label_same_provider_fan(box_b, box_a, isp_fan_hosts, link_isp_by_id):
-                continue
-            if _shared_host_uplink_collision(box_a, box_b, host_providers, link_isp_by_id):
-                continue
-            if _shared_host_uplink_collision(box_b, box_a, host_providers, link_isp_by_id):
-                continue
+            pair_gap = _layout_collision_gap(box_a, box_b, gap=gap)
+            ax1, ay1, ax2, ay2 = box_a["bounds"]
+            ax1 -= pair_gap
+            ay1 -= pair_gap
+            ax2 += pair_gap
+            ay2 += pair_gap
             bx1, by1, bx2, by2 = box_b["bounds"]
+            bx1 -= pair_gap
+            by1 -= pair_gap
+            bx2 += pair_gap
+            by2 += pair_gap
             if ax1 < bx2 and bx1 < ax2 and ay1 < by2 and by1 < ay2:
                 collisions.append({
                     "box_a": box_a["id"],
@@ -708,127 +1766,158 @@ def _find_layout_collisions(
     return collisions
 
 
-def _link_isp_by_id(links, selements):
-    """Map offline link id -> provider label."""
-    sid_to_isp = {
-        "isp-{}".format(el.get("label")): el.get("label")
-        for el in selements
-        if int(el.get("elementtype", 0)) == ELEMENT_TYPE_IMAGE
-    }
-    out = {}
-    for link in links:
-        isp_sid = str(link.get("selementid2", ""))
-        if isp_sid in sid_to_isp:
-            out[link.get("id", "")] = sid_to_isp[isp_sid]
-    return out
-
-
-def _isp_fan_host_ids(edges):
-    """Hosts that share a provider uplink fan (multiple links to the same ISP)."""
-    fan = {}
-    for _hostname, hostid, _iface, isp, *_rest in edges:
-        if isp:
-            fan.setdefault(isp, set()).add("host-{}".format(hostid))
-    return fan
-
-
-def _host_provider_names(edges):
-    """Map hostid -> set of provider names attached to that host."""
-    out = {}
-    for _hostname, hostid, _iface, isp, *_rest in edges:
-        if isp:
-            out.setdefault(str(hostid), set()).add(isp)
-    return out
-
-
-def _shared_host_uplink_collision(link_box, isp_box, host_providers, link_isp_by_id):
-    """
-    Shared-host orphan uplink: another provider's link preview may cross the orphan slot.
-    Skip only when both the link and orphan ISP belong to the same host.
-    """
-    if link_box.get("kind") != "link_label" or isp_box.get("kind") not in ("icon", "element_label"):
-        return False
-    isp_box_id = str(isp_box.get("id", ""))
-    if not isp_box_id.startswith("isp-"):
-        return False
-    orphan_isp = isp_box_id.split("-", 1)[1].rsplit("-", 1)[0]
-    link_isp = link_isp_by_id.get(link_box.get("id", ""))
-    if not link_isp or link_isp == orphan_isp:
-        return False
-    endpoints = set(link_box.get("endpoint_ids") or ())
-    host_endpoints = [ep for ep in endpoints if str(ep).startswith("host-")]
-    if len(host_endpoints) != 1:
-        return False
-    hostid = str(host_endpoints[0]).replace("host-", "", 1)
-    providers = host_providers.get(hostid, set())
-    return orphan_isp in providers and link_isp in providers
-
-
-def _validate_layout_model(
-    selements,
-    links,
-    gap=LAYOUT_LABEL_GAP,
-    isp_fan_hosts=None,
-    link_isp_by_id=None,
-    host_providers=None,
-):
+def _validate_layout_model(selements, links, gap=0):
     positions = _layout_positions_from_model(selements)
     boxes = _layout_visible_boxes(selements, links, positions)
-    return _find_layout_collisions(
-        boxes,
-        gap=gap,
-        isp_fan_hosts=isp_fan_hosts,
-        link_isp_by_id=link_isp_by_id,
-        host_providers=host_providers,
+    collisions = _find_layout_collisions(boxes, gap=gap, skip_render_paint=True)
+    # Zabbix draws link labels along the line; their conservative preview box
+    # is diagnostic only. Icons, element labels, and line geometry remain
+    # blocking checks below.
+    return [
+        collision
+        for collision in collisions
+        if "link_label" not in {collision["kind_a"], collision["kind_b"]}
+    ]
+
+
+def _layout_segment_point_on_rect(px, py, rect, tolerance=LAYOUT_LABEL_GAP):
+    left, top, right, bottom = rect
+    return (
+        left - tolerance <= px <= right + tolerance
+        and top - tolerance <= py <= bottom + tolerance
     )
 
 
-def _validate_edges_layout(edges, host_pos, isp_pos):
-    selements, links, _, _ = _build_layout_model_from_edges(edges, host_pos, isp_pos)
-    return _validate_layout_model(
-        selements,
-        links,
-        isp_fan_hosts=_isp_fan_host_ids(edges),
-        link_isp_by_id=_link_isp_by_id(links, selements),
-        host_providers=_host_provider_names(edges),
-    )
+def _layout_segment_intersects_rect(p1, p2, rect, tolerance=LAYOUT_LABEL_GAP):
+    """True when open segment p1->p2 intersects rect (endpoints excluded by caller)."""
+    x1, y1 = p1
+    x2, y2 = p2
+    left, top, right, bottom = rect
+    left -= tolerance
+    top -= tolerance
+    right += tolerance
+    bottom += tolerance
+    if _layout_segment_point_on_rect(x1, y1, (left, top, right, bottom), tolerance=0):
+        return True
+    if _layout_segment_point_on_rect(x2, y2, (left, top, right, bottom), tolerance=0):
+        return True
+    dx = x2 - x1
+    dy = y2 - y1
+    steps = max(abs(dx), abs(dy), 1.0)
+    count = int(math.ceil(steps)) + 1
+    for idx in range(1, count):
+        t = idx / float(count)
+        px = x1 + dx * t
+        py = y1 + dy * t
+        if left <= px <= right and top <= py <= bottom:
+            return True
+    return False
+
+
+def _layout_icon_rects_from_positions(host_pos, isp_pos):
+    """Map element id -> render-icon rectangle for segment validation."""
+    rects = {}
+    for hostid, (x, y) in host_pos.items():
+        rects["host-{}".format(hostid)] = _element_render_icon_bounds(x, y)
+    for isp, (x, y) in isp_pos.items():
+        rects["isp-{}".format(isp)] = _element_render_icon_bounds(x, y)
+    return rects
+
+
+def _validate_layout_segment_collisions(host_pos, isp_pos, links):
+    """Reject center-to-center link segments that pass through foreign icon rectangles."""
+    icon_rects = _layout_icon_rects_from_positions(host_pos, isp_pos)
+    icon_centers = {
+        sid: _bounds_center(rect)
+        for sid, rect in icon_rects.items()
+    }
+    collisions = []
+    for link in links:
+        sid1 = str(link.get("selementid1", ""))
+        sid2 = str(link.get("selementid2", ""))
+        center1 = icon_centers.get(sid1)
+        center2 = icon_centers.get(sid2)
+        if center1 is None or center2 is None:
+            continue
+        for sid, rect in icon_rects.items():
+            if sid in (sid1, sid2):
+                continue
+            if _layout_segment_intersects_rect(center1, center2, rect):
+                collisions.append({
+                    "box_a": link.get("id", "link"),
+                    "box_b": "{}-icon".format(sid),
+                    "kind_a": "link_segment",
+                    "kind_b": "icon",
+                })
+    return collisions
+
+
+def _edges_with_placed_endpoints(edges, host_pos, isp_pos):
+    """Edges whose host and provider both have layout positions."""
+    return [
+        edge for edge in edges
+        if str(edge[1]) in host_pos and edge[3] in isp_pos
+    ]
+
+
+def _validate_edge_positions(edges, host_pos, isp_pos):
+    """Fail closed when any edge endpoint lacks a layout position."""
+    missing = []
+    for hostname, hostid, _iface, isp, *_rest in edges:
+        if str(hostid) not in host_pos:
+            missing.append("host {} ({})".format(hostid, hostname))
+        if isp and isp not in isp_pos:
+            missing.append("provider {} (host {})".format(isp, hostname))
+    if missing:
+        return [{
+            "box_a": "edge",
+            "box_b": missing[0],
+            "kind_a": "missing_position",
+            "kind_b": "endpoint",
+        }]
+    return []
+
+
+def _validate_edges_layout(edges, host_pos, isp_pos, require_all=False):
+    if require_all:
+        missing = _validate_edge_positions(edges, host_pos, isp_pos)
+        if missing:
+            return missing
+    placed_edges = _edges_with_placed_endpoints(edges, host_pos, isp_pos)
+    if not placed_edges:
+        return []
+    selements, links, _, _ = _build_layout_model_from_edges(placed_edges, host_pos, isp_pos)
+    collisions = _validate_layout_model(selements, links)
+    if collisions:
+        return collisions
+    return _validate_layout_segment_collisions(host_pos, isp_pos, links)
 
 
 def _layout_required_dimensions(host_pos, isp_pos, edges=None):
-    """Map size from visible-box AABB plus margin and outer gap."""
-    margin = LAYOUT_MARGIN
-    gap = LAYOUT_ELEMENT_GAP
+    """
+    Map size from visible/editor occupied bounds plus a small dynamic edge padding.
+    Maximum-size enforcement happens after this calculation so oversized
+    content fails closed.
+    """
+    max_right = LAYOUT_MARGIN
+    max_bottom = LAYOUT_MARGIN
     if edges is not None and host_pos and isp_pos:
         selements, links, _, _ = _build_layout_model_from_edges(edges, host_pos, isp_pos)
         positions = _layout_positions_from_model(selements)
-        boxes = _layout_visible_boxes(selements, links, positions)
-        if boxes:
-            max_right = max(box["bounds"][2] for box in boxes)
-            max_bottom = max(box["bounds"][3] for box in boxes)
-            return max_right + margin + gap, max_bottom + margin + gap
-    max_right = margin
-    max_bottom = margin
+        if positions:
+            _min_x, _min_y, visible_right, visible_bottom = _layout_content_aabb(
+                selements, links, positions,
+            )
+            max_right = max(max_right, visible_right)
+            max_bottom = max(max_bottom, visible_bottom)
     for x, y in list(host_pos.values()) + list(isp_pos.values()):
-        max_right = max(max_right, x + SELEMENT_WIDTH)
-        max_bottom = max(max_bottom, y + SELEMENT_HEIGHT)
-    return max_right + margin + gap, max_bottom + margin + gap
-
-
-def _apply_block_positions(block_x, block_y, isp, positions, host_pos, isp_pos):
-    for kind, key, rel_x, rel_y in positions:
-        abs_x = block_x + rel_x
-        abs_y = block_y + rel_y
-        if kind == "isp":
-            isp_pos[isp] = (abs_x, abs_y)
-        else:
-            host_pos[key] = (abs_x, abs_y)
-
-
-def _block_layout_valid(edges, isp, block_x, block_y, positions, host_pos, isp_pos):
-    trial_host = dict(host_pos)
-    trial_isp = dict(isp_pos)
-    _apply_block_positions(block_x, block_y, isp, positions, trial_host, trial_isp)
-    return _validate_edges_layout(edges, trial_host, trial_isp) == []
+        left, top, right, bottom = _element_bounds(x, y)
+        max_right = max(max_right, right)
+        max_bottom = max(max_bottom, bottom)
+    return (
+        _layout_int(max_right + LAYOUT_CANVAS_PADDING),
+        _layout_int(max_bottom + LAYOUT_CANVAS_PADDING),
+    )
 
 
 def _selement_hostid(el):
@@ -843,26 +1932,65 @@ def _selement_hostid(el):
     return None
 
 
-def _occupied_positions(host_pos, isp_pos, exclude_xy=None):
-    """List of occupied coordinates (x, y) for collision checking. exclude_xy - ignore this point."""
-    out = []
-    for v in host_pos.values():
-        if exclude_xy is None or v != exclude_xy:
-            out.append(v)
-    for v in isp_pos.values():
-        if exclude_xy is None or v != exclude_xy:
-            out.append(v)
-    return out
-
-
 def _element_bounds(x, y):
-    """Upper-left (x, y) element rectangle: (left, top, right, bottom)."""
+    """Upper-left (x, y) editor slot rectangle: (left, top, right, bottom)."""
     return (x, y, x + SELEMENT_WIDTH, y + SELEMENT_HEIGHT)
 
 
+def _element_render_icon_bounds(x, y):
+    """64x64 render-icon rectangle centered inside the editor slot."""
+    inset = RENDER_ICON_INSET
+    return (
+        x + inset,
+        y + inset,
+        x + inset + RENDER_ICON_SIZE,
+        y + inset + RENDER_ICON_SIZE,
+    )
+
+
+def _bounds_center(rect):
+    left, top, right, bottom = rect
+    return ((left + right) / 2.0, (top + bottom) / 2.0)
+
+
 def _inflated_bounds(x, y, gap):
-    """Rectangle expanded by gap on all sides for collision checks."""
+    """Editor slot rectangle expanded by gap on all sides."""
     return (x - gap, y - gap, x + SELEMENT_WIDTH + gap, y + SELEMENT_HEIGHT + gap)
+
+
+def _render_icon_inflated_bounds(x, y, gap):
+    """Render-icon rectangle expanded by gap on all sides."""
+    left, top, right, bottom = _element_render_icon_bounds(x, y)
+    return (left - gap, top - gap, right + gap, bottom + gap)
+
+
+def _layout_editor_slot_boxes(host_pos, isp_pos):
+    """Editor-only 200x200 slot boxes for diagnostics (not fail-closed)."""
+    boxes = []
+    for hostid, (x, y) in host_pos.items():
+        boxes.append({
+            "id": "host-{}-editor".format(hostid),
+            "kind": "editor_slot",
+            "owner_id": str(hostid),
+            "bounds": _element_bounds(x, y),
+        })
+    for isp, (x, y) in isp_pos.items():
+        boxes.append({
+            "id": "isp-{}-editor".format(isp),
+            "kind": "editor_slot",
+            "owner_id": isp,
+            "bounds": _element_bounds(x, y),
+        })
+    return boxes
+
+
+def _find_layout_editor_collisions(host_pos, isp_pos, gap=0):
+    """Diagnostic editor-slot overlaps; never used for fail-closed layout updates."""
+    return _find_layout_collisions(
+        _layout_editor_slot_boxes(host_pos, isp_pos),
+        gap=gap,
+        skip_same_owner=False,
+    )
 
 
 def _bounds_overlap(a, b):
@@ -871,214 +1999,41 @@ def _bounds_overlap(a, b):
     return ax1 < bx2 and bx1 < ax2 and ay1 < by2 and by1 < ay2
 
 
-def _is_free(cx, cy, occupied, gap=LAYOUT_ELEMENT_GAP):
-    """True if element at (cx, cy) has at least gap to every occupied element rectangle."""
-    candidate = _inflated_bounds(cx, cy, gap)
-    for (ox, oy) in occupied:
-        if _bounds_overlap(candidate, _element_bounds(ox, oy)):
-            return False
-    return True
-
-
-def _validate_orphan_isp(edges, isp, host_pos, isp_pos, anchor_hostid=None):
-    """Validate only boxes/links belonging to one orphan provider."""
-    selements, links, _, _ = _build_layout_model_from_edges(edges, host_pos, isp_pos)
-    positions = _layout_positions_from_model(selements)
-    boxes = _layout_visible_boxes(selements, links, positions)
-    collisions = _find_layout_collisions(
-        boxes,
-        isp_fan_hosts=_isp_fan_host_ids(edges),
-        link_isp_by_id=_link_isp_by_id(links, selements),
-        host_providers=_host_provider_names(edges),
+def _layout_validation_failure_detail(last_error, last_collisions):
+    if last_error is not None:
+        return str(last_error)
+    return "layout model collisions remain ({}): {}".format(
+        len(last_collisions),
+        ", ".join("{}↔{}".format(c["box_a"], c["box_b"]) for c in last_collisions[:5]),
     )
-    orphan_sid = "isp-{}".format(isp)
-    orphan_link_ids = {
-        link.get("id")
-        for link in links
-        if str(link.get("selementid2", "")) == orphan_sid
-    }
-    orphan_boxes = {
-        box["id"]
-        for box in boxes
-        if str(box.get("id", "")).startswith(orphan_sid)
-    }
-    orphan_boxes.update(orphan_link_ids)
-    return [
-        collision
-        for collision in collisions
-        if collision["box_a"] in orphan_boxes or collision["box_b"] in orphan_boxes
-    ]
-
-
-def _orphan_provider_candidates(hx, hy):
-    """Deterministic nearby icon-slot candidates for orphan providers."""
-    step = _layout_icon_step()
-    above = _layout_provider_label_corridor() + LAYOUT_LABEL_GAP
-    candidates = []
-    seen = set()
-
-    def _add(cx, cy):
-        cx = int(round(cx))
-        cy = int(round(cy))
-        key = (cx, cy)
-        if key not in seen and cx >= LAYOUT_MARGIN and cy >= LAYOUT_MARGIN:
-            seen.add(key)
-            candidates.append(key)
-
-    for cx, cy in (
-        (hx + step, hy),
-        (hx - step, hy),
-        (hx, hy - step),
-        (hx + step, hy - above),
-        (hx - step, hy - above),
-        (hx, hy + step),
-        (hx + step + step, hy),
-        (hx - step - step, hy),
-        (hx, hy),
-    ):
-        _add(cx, cy)
-    for dx, dy in (
-        (-1, 0), (1, 0), (0, -1), (0, 1),
-        (-1, -1), (1, -1), (-1, 1), (1, 1),
-    ):
-        _add(hx + dx * step, hy + dy * step)
-    for mult in range(2, 12):
-        _add(hx - mult * step, hy)
-        _add(hx + mult * step, hy)
-        _add(hx, hy - mult * step)
-        _add(hx, hy + mult * step)
-    return candidates
-
-
-def _place_orphan_provider(edges, isp, anchor_hostid, host_pos, isp_pos, map_width, map_height):
-    """Place orphan provider deterministically using the offline visible-box model."""
-    hx, hy = host_pos.get(str(anchor_hostid), (LAYOUT_MARGIN, LAYOUT_MARGIN))
-    step = _layout_icon_step()
-    max_x = min(LAYOUT_MAX_WIDTH, max(map_width, LAYOUT_MAX_WIDTH)) - LAYOUT_MARGIN - SELEMENT_WIDTH
-    max_y = min(LAYOUT_MAX_HEIGHT, max(map_height, LAYOUT_MAX_HEIGHT)) - LAYOUT_MARGIN - SELEMENT_HEIGHT
-
-    candidates = list(_orphan_provider_candidates(hx, hy))
-    seen = set(candidates)
-    for radius in range(1, 16):
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                if max(abs(dx), abs(dy)) != radius:
-                    continue
-                cx = int(round(hx + dx * step))
-                cy = int(round(hy + dy * step))
-                if cx < LAYOUT_MARGIN or cy < LAYOUT_MARGIN:
-                    continue
-                key = (cx, cy)
-                if key not in seen:
-                    seen.add(key)
-                    candidates.append(key)
-
-    max_col = max(1, (max_x - LAYOUT_MARGIN) // step + 1)
-    max_row = max(1, (max_y - LAYOUT_MARGIN) // step + 1)
-    for row in range(max_row):
-        cy = LAYOUT_MARGIN + row * step
-        for col in range(max_col):
-            cx = LAYOUT_MARGIN + col * step
-            key = (cx, cy)
-            if key not in seen:
-                seen.add(key)
-                candidates.append(key)
-
-    for cx, cy in candidates:
-        if cx > max_x or cy > max_y:
-            continue
-        trial_isp = dict(isp_pos)
-        trial_isp[isp] = (cx, cy)
-        if _validate_orphan_isp(edges, isp, host_pos, trial_isp, anchor_hostid=anchor_hostid) == []:
-            return (cx, cy)
-    raise LayoutValidationError("layout: no collision-free orphan slot for {!r}".format(isp))
 
 
 def _compute_layout(edges, map_width, map_height):
     """
-    Using the edges, calculate the positions of hosts and providers.
-    Providers in descending order of number of connections; blocks from left to right; if there is not enough space, move to the next line.
-    One host at the provider: provider and host side by side with rectangle gap.
-    Return: (host_pos, isp_pos, required_width, required_height).
+    Deterministic component/tile layout: providers are central nodes inside each
+    connected component, shared routers sit between linked providers, then tiles
+    are packed into a dense grid with offline visible-box validation.
     """
-    isp_to_hosts = {}
-    for hostname, hostid, _if, isp, _in, _out, _ki, _ko, _desc in edges:
-        if not isp:
-            continue
-        if isp not in isp_to_hosts:
-            isp_to_hosts[isp] = set()
-        isp_to_hosts[isp].add((hostname, hostid))
-
-    isps_sorted = sorted(isp_to_hosts.keys(), key=lambda i: -len(isp_to_hosts[i]))
-
-    host_pos = {}
-    isp_pos = {}
-    placed_hosts = set()
-
-    block_x = LAYOUT_MARGIN
-    block_y = LAYOUT_MARGIN
-    row_max_height = 0
-    max_x = map_width - LAYOUT_MARGIN
-    max_row_width = 0 # max. width across all rows (for the final card size)
-
-    gap = LAYOUT_ELEMENT_GAP
-    orphan_isps = []
-
-    def _wrap_shelf():
-        nonlocal block_x, block_y, row_max_height, max_row_width
-        max_row_width = max(max_row_width, block_x + LAYOUT_MARGIN)
-        block_x = LAYOUT_MARGIN
-        block_y += row_max_height + gap
-        row_max_height = 0
-
-    for isp in isps_sorted:
-        hosts_in_block = sorted(isp_to_hosts[isp], key=lambda t: (t[0], t[1]))
-        # One host per provider = by the number of connections to the ISP, not by the number placed in this block
-        single_host = len(isp_to_hosts[isp]) == 1
-
-        hosts_to_place = [
-            (hostname, hostid)
-            for (hostname, hostid) in hosts_in_block
-            if hostid not in placed_hosts
-        ]
-
-        if not hosts_to_place:
-            orphan_isps.append(isp)
-            continue
-
-        num_placed = len(hosts_to_place)
-        block_width = _layout_block_width(single_host, num_placed)
-        block_height = _layout_block_height(single_host, num_placed)
-        positions = _layout_block_positions(single_host, hosts_to_place)
-
-        if block_x + block_width > max_x and block_x > LAYOUT_MARGIN:
-            _wrap_shelf()
-
-        attempts = 0
-        while not _block_layout_valid(edges, isp, block_x, block_y, positions, host_pos, isp_pos):
-            if block_x + block_width + gap + block_width <= max_x + LAYOUT_MARGIN:
-                block_x += block_width + gap
-            else:
-                _wrap_shelf()
-            attempts += 1
-            if attempts > 256:
-                raise LayoutValidationError("layout: cannot place block for {!r}".format(isp))
-
-        _apply_block_positions(block_x, block_y, isp, positions, host_pos, isp_pos)
-        for _hostname, hostid in hosts_to_place:
-            placed_hosts.add(hostid)
-
-        row_max_height = max(row_max_height, block_height)
-        max_row_width = max(max_row_width, block_x + block_width)
-        block_x += block_width + gap
-
-    for isp in orphan_isps:
-        hosts_in_block = sorted(isp_to_hosts[isp], key=lambda t: (t[0], t[1]))
-        (_, anchor_hostid) = next(iter(hosts_in_block))
-        isp_pos[isp] = _place_orphan_provider(
-            edges, isp, anchor_hostid, host_pos, isp_pos, map_width, map_height,
+    components = _layout_connected_components(edges)
+    tiles = []
+    for component in components:
+        local_host, local_isp = _layout_component_tile(component)
+        norm_host, norm_isp, tile_w, tile_h = _layout_normalize_tile(
+            local_host, local_isp, component["edges"],
         )
+        tiles.append({
+            "host_pos": norm_host,
+            "isp_pos": norm_isp,
+            "width": tile_w,
+            "height": tile_h,
+            "edges": component["edges"],
+            "providers": component["providers"],
+        })
+    tiles.sort(
+        key=lambda tile: (-tile["height"], -tile["width"], tile["providers"]),
+    )
 
+    host_pos, isp_pos = _layout_pack_component_tiles(tiles, map_width, edges)
     required_width, required_height = _layout_required_dimensions(host_pos, isp_pos, edges=edges)
     return host_pos, isp_pos, required_width, required_height
 
@@ -1086,35 +2041,37 @@ def _compute_layout(edges, map_width, map_height):
 def _compute_layout_validated(edges, map_width=MAP_WIDTH, map_height=MAP_HEIGHT):
     """
     Compute layout and validate with the offline visible-box model.
-    Grows canvas within LAYOUT_MAX_* bounds; raises LayoutValidationError on failure.
+    The component packer is deterministic, so one validated pass is sufficient.
+    Re-running the complete packer for every width only repeats the same expensive
+    topology search and can make an update appear hung.
     """
-    grow_step = _layout_icon_step()
-    width = map_width
-    height = map_height
-    last_collisions = []
-    while width <= LAYOUT_MAX_WIDTH and height <= LAYOUT_MAX_HEIGHT:
-        host_pos, isp_pos, required_width, required_height = _compute_layout(edges, width, height)
-        collisions = _validate_edges_layout(edges, host_pos, isp_pos)
-        if not collisions:
-            return (
-                host_pos,
-                isp_pos,
-                max(width, required_width),
-                max(height, required_height),
-            )
-        last_collisions = collisions
-        next_width = max(width + grow_step, required_width, map_width)
-        next_height = max(height + grow_step, required_height, map_height)
-        if next_width == width and next_height == height:
-            break
-        width = min(next_width, LAYOUT_MAX_WIDTH)
-        height = min(next_height, LAYOUT_MAX_HEIGHT)
-    raise LayoutValidationError(
-        "layout model collisions remain ({}): {}".format(
-            len(last_collisions),
-            ", ".join("{}↔{}".format(c["box_a"], c["box_b"]) for c in last_collisions[:5]),
+    try:
+        host_pos, isp_pos, required_width, required_height = _compute_layout(
+            edges, map_width, map_height,
         )
-    )
+    except LayoutValidationError:
+        raise
+    collisions = _validate_edges_layout(edges, host_pos, isp_pos, require_all=True)
+    if collisions:
+        raise LayoutValidationError(
+            "layout validation failed ({}): {}".format(
+                len(collisions),
+                _layout_validation_failure_detail(None, collisions),
+            )
+        )
+    final_width = required_width
+    final_height = required_height
+    if final_width > LAYOUT_MAX_WIDTH or final_height > LAYOUT_MAX_HEIGHT:
+        raise LayoutValidationError(
+            "layout exceeds maximum size: {}x{} (max {}x{})".format(
+                final_width,
+                final_height,
+                LAYOUT_MAX_WIDTH,
+                LAYOUT_MAX_HEIGHT,
+            )
+        )
+    host_pos, isp_pos = _layout_normalize_positions(host_pos, isp_pos)
+    return host_pos, isp_pos, _layout_int(final_width), _layout_int(final_height)
 
 
 def ensure_map_exists(url, token, debug=False, width=None, height=None):
@@ -1128,8 +2085,8 @@ def ensure_map_exists(url, token, debug=False, width=None, height=None):
         return None, err
     if existing:
         return existing[0]["sysmapid"], None
-    w = width if width is not None else MAP_WIDTH
-    h = height if height is not None else MAP_HEIGHT
+    w = _layout_int(width if width is not None else MAP_WIDTH)
+    h = _layout_int(height if height is not None else MAP_HEIGHT)
     # In Zabbix 7, with permission checking enabled, the map can require userGroups (see _get_map_user_groups)
     result, err = zabbix_request(url, token, "map.create", {
         "name": MAP_NAME,
@@ -1249,9 +2206,9 @@ def update_uplinks_map(
         )
     except LayoutValidationError as exc:
         return "layout validation failed: {}".format(exc), None
-    map_width = max(MAP_WIDTH, required_width)
-    map_height = max(MAP_HEIGHT, required_height)
-    layout_collisions = _validate_edges_layout(edges, host_pos, isp_pos)
+    map_width = _layout_int(required_width)
+    map_height = _layout_int(required_height)
+    layout_collisions = _validate_edges_layout(edges, host_pos, isp_pos, require_all=True)
     if layout_collisions:
         return "layout validation failed: {} collision(s) before map update".format(
             len(layout_collisions),
@@ -1328,7 +2285,12 @@ def update_uplinks_map(
             eid = int(hostid)
         except (TypeError, ValueError):
             eid = hostid
-        x, y = host_pos.get(str(hostid), (LAYOUT_MARGIN, LAYOUT_MARGIN))
+        pos = host_pos.get(str(hostid))
+        if pos is None:
+            return "layout validation failed: missing position for host {!r} (hostid {})".format(
+                hostname, hostid,
+            ), None
+        x, y = pos
         new_selements.append({
             "elementtype": ELEMENT_TYPE_HOST,
             "elementid": eid,
@@ -1344,7 +2306,12 @@ def update_uplinks_map(
     for isp in unique_isps:
         if (ELEMENT_TYPE_IMAGE, isp) in old_by_image_label:
             continue
-        x, y = isp_pos.get(isp, (map_width - 250, LAYOUT_MARGIN))
+        pos = isp_pos.get(isp)
+        if pos is None:
+            return "layout validation failed: missing position for provider {!r}".format(
+                isp,
+            ), None
+        x, y = pos
         new_selements.append({
             "elementtype": ELEMENT_TYPE_IMAGE,
             "elementid": 0,
@@ -1440,17 +2407,19 @@ def update_uplinks_map(
     hostids_for_links = sorted(set(str(e[1]) for e in edges if e[1] is not None))
     trigger_ids_by_link = get_link_commit_triggers(url, token, hostids_for_links, debug=debug)
 
+    missing_selements = _missing_edge_selements(edges, host_to_selement, isp_to_selement)
+    if missing_selements:
+        return "map links: missing selements for {} edge(s): {}".format(
+            len(missing_selements),
+            _format_missing_edge_selements(missing_selements),
+        ), sysmapid
+
     new_links = []
-    our_host_sids = set()
+    our_link_pairs = set()
     for hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out, _desc in edges:
-        sid1 = host_to_selement.get(str(hostid))
-        sid2 = isp_to_selement.get(isp) if isp else None
-        if not sid1 or not sid2:
-            if debug or (not new_links and not our_host_sids):
-                print("DEBUG link skip: hostid={!r} isp={!r} sid1={} sid2={} (host_ids on the map: {!r}, isp labels: {!r})".format(
-                    hostid, isp, sid1, sid2, list(host_to_selement.keys())[:10], list(isp_to_selement.keys())[:10]), file=sys.stderr)
-            continue
-        our_host_sids.add(sid1)
+        sid1 = host_to_selement[str(hostid)]
+        sid2 = isp_to_selement[isp]
+        our_link_pairs.add(frozenset((str(sid1), str(sid2))))
         # New link: do not pass linkid (read-only in the API; linkid:0 gives Wrong fields for map link).
         link = {
             "selementid1": _api_map_id(sid1),
@@ -1512,12 +2481,16 @@ def update_uplinks_map(
             }
         return entry
 
-    # Existing links: only those that are not from our hosts; replace deleted duplicates with the canonical selementid
-    our_host_sids_str = {str(s) for s in our_host_sids}
+    # Existing links: keep unrelated links, but replace every current edge
+    # regardless of which endpoint Zabbix returned as selementid1.
     links_merged = []
     for l in links_existing:
         s1 = str(l.get("selementid1", ""))
-        if s1 in our_host_sids_str:
+        s2 = str(l.get("selementid2", ""))
+        if frozenset((
+            selementid_to_canonical.get(s1, s1),
+            selementid_to_canonical.get(s2, s2),
+        )) in our_link_pairs:
             continue
         links_merged.append(_link_entry_from_existing(l))
     links_merged.extend(new_links)
