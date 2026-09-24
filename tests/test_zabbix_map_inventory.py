@@ -5,7 +5,8 @@ from pathlib import Path
 from tests.mocks.map_state import MapStateTracker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from uplinks.netbox.inventory import expand_provider_map_for_zabbix
-from zabbix_map import MAP_NAME, load_devices_json, update_uplinks_map
+from uplinks.data import load_devices_json
+from zabbix_map import MAP_NAME, update_uplinks_map
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 

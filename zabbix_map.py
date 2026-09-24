@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build or update a Zabbix map for uplinks (hosts, providers, links) based on dry-ssh.json and Zabbix API."""
+"""Build or update a Zabbix map for uplinks (hosts, providers, links) from NetBox inventory and Zabbix API."""
 
 import argparse
 import json
@@ -9,15 +9,7 @@ import re
 import sys
 
 from env_urls import load_env_file_if_present
-from uplinks.data import (
-    DEFAULT_INPUT,
-    DESCRIPTION_MAP_FILE,
-    GENERATE_DESCRIPTION_MAP_REQUIRES_LEGACY_MSG,
-    MAP_LEGACY_UTILITY_REQUIRES_LEGACY_MSG,
-    load_description_map,
-    load_devices_json,
-    resolve_uplink_cli_input,
-)
+from uplinks.data import resolve_uplink_cli_input
 from uplinks.netbox.inventory import (
     arm_netbox_incomplete_guard,
     is_uplink_iface,
@@ -52,7 +44,6 @@ from uplinks_config import (
     MAP_NAME,
     TRIGGER_DESC_90_SUFFIX,
     TRIGGER_DESC_100_SUFFIX,
-    TRIGGER_DESC_SEARCH,
     UPLINKS_AGGREGATE_HOST_PREFIX,
 )
 
@@ -2530,22 +2521,10 @@ def main():
         description="Data for Zabbix map. Default: hostname, interface, description, ISP."
     )
     parser.add_argument(
-        "-f", "--file",
-        default=None,
-        metavar="FILE",
-        help="Legacy JSON with devices (dry-ssh.json)",
-    )
-    parser.add_argument(
         "--inventory-file",
         default=None,
         metavar="FILE",
         help="Scoped inventory JSON from netbox_uplinks_inventory.py --json",
-    )
-    parser.add_argument(
-        "-m", "--description-map",
-        default=DESCRIPTION_MAP_FILE,
-        metavar="FILE",
-        help="Map file description -> name (default {})".format(DESCRIPTION_MAP_FILE),
     )
     parser.add_argument(
         "--zabbix",
@@ -2588,70 +2567,14 @@ def main():
         help="When --update-map, do not remove hosts/providers from the map that are not in the current JSON (old behavior)",
     )
     parser.add_argument(
-        "--legacy-dry-ssh",
-        action="store_true",
-        help="Use legacy dry-ssh.json input (-f/--file) instead of --inventory-file",
-    )
-    parser.add_argument(
-        "--legacy-provider-filter",
-        action="store_true",
-        help="Use description-based uplink filter instead of NetBox circuit scope (legacy)",
-    )
-    parser.add_argument(
         "--export-map",
         metavar="SYSMAPID",
         help="Output JSON maps from the API (sysmapid) for comparison with a manual map; ZABBIX_URL and ZABBIX_TOKEN are needed",
     )
-    parser.add_argument(
-        "--generate-description-map",
-        action="store_true",
-        help="Collect all descriptions from the devices file and output the JSON template (description -> description). "
-             "Save to description_to_name.json and edit: reduce options to one name (eg Beeline 5, Uplink: Beeline 5 -> Beeline)",
-    )
     args = parser.parse_args()
 
-    # Legacy utility: build description_to_name template from explicit dry-ssh.json
-    if args.generate_description_map:
-        if not args.legacy_dry_ssh or not args.file:
-            print(GENERATE_DESCRIPTION_MAP_REQUIRES_LEGACY_MSG, file=sys.stderr)
-            sys.exit(1)
-        input_mode, input_path, input_err = resolve_uplink_cli_input(
-            inventory_file=args.inventory_file,
-            dry_ssh_file=args.file,
-            legacy_dry_ssh=args.legacy_dry_ssh,
-        )
-        if input_err:
-            print(input_err, file=sys.stderr)
-            sys.exit(1)
-        if input_mode != "legacy_dry_ssh":
-            print(GENERATE_DESCRIPTION_MAP_REQUIRES_LEGACY_MSG, file=sys.stderr)
-            sys.exit(1)
-        data, err = load_devices_json(input_path)
-        if err:
-            print(err, file=sys.stderr)
-            sys.exit(1)
-        descriptions = set()
-        for host_ifaces in data.get("devices", {}).values():
-            for iface in host_ifaces:
-                d = (iface.get("description") or "").strip()
-                if d:
-                    descriptions.add(d)
-        existing = {}
-        if "-m" in sys.argv or "--description-map" in sys.argv:
-            existing = load_description_map(args.description_map)
-        # We save the existing mappings, new description -> as is (then edit)
-        out = dict(existing)
-        for d in sorted(descriptions):
-            if d not in out:
-                out[d] = d
-        print(json.dumps(out, indent=2, ensure_ascii=False))
-        sys.exit(0)
-
-    # Legacy utility: export map JSON from Zabbix API only
+    # Standalone utility: export map JSON from Zabbix API only
     if args.export_map:
-        if not args.legacy_dry_ssh:
-            print(MAP_LEGACY_UTILITY_REQUIRES_LEGACY_MSG, file=sys.stderr)
-            sys.exit(1)
         url, token = _get_zabbix_url_token()
         if not url:
             print("For --export-map, set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
@@ -2670,9 +2593,6 @@ def main():
 
     # Legacy utility: create an empty map shell without inventory data
     if args.create_map and not args.update_map and not args.zabbix and not args.print_table:
-        if not args.legacy_dry_ssh:
-            print(MAP_LEGACY_UTILITY_REQUIRES_LEGACY_MSG, file=sys.stderr)
-            sys.exit(1)
         url, token = _get_zabbix_url_token()
         if not url:
             print("Set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
@@ -2686,8 +2606,6 @@ def main():
 
     input_mode, input_path, input_err = resolve_uplink_cli_input(
         inventory_file=args.inventory_file,
-        dry_ssh_file=args.file,
-        legacy_dry_ssh=args.legacy_dry_ssh,
     )
     if input_err:
         print(input_err, file=sys.stderr)
@@ -2708,13 +2626,6 @@ def main():
         if not devices:
             print("No devices in scoped inventory", file=sys.stderr)
             sys.exit(1)
-    else:
-        desc_to_name = load_description_map(args.description_map)
-        data, err = load_devices_json(input_path)
-        if err:
-            print(err, file=sys.stderr)
-            sys.exit(1)
-        devices = data["devices"]
     if args.host:
         if args.host not in devices:
             print("Host {!r} not found in devices. Available: {}".format(
@@ -2727,20 +2638,19 @@ def main():
 
     use_zabbix = args.zabbix or args.create_map or args.update_map or default_create_map
     device_iface_to_provider = {}
-    inventory_scoped = not args.legacy_provider_filter
+    inventory_scoped = True
     inventory_read_error = False
-    if not args.legacy_provider_filter:
-        if inv_ctx is None and (use_zabbix or args.print_table):
-            inv_ctx = load_uplink_provider_context(
-                devices,
-                debug=args.debug,
-                inventory_report=inventory_report,
-            )
-        if inv_ctx is not None:
-            device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
-            inventory_read_error = bool(inv_ctx.get("read_error"))
-            if inventory_read_error:
-                arm_netbox_incomplete_guard(inv_ctx.get("stats"))
+    if inv_ctx is None and (use_zabbix or args.print_table):
+        inv_ctx = load_uplink_provider_context(
+            devices,
+            debug=args.debug,
+            inventory_report=inventory_report,
+        )
+    if inv_ctx is not None:
+        device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
+        inventory_read_error = bool(inv_ctx.get("read_error"))
+        if inventory_read_error:
+            arm_netbox_incomplete_guard(inv_ctx.get("stats"))
 
     items_by_host_iface = {}
     if use_zabbix:
@@ -2749,7 +2659,7 @@ def main():
             print("For --zabbix, --create-map and --update-map set ZABBIX_URL and ZABBIX_TOKEN", file=sys.stderr)
             sys.exit(1)
         hostnames = set(devices.keys())
-        cache_base = args.inventory_file or args.file
+        cache_base = args.inventory_file
         cache_path = os.path.join(
             os.path.dirname(os.path.abspath(cache_base)) if cache_base else ".",
             ZABBIX_CACHE_FILE,

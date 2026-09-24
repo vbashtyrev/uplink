@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from tests.mocks.netbox_api import build_netbox_for_commit_rates
+from tests.mocks.inventory_scope import with_provider_metadata, write_inventory_report
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -13,6 +14,25 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 def test_main_burst_triggers_partial_failures(monkeypatch, zabbix_env, netbox_env, tmp_path, capsys):
     import zabbix_sync_commit_rate as mod
 
+    inv = write_inventory_report(
+        tmp_path,
+        with_provider_metadata(
+            {
+                "complete": [
+                    {
+                        "device": "ALA-KZT-7280TR-1",
+                        "interface": "Ethernet51/1",
+                        "provider": "Cogent",
+                        "commit_rate_kbps": 10_000_000,
+                        "billing_model": "Burst",
+                        "circuit_id": "CKT-1",
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "providers": 1, "providers_in_scope": 1},
+            }
+        ),
+    )
     cr = tmp_path / "commit_rates.json"
     cr.write_text(
         json.dumps(
@@ -85,8 +105,8 @@ def test_main_burst_triggers_partial_failures(monkeypatch, zabbix_env, netbox_en
             "zabbix_sync_commit_rate.py",
             "-d",
             str(FIXTURES / "dry_ssh_minimal.json"),
-            "-f",
-            str(cr),
+            "--inventory-file",
+            str(inv),
             "--create-link-triggers",
             "--no-util-triggers",
         ],

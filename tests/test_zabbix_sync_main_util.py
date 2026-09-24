@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from tests.mocks.netbox_api import build_netbox_for_commit_rates
+from tests.mocks.inventory_scope import write_dry_ssh_minimal_inventory
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -13,6 +14,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 def test_main_sync_util_triggers(monkeypatch, zabbix_env, netbox_env, tmp_path, capsys):
     import zabbix_sync_commit_rate as mod
 
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
     cr = tmp_path / "commit_rates.json"
     cr.write_text(
         json.dumps(
@@ -62,8 +64,8 @@ def test_main_sync_util_triggers(monkeypatch, zabbix_env, netbox_env, tmp_path, 
             "zabbix_sync_commit_rate.py",
             "-d",
             str(FIXTURES / "dry_ssh_minimal.json"),
-            "-f",
-            str(cr),
+            "--inventory-file",
+            str(inv),
         ],
     )
     mod.main()

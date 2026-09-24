@@ -4,7 +4,11 @@ from uplinks.netbox.inventory import (
     device_iface_provider_map_from_inventory,
     expand_provider_map_for_zabbix,
     iface_has_inventory_entry,
+    inventory_has_provider_metadata_snapshot,
+    inventory_provider_metadata_complete,
     is_uplink_iface,
+    provider_limits_gbps_from_inventory,
+    provider_slo_percent_from_inventory,
     resolve_provider_name_for_iface,
 )
 
@@ -123,6 +127,28 @@ def test_expand_inventory_member_et003_to_ae30():
     expanded = expand_provider_map_for_zabbix(inventory_map, dry_ssh)
     assert expanded[("MSK-M9-MX204-2", "ae3.0")] == "Ertelecom"
     assert expanded[("MSK-M9-MX204-2", "et-0/0/3")] == "Ertelecom"
+
+
+def test_provider_metadata_snapshot_helpers():
+    report = {
+        "provider_slo_percent": {"Cogent": 99.9},
+        "provider_limits_gbps": {"Cogent": 10},
+        "provider_slo_read": "ok",
+        "provider_limits_read": "ok",
+    }
+    assert inventory_provider_metadata_complete(report)
+    assert inventory_has_provider_metadata_snapshot(report)
+    assert provider_slo_percent_from_inventory(report)["Cogent"] == 99.9
+    assert provider_limits_gbps_from_inventory(report)["Cogent"] == 10
+    assert inventory_has_provider_metadata_snapshot({"complete": []}) is False
+    assert inventory_provider_metadata_complete(
+        {
+            "provider_slo_percent": {},
+            "provider_limits_gbps": {},
+            "provider_slo_read": "error",
+            "provider_limits_read": "ok",
+        }
+    ) is False
 
 
 def test_expand_inventory_mixed_case_member_aggregate_physical_join():

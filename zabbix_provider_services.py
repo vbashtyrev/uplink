@@ -20,10 +20,14 @@ from uplinks.netbox.inventory import (
     collect_provider_limits_gbps,
     collect_provider_slo_percent,
     collect_uplink_inventory,
+    inventory_provider_metadata_complete,
     inventory_read_failed,
+    load_inventory_report,
     netbox_border_tag,
     netbox_client_from_env,
     project_circuit_scope,
+    provider_limits_gbps_from_inventory,
+    provider_slo_percent_from_inventory,
     providers_from_complete_inventory,
 )
 from uplinks_config import PROJECT_PROVIDER_SLO_PERCENT, SLA_EFFECTIVE_DATE_UTC
@@ -31,7 +35,6 @@ from uplinks_config import PROJECT_PROVIDER_SLO_PERCENT, SLA_EFFECTIVE_DATE_UTC
 load_env_file_if_present()
 
 
-DEFAULT_COMMIT_RATES = "commit_rates.json"
 PROVIDER_ROLE = "provider"
 BURST_CIRCUIT_ROLE = "burst-circuit"
 _NETBOX_AUTH_MESSAGE = (
@@ -40,117 +43,62 @@ _NETBOX_AUTH_MESSAGE = (
 )
 
 
-def _load_commit_rates(path):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return {}, None
-    except json.JSONDecodeError as e:
-        return None, "invalid JSON in {}: {}".format(path, e)
-    if not isinstance(data, dict):
-        return None, "unexpected JSON root in {}".format(path)
-    return data, None
-
-
-def _get_providers_from_limits(commit_rates):
-    limits = commit_rates.get("_provider_limits")
-    if not isinstance(limits, dict):
-        return []
-    providers = []
-    for name, val in limits.items():
-        if not name or val is None:
-            continue
-        providers.append(str(name).strip())
-    return sorted(set(p for p in providers if p))
-
-
-def _iter_burst_links(commit_rates):
-    """Yield (device, iface, provider, circuit_id) for billing_model Burst."""
-    for dev_name, ifaces in (commit_rates or {}).items():
-        if not isinstance(dev_name, str) or dev_name.startswith("_"):
-            continue
-        if not isinstance(ifaces, dict):
-            continue
-        for iface_name, entry in ifaces.items():
-            if not isinstance(entry, dict):
-                continue
-            if (entry.get("billing_model") or "").strip().lower() != "burst":
-                continue
-            cid = (entry.get("circuit_id") or "").strip()
-            prov = (entry.get("provider") or "").strip()
-            if not cid or not prov:
-                continue
-            yield dev_name, iface_name, prov, cid
-
-
-def _burst_circuits_unique(commit_rates):
-    """Unique circuit_id -> provider (first encountered)."""
-    out = {}
-    for _dev, _iface, prov, cid in _iter_burst_links(commit_rates):
-        if cid not in out:
-            out[cid] = prov
-    return sorted(out.items(), key=lambda x: x[0])
-
-
-def _get_global_provider_sla(commit_rates):
-    """Return global target SLA (float) from commit_rates['_provider_sla'] or None."""
-    val = commit_rates.get("_provider_sla")
-    if isinstance(val, (int, float)):
-        try:
-            return float(val)
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _load_netbox_services_context(debug=False):
+def _load_netbox_services_context(debug=False, inventory_report=None):
     """
     Read-only NetBox context for provider/Burst services.
     Return dict with report, providers, burst_circuits, provider_slo_percent,
     provider_limits_gbps, stats, read_error; or None when NetBox is unavailable.
     """
-    nb = netbox_client_from_env(debug=debug)
-    if nb is None:
-        return None
+    if inventory_report is not None:
+        report = inventory_report
+        stats = dict(report.get("stats") or {})
+        read_error = inventory_read_failed(report)
+        provider_slo_percent = provider_slo_percent_from_inventory(report)
+        provider_limits_gbps = provider_limits_gbps_from_inventory(report)
+        if not inventory_provider_metadata_complete(report):
+            read_error = True
+    else:
+        nb = netbox_client_from_env(debug=debug)
+        if nb is None:
+            return None
 
-    scope = project_circuit_scope()
-    tag = netbox_border_tag()
-    report = collect_uplink_inventory(
-        nb, tag=tag, debug=debug, active_only=True, circuit_scope=scope
-    )
-    stats = report.get("stats") or {}
-    error = stats.get("error")
-    read_error = inventory_read_failed(report)
-    if error == ERROR_AUTH_DENIED:
-        if debug:
-            print("collect_uplink_inventory: {}".format(error), file=sys.stderr)
-    elif error == ERROR_PROVIDERS_UNAVAILABLE:
-        if debug:
-            print(
-                "NetBox: providers unavailable; scoped inventory incomplete",
-                file=sys.stderr,
-            )
-    elif error == ERROR_PARTIAL_READ:
-        if debug:
-            print(
-                "NetBox: partial inventory read ({} error(s))".format(
-                    stats.get("read_errors", 0)
-                ),
-                file=sys.stderr,
-            )
+        scope = project_circuit_scope()
+        tag = netbox_border_tag()
+        report = collect_uplink_inventory(
+            nb, tag=tag, debug=debug, active_only=True, circuit_scope=scope
+        )
+        stats = report.get("stats") or {}
+        error = stats.get("error")
+        read_error = inventory_read_failed(report)
+        if error == ERROR_AUTH_DENIED:
+            if debug:
+                print("collect_uplink_inventory: {}".format(error), file=sys.stderr)
+        elif error == ERROR_PROVIDERS_UNAVAILABLE:
+            if debug:
+                print(
+                    "NetBox: providers unavailable; scoped inventory incomplete",
+                    file=sys.stderr,
+                )
+        elif error == ERROR_PARTIAL_READ:
+            if debug:
+                print(
+                    "NetBox: partial inventory read ({} error(s))".format(
+                        stats.get("read_errors", 0)
+                    ),
+                    file=sys.stderr,
+                )
 
-    provider_slo_percent, slo_error = collect_provider_slo_percent(nb, debug=debug)
-    if slo_error:
-        read_error = True
-        if debug:
-            print("collect_provider_slo_percent: {}".format(slo_error), file=sys.stderr)
+        provider_slo_percent, slo_error = collect_provider_slo_percent(nb, debug=debug)
+        if slo_error:
+            read_error = True
+            if debug:
+                print("collect_provider_slo_percent: {}".format(slo_error), file=sys.stderr)
 
-    provider_limits_gbps, limits_error = collect_provider_limits_gbps(nb, debug=debug)
-    if limits_error:
-        read_error = True
-        if debug:
-            print("collect_provider_limits_gbps: {}".format(limits_error), file=sys.stderr)
+        provider_limits_gbps, limits_error = collect_provider_limits_gbps(nb, debug=debug)
+        if limits_error:
+            read_error = True
+            if debug:
+                print("collect_provider_limits_gbps: {}".format(limits_error), file=sys.stderr)
 
     return {
         "report": report,
@@ -163,65 +111,23 @@ def _load_netbox_services_context(debug=False):
     }
 
 
-def _resolve_providers(
-    netbox_ctx, commit_rates, legacy_commit_rates_fallback=False, debug=False
-):
-    """Provider names: NetBox inventory first; commit_rates only with legacy flag."""
-    commit_rates = commit_rates or {}
+def _resolve_providers(netbox_ctx, debug=False):
+    """Provider names from NetBox inventory snapshot."""
     providers = set()
-    netbox_available = bool(netbox_ctx)
-    if netbox_available:
+    if netbox_ctx:
         providers = set(netbox_ctx.get("providers") or [])
         if providers and debug:
             print(
                 "Providers from NetBox inventory: {}".format(", ".join(sorted(providers))),
                 file=sys.stderr,
             )
-
-    if not legacy_commit_rates_fallback:
-        return sorted(providers)
-
-    json_providers = _get_providers_from_limits(commit_rates)
-    added = []
-    for provider in json_providers:
-        if provider not in providers:
-            providers.add(provider)
-            added.append(provider)
-
-    if added:
-        if netbox_available:
-            for provider in added:
-                print(
-                    "Warning: provider {!r} not in NetBox inventory; "
-                    "using commit_rates.json _provider_limits (legacy fallback)".format(
-                        provider
-                    ),
-                    file=sys.stderr,
-                )
-        else:
-            print(
-                "Warning: no providers in NetBox inventory; "
-                "using commit_rates.json _provider_limits (legacy fallback)",
-                file=sys.stderr,
-            )
-        if debug:
-            print(
-                "Legacy fallback providers from _provider_limits: {}".format(
-                    ", ".join(added)
-                ),
-                file=sys.stderr,
-            )
     return sorted(providers)
 
 
-def _resolve_burst_circuits(
-    netbox_ctx, commit_rates, legacy_commit_rates_fallback=False, debug=False
-):
-    """Unique Burst circuits: NetBox inventory first; commit_rates only with legacy flag."""
-    commit_rates = commit_rates or {}
+def _resolve_burst_circuits(netbox_ctx, debug=False):
+    """Unique Burst circuits from NetBox inventory snapshot."""
     merged = {}
-    netbox_available = bool(netbox_ctx)
-    if netbox_available:
+    if netbox_ctx:
         for circuit_id, provider in netbox_ctx.get("burst_circuits") or []:
             merged[circuit_id] = provider
         if merged and debug:
@@ -229,72 +135,16 @@ def _resolve_burst_circuits(
                 "Burst circuits from NetBox inventory: {}".format(len(merged)),
                 file=sys.stderr,
             )
-
-    if not legacy_commit_rates_fallback:
-        return sorted(merged.items(), key=lambda x: x[0])
-
-    json_pairs = dict(_burst_circuits_unique(commit_rates))
-    added = []
-    for circuit_id, provider in json_pairs.items():
-        if circuit_id not in merged:
-            merged[circuit_id] = provider
-            added.append(circuit_id)
-
-    if added:
-        if netbox_available:
-            for circuit_id in added:
-                print(
-                    "Warning: Burst circuit {!r} not in NetBox inventory; "
-                    "using commit_rates.json billing_model (legacy fallback)".format(
-                        circuit_id
-                    ),
-                    file=sys.stderr,
-                )
-        else:
-            print(
-                "Warning: no Burst billing_model in NetBox inventory; "
-                "using commit_rates.json billing_model (legacy fallback)",
-                file=sys.stderr,
-            )
-        if debug:
-            print(
-                "Burst circuits from commit_rates.json (legacy fallback): {}".format(
-                    len(added)
-                ),
-                file=sys.stderr,
-            )
     return sorted(merged.items(), key=lambda x: x[0])
 
 
-def _resolve_provider_slo(
-    provider,
-    netbox_ctx,
-    project_slo=None,
-    legacy_global_slo=None,
-    legacy_commit_rates_fallback=False,
-    debug=False,
-):
-    """Per-provider slo_percent from NetBox, else project default, else legacy JSON."""
+def _resolve_provider_slo(provider, netbox_ctx, project_slo=None, debug=False):
+    """Per-provider slo_percent from inventory snapshot, else project default."""
     netbox_slo = (netbox_ctx or {}).get("provider_slo_percent") or {}
     if provider in netbox_slo:
         return netbox_slo[provider]
     if project_slo is not None:
         return project_slo
-    if legacy_commit_rates_fallback and legacy_global_slo is not None:
-        if netbox_ctx is not None and provider in (netbox_ctx.get("providers") or set()):
-            print(
-                "Warning: provider {!r} has no slo_percent in NetBox; "
-                "using commit_rates.json _provider_sla (legacy fallback)".format(provider),
-                file=sys.stderr,
-            )
-            if debug:
-                print(
-                    "Legacy fallback SLA for {} from _provider_sla: {:.4f}%".format(
-                        provider, legacy_global_slo
-                    ),
-                    file=sys.stderr,
-                )
-        return legacy_global_slo
     return None
 
 
@@ -598,20 +448,10 @@ def main():
         ),
     )
     parser.add_argument(
-        "-f",
-        "--commit-rates",
-        default=DEFAULT_COMMIT_RATES,
-        help=(
-            "Path to commit_rates.json. Read only with --legacy-commit-rates-fallback."
-        ),
-    )
-    parser.add_argument(
-        "--legacy-commit-rates-fallback",
-        action="store_true",
-        help=(
-            "Explicitly allow transition fallback to commit_rates.json for providers, "
-            "Burst circuits, and _provider_sla."
-        ),
+        "--inventory-file",
+        default=None,
+        metavar="FILE",
+        help="Scoped inventory JSON from netbox_uplinks_inventory.py --json",
     )
     parser.add_argument(
         "--parent-service",
@@ -625,15 +465,16 @@ def main():
     )
     args = parser.parse_args()
 
-    commit_rates = {}
-    legacy_global_slo = None
-    if args.legacy_commit_rates_fallback:
-        commit_rates, err = _load_commit_rates(args.commit_rates)
-        if err:
-            print(err, file=sys.stderr)
+    inventory_report = None
+    if args.inventory_file:
+        try:
+            inventory_report = load_inventory_report(args.inventory_file)
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                "failed to read inventory file {}: {}".format(args.inventory_file, e),
+                file=sys.stderr,
+            )
             sys.exit(1)
-        commit_rates = commit_rates or {}
-        legacy_global_slo = _get_global_provider_sla(commit_rates)
 
     url, token = _get_zabbix_url_token()
     if not url or not token:
@@ -645,7 +486,10 @@ def main():
         print("Authorization error in Zabbix (token): {}".format(err), file=sys.stderr)
         sys.exit(1)
 
-    netbox_ctx = _load_netbox_services_context(debug=args.debug)
+    netbox_ctx = _load_netbox_services_context(
+        debug=args.debug,
+        inventory_report=inventory_report,
+    )
     read_error = bool(netbox_ctx and netbox_ctx.get("read_error"))
     if read_error:
         stats = netbox_ctx.get("stats") or {}
@@ -673,18 +517,8 @@ def main():
                 file=sys.stderr,
             )
 
-    providers = _resolve_providers(
-        netbox_ctx,
-        commit_rates,
-        legacy_commit_rates_fallback=args.legacy_commit_rates_fallback,
-        debug=args.debug,
-    )
-    burst_pairs = _resolve_burst_circuits(
-        netbox_ctx,
-        commit_rates,
-        legacy_commit_rates_fallback=args.legacy_commit_rates_fallback,
-        debug=args.debug,
-    )
+    providers = _resolve_providers(netbox_ctx, debug=args.debug)
+    burst_pairs = _resolve_burst_circuits(netbox_ctx, debug=args.debug)
     if read_error and not providers and not burst_pairs and not args.parent_service:
         sys.exit(1)
     if not providers and not burst_pairs and not args.parent_service:
@@ -741,8 +575,6 @@ def main():
                 provider,
                 netbox_ctx,
                 project_slo=project_slo,
-                legacy_global_slo=legacy_global_slo,
-                legacy_commit_rates_fallback=args.legacy_commit_rates_fallback,
                 debug=args.debug,
             )
             if slo is not None:
@@ -772,8 +604,6 @@ def main():
             b_provider,
             netbox_ctx,
             project_slo=project_slo,
-            legacy_global_slo=legacy_global_slo,
-            legacy_commit_rates_fallback=args.legacy_commit_rates_fallback,
             debug=args.debug,
         )
         if slo is not None:

@@ -3,7 +3,6 @@
 
 import json
 import os
-import re
 import sys
 
 import pynetbox
@@ -50,7 +49,6 @@ from uplinks_config import (
     TRIGGER_FUNCTION_PERIOD,
     TRIGGER_TAG_NAME,
     TRIGGER_TAG_VALUE,
-    TRIGGER_DESC_SEARCH,
     SLA_TRIGGER_FUNCTION_PERIOD,
     SLA_TRIGGER_TAG_NAME,
     SLA_TRIGGER_TAG_VALUE,
@@ -70,8 +68,6 @@ UPLINK_UTIL_MACRO_PREFIX_WARN = "{$UPLINK.UTIL.WARN"
 UPLINK_UTIL_MACRO_PREFIX_CRIT = "{$UPLINK.UTIL.CRIT"
 # NetBox commit_rate in Kbps → in bps for Zabbix
 KBPS_TO_BPS = 1000
-DEFAULT_DRY_SSH = "dry-ssh.json"
-DEFAULT_COMMIT_RATES = "commit_rates.json"
 
 
 def _macro_name_for_interface(iface_name):
@@ -188,67 +184,15 @@ def util_interfaces_by_host_from_inventory(
     return result
 
 
-def _load_commit_rates_json_file(path, strict=False):
-    """Load commit_rates.json root dict. Missing file -> {}. Invalid JSON fails when strict."""
-    if not path or not os.path.isfile(path):
-        return {}, None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except json.JSONDecodeError as e:
-        if strict:
-            return None, "invalid JSON in {}: {}".format(path, e)
-        return {}, None
-    except OSError as e:
-        if strict:
-            return None, "cannot read {}: {}".format(path, e)
-        return {}, None
-    if not isinstance(data, dict):
-        if strict:
-            return None, "unexpected JSON root in {}".format(path)
-        return {}, None
-    return data, None
-
-
-def _burst_pairs_from_commit_rates_data(data):
-    """Pairs (device, interface) with billing_model == 'Burst' from commit_rates dict."""
-    out = set()
-    for dev_name, ifaces in (data or {}).items():
-        if not isinstance(dev_name, str) or dev_name.startswith("_"):
-            continue
-        if not isinstance(ifaces, dict):
-            continue
-        for iface_name, entry in ifaces.items():
-            if not isinstance(entry, dict):
-                continue
-            model = (entry.get("billing_model") or "").strip().lower()
-            if model == "burst":
-                out.add((dev_name, (iface_name or "").strip()))
-    return out
-
-
 def load_burst_pairs(
-    path,
     inventory_report=None,
     dry_ssh_devices=None,
     netbox_relations=None,
-    legacy_commit_rates_fallback=False,
     debug=False,
 ):
     """Burst (device, interface) pairs from NetBox inventory (Zabbix iface names when dry-ssh given)."""
-    netbox_available = inventory_report is not None
-    if netbox_available and not legacy_commit_rates_fallback:
-        data = {}
-    elif netbox_available:
-        data, err = _load_commit_rates_json_file(path, strict=True)
-        if err:
-            raise ValueError(err)
-    else:
-        data, err = _load_commit_rates_json_file(path, strict=False)
-        if err:
-            raise ValueError(err)
-        return _burst_pairs_from_commit_rates_data(data)
-
+    if inventory_report is None:
+        return set()
     netbox_pairs = burst_pairs_from_inventory(inventory_report)
     if dry_ssh_devices or netbox_relations:
         netbox_pairs = expand_burst_pairs_for_zabbix(
@@ -263,81 +207,18 @@ def load_burst_pairs(
             "Burst pairs from NetBox inventory: {}".format(len(merged)),
             file=sys.stderr,
         )
-
-    if not legacy_commit_rates_fallback:
-        return merged
-
-    json_pairs = _burst_pairs_from_commit_rates_data(data)
-    added = []
-    for pair in json_pairs:
-        if pair not in merged:
-            merged.add(pair)
-            added.append(pair)
-
-    if added:
-        if netbox_pairs:
-            for dev_name, iface_name in sorted(added):
-                print(
-                    "Warning: Burst pair ({!r}, {!r}) not in NetBox inventory; "
-                    "using commit_rates.json billing_model (legacy fallback)".format(
-                        dev_name, iface_name
-                    ),
-                    file=sys.stderr,
-                )
-        else:
-            print(
-                "Warning: no Burst billing_model in NetBox inventory; "
-                "using commit_rates.json billing_model (legacy fallback)",
-                file=sys.stderr,
-            )
-        if debug:
-            print("Burst pairs from {}: {}".format(path, len(added)), file=sys.stderr)
     return merged
 
 
-def _burst_metadata_from_commit_rates_data(data):
-    """(device, interface) -> {provider, circuit_id} for billing_model=Burst."""
-    out = {}
-    for dev_name, ifaces in (data or {}).items():
-        if not isinstance(dev_name, str) or dev_name.startswith("_"):
-            continue
-        if not isinstance(ifaces, dict):
-            continue
-        for iface_name, entry in ifaces.items():
-            if not isinstance(entry, dict):
-                continue
-            if (entry.get("billing_model") or "").strip().lower() != "burst":
-                continue
-            prov = (entry.get("provider") or "").strip()
-            cid = (entry.get("circuit_id") or "").strip()
-            if not prov or not cid:
-                continue
-            out[(dev_name, (iface_name or "").strip())] = {"provider": prov, "circuit_id": cid}
-    return out
-
-
 def load_burst_metadata(
-    path,
     inventory_report=None,
     dry_ssh_devices=None,
     netbox_relations=None,
-    legacy_commit_rates_fallback=False,
     debug=False,
 ):
     """Burst link metadata from NetBox inventory (Zabbix iface names when dry-ssh given)."""
-    netbox_available = inventory_report is not None
-    if netbox_available and not legacy_commit_rates_fallback:
-        data = {}
-    elif netbox_available:
-        data, err = _load_commit_rates_json_file(path, strict=True)
-        if err:
-            raise ValueError(err)
-    else:
-        data, err = _load_commit_rates_json_file(path, strict=False)
-        if err:
-            raise ValueError(err)
-        return _burst_metadata_from_commit_rates_data(data)
-
+    if inventory_report is None:
+        return {}
     netbox_meta = burst_metadata_from_inventory(inventory_report)
     if dry_ssh_devices or netbox_relations:
         netbox_meta = expand_burst_metadata_for_zabbix(
@@ -346,42 +227,12 @@ def load_burst_metadata(
             netbox_relations=netbox_relations,
             debug=debug,
         )
-    merged = dict(netbox_meta)
-    if merged and debug:
+    if netbox_meta and debug:
         print(
-            "Burst metadata from NetBox inventory: {} pairs".format(len(merged)),
+            "Burst metadata from NetBox inventory: {} pairs".format(len(netbox_meta)),
             file=sys.stderr,
         )
-
-    if not legacy_commit_rates_fallback:
-        return merged
-
-    json_meta = _burst_metadata_from_commit_rates_data(data)
-    added = []
-    for pair, meta in json_meta.items():
-        if pair not in merged:
-            merged[pair] = meta
-            added.append(pair)
-
-    if added:
-        if netbox_meta:
-            for dev_name, iface_name in sorted(added):
-                print(
-                    "Warning: Burst metadata ({!r}, {!r}) not in NetBox inventory; "
-                    "using commit_rates.json provider/circuit_id (legacy fallback)".format(
-                        dev_name, iface_name
-                    ),
-                    file=sys.stderr,
-                )
-        else:
-            print(
-                "Warning: no Burst circuit metadata in NetBox inventory; "
-                "using commit_rates.json provider/circuit_id (legacy fallback)",
-                file=sys.stderr,
-            )
-        if debug:
-            print("Burst metadata from {}: {} pairs".format(path, len(added)), file=sys.stderr)
-    return merged
+    return dict(netbox_meta)
 
 
 def burst_link_trigger_tags_no_sla(provider, circuit_id):
@@ -867,6 +718,74 @@ TRIGGER_PRIORITY_HIGH = 4 # 100% - red link
 TRIGGER_PRIORITY_SLA_BREACH = 2 # as an aggregate SLA breach (not a red card - 100% gives it)
 
 
+def normalize_trigger_tags(tags):
+    """Sort trigger tags for stable comparison."""
+    out = []
+    for tag in tags or []:
+        if not isinstance(tag, dict):
+            continue
+        name = tag.get("tag")
+        if not name:
+            continue
+        out.append((str(name), str(tag.get("value") or "")))
+    return sorted(out)
+
+
+def expected_burst_trigger_specs(host_technical, iface_name, item_key, provider=None, circuit_id=None):
+    """Expected Burst link trigger definitions shared by sync and read-only plan."""
+    iface = (iface_name or "").strip()
+    link_tags = (
+        burst_link_trigger_tags_no_sla(provider, circuit_id)
+        if provider and circuit_id
+        else [TRIGGER_TAG_SCRIPTS]
+    )
+    sla_tags = (
+        burst_sla_breach_trigger_tags(provider, circuit_id)
+        if provider and circuit_id
+        else [TRIGGER_TAG_SCRIPTS]
+    )
+    macro_max = _macro_name_for_interface(iface_name)
+    macro_warn = _macro_name_warn_for_interface(iface_name)
+    high_desc = "Interface {}: {}".format(iface, TRIGGER_DESC_100_SUFFIX)
+    warn_desc = "Interface {}: {}".format(iface, TRIGGER_DESC_90_SUFFIX)
+    sla_desc = "Interface {}: {}".format(iface, TRIGGER_DESC_SLA_BREACH_SUFFIX)
+    high_expr = "max(/{}/{}, {})>{}".format(
+        host_technical, item_key, TRIGGER_FUNCTION_PERIOD, macro_max
+    )
+    warn_expr = "max(/{}/{}, {})>{}".format(
+        host_technical, item_key, TRIGGER_FUNCTION_PERIOD, macro_warn
+    )
+    sla_expr = "min(/{}/{},{})>{}".format(
+        host_technical, item_key, SLA_TRIGGER_FUNCTION_PERIOD, macro_max
+    )
+    return [
+        {
+            "role": "high",
+            "description": high_desc,
+            "expression": high_expr,
+            "priority": str(TRIGGER_PRIORITY_HIGH),
+            "tags": link_tags,
+            "depends_on_role": None,
+        },
+        {
+            "role": "warn",
+            "description": warn_desc,
+            "expression": warn_expr,
+            "priority": str(TRIGGER_PRIORITY_WARN),
+            "tags": link_tags,
+            "depends_on_role": "high",
+        },
+        {
+            "role": "sla",
+            "description": sla_desc,
+            "expression": sla_expr,
+            "priority": str(TRIGGER_PRIORITY_SLA_BREACH),
+            "tags": sla_tags,
+            "depends_on_role": None,
+        },
+    ]
+
+
 def _get_trigger_id_for_description_suffix(url, token, hostid, iface_name, suffix, debug=False):
     """Find triggerid on host for Interface {iface}: *suffix*."""
     prefix = "Interface {}:".format((iface_name or "").strip())
@@ -1038,6 +957,99 @@ def sync_uplink_utilization_for_host(
     return len(util_macros), triggers_ok, errors
 
 
+def _ambiguous_burst_trigger_error(stable_description):
+    return "ambiguous burst trigger description match: {}".format(stable_description)
+
+
+def _resolve_burst_trigger_match(existing, stable_description, role_suffix=None, legacy_suffixes=()):
+    """
+    Resolve one existing Burst trigger row for a stable role description.
+    Return (row, error). row is None and error set when ambiguous; both None when not found.
+    """
+    exact = [
+        row
+        for row in (existing or [])
+        if (row.get("description") or "").strip() == stable_description
+    ]
+    if len(exact) > 1:
+        return None, _ambiguous_burst_trigger_error(stable_description)
+    if len(exact) == 1:
+        return exact[0], None
+
+    legacy = []
+    for row in existing or []:
+        desc = (row.get("description") or "").strip()
+        if not desc or desc == stable_description:
+            continue
+        if role_suffix and desc.endswith(role_suffix):
+            legacy.append(row)
+            continue
+        for legacy_suffix in legacy_suffixes or ():
+            if desc.endswith(legacy_suffix):
+                legacy.append(row)
+                break
+    if len(legacy) > 1:
+        return None, _ambiguous_burst_trigger_error(stable_description)
+    if len(legacy) == 1:
+        return legacy[0], None
+    return None, None
+
+
+def _dependency_id_list_from_trigger(row):
+    """Sorted triggerid list from dependencies (duplicates preserved for comparison)."""
+    deps = (row or {}).get("dependencies") or []
+    ids = [str(d.get("triggerid")) for d in deps if d.get("triggerid")]
+    return sorted(ids)
+
+
+def _apply_dependency_update_if_needed(upd, matched, expected_dep_ids):
+    """Add dependencies to trigger.update payload when sorted ID lists differ (incl. duplicates)."""
+    expected_ids = [str(i) for i in (expected_dep_ids or []) if i]
+    expected_sorted = sorted(expected_ids)
+    actual_sorted = _dependency_id_list_from_trigger(matched)
+    if actual_sorted == expected_sorted:
+        return
+    if expected_ids:
+        upd["dependencies"] = [{"triggerid": i} for i in expected_ids]
+    else:
+        upd["dependencies"] = []
+
+
+def _resolve_high_burst_trigger_id(url, token, hostid, iface_name, debug=False):
+    """Resolve 100% burst triggerid for warn dependency. Return (triggerid, error)."""
+    iface = (iface_name or "").strip()
+    high_description = "Interface {}: {}".format(iface, TRIGGER_DESC_100_SUFFIX)
+    res_h, err_h = zabbix_request(
+        url,
+        token,
+        "trigger.get",
+        {
+            "hostids": [hostid],
+            "output": ["triggerid", "description"],
+            "search": {"description": "Interface {}:".format(iface)},
+        },
+        debug=debug,
+    )
+    if err_h:
+        return None, err_h
+    if not res_h:
+        return None, "100% burst trigger was not found for interface {}".format(iface_name)
+    high_row, high_err = _resolve_burst_trigger_match(
+        res_h,
+        high_description,
+        role_suffix=TRIGGER_DESC_100_SUFFIX,
+        legacy_suffixes=(LEGACY_TRIGGER_DESC_100_SUFFIX,),
+    )
+    if high_err:
+        return None, high_err
+    if high_row is None:
+        return None, "100% burst trigger was not found for interface {}".format(iface_name)
+    high_id = high_row.get("triggerid")
+    if not high_id:
+        return None, "100% burst trigger was not found for interface {}".format(iface_name)
+    return high_id, None
+
+
 def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_name, debug=False, link_tags=None):
     """
     Create/update a simple trigger max(Bits received, TRIGGER_FUNCTION_PERIOD) > {$UPLINK.BPS.MAX:"iface"}.
@@ -1054,36 +1066,44 @@ def ensure_simple_threshold_trigger(url, token, host_technical, hostid, iface_na
         url, token, "trigger.get",
         {
             "hostids": [hostid],
-            "output": ["triggerid", "description", "priority", "status", "expression"],
+            "output": ["triggerid", "description", "priority", "status", "expression", "dependencies"],
+            "selectDependencies": "extend",
             "search": {"description": "Interface {}:".format((iface_name or "").strip())},
         },
         debug=debug,
     )
     if err:
         return False, err
-    for t in (existing or []):
-        desc = t.get("description") or ""
-        if not (
-            desc == description
-            or desc.endswith(TRIGGER_DESC_100_SUFFIX)
-            or desc.endswith(LEGACY_TRIGGER_DESC_100_SUFFIX)
-        ):
-            continue
-        tid = t.get("triggerid")
+    matched, match_err = _resolve_burst_trigger_match(
+        existing,
+        description,
+        role_suffix=TRIGGER_DESC_100_SUFFIX,
+        legacy_suffixes=(LEGACY_TRIGGER_DESC_100_SUFFIX,),
+    )
+    if match_err:
+        return False, match_err
+    if matched is not None:
+        desc = (matched.get("description") or "").strip()
+        tid = matched.get("triggerid")
         if tid:
             upd = {}
             if desc != description:
                 upd["description"] = description
-            if (t.get("expression") or "").strip() != expression:
+            if (matched.get("expression") or "").strip() != expression:
                 upd["expression"] = expression
-            if str(t.get("priority", "0")) != str(TRIGGER_PRIORITY_HIGH):
+            if str(matched.get("priority", "0")) != str(TRIGGER_PRIORITY_HIGH):
                 upd["priority"] = TRIGGER_PRIORITY_HIGH
-            if str(t.get("status", "0")) != "0": # enable if disabled
+            if str(matched.get("status", "0")) != "0":  # enable if disabled
                 upd["status"] = "0"
             if link_tags is not None:
                 upd["tags"] = link_tags
+            _apply_dependency_update_if_needed(upd, matched, [])
             if upd:
-                zabbix_request(url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug)
+                _, upd_err = zabbix_request(
+                    url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug
+                )
+                if upd_err:
+                    return False, upd_err
         return True, None
     tags_payload = link_tags if link_tags is not None else [TRIGGER_TAG_SCRIPTS]
     create_res, create_err = zabbix_request(
@@ -1113,92 +1133,69 @@ def ensure_simple_warn_trigger(url, token, host_technical, hostid, iface_name, d
     macro_ref = _macro_name_warn_for_interface(iface_name)
     expression = "max(/{}/{}, {})>{}".format(host_technical, key, TRIGGER_FUNCTION_PERIOD, macro_ref)
     description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_90_SUFFIX)
-    high_description = "Interface {}: {}".format((iface_name or "").strip(), TRIGGER_DESC_100_SUFFIX)
-    legacy_high_description = "Interface {}: {}".format((iface_name or "").strip(), LEGACY_TRIGGER_DESC_100_SUFFIX)
     existing, err = zabbix_request(
         url, token, "trigger.get",
         {
             "hostids": [hostid],
-            "output": ["triggerid", "description", "status", "expression"],
+            "output": ["triggerid", "description", "status", "expression", "priority", "dependencies"],
+            "selectDependencies": "extend",
             "search": {"description": "Interface {}:".format((iface_name or "").strip())},
         },
         debug=debug,
     )
     if err:
         return False, err
-    for t in (existing or []):
-        desc = t.get("description") or ""
-        if not (
-            desc == description
-            or desc.endswith(TRIGGER_DESC_90_SUFFIX)
-            or desc.endswith(LEGACY_TRIGGER_DESC_90_SUFFIX)
-        ):
-            continue
-        tid = t.get("triggerid")
+    matched, match_err = _resolve_burst_trigger_match(
+        existing,
+        description,
+        role_suffix=TRIGGER_DESC_90_SUFFIX,
+        legacy_suffixes=(LEGACY_TRIGGER_DESC_90_SUFFIX,),
+    )
+    if match_err:
+        return False, match_err
+    if matched is not None:
+        desc = (matched.get("description") or "").strip()
+        tid = matched.get("triggerid")
         if tid:
             upd = {}
             if desc != description:
                 upd["description"] = description
-            if (t.get("expression") or "").strip() != expression:
+            if (matched.get("expression") or "").strip() != expression:
                 upd["expression"] = expression
-            if str(t.get("status", "0")) != "0":
+            if str(matched.get("priority", "0")) != str(TRIGGER_PRIORITY_WARN):
+                upd["priority"] = TRIGGER_PRIORITY_WARN
+            if str(matched.get("status", "0")) != "0":
                 upd["status"] = "0"
-            # Let's find a trigger 100% on the same interface and add a dependency 90% -> 100%.
-            high_id = None
-            res_h, err_h = zabbix_request(
-                url, token, "trigger.get",
-                {"hostids": [hostid], "output": ["triggerid", "description"], "search": {"description": "Interface {}:".format((iface_name or "").strip())}},
-                debug=debug,
+            high_id, high_err = _resolve_high_burst_trigger_id(
+                url, token, hostid, iface_name, debug=debug
             )
-            if not err_h and res_h:
-                for th in res_h:
-                    d = th.get("description") or ""
-                    if d == high_description or d == legacy_high_description or d.endswith(TRIGGER_DESC_100_SUFFIX) or d.endswith(LEGACY_TRIGGER_DESC_100_SUFFIX):
-                        high_id = th.get("triggerid")
-                        if high_id:
-                            break
-            if high_id:
-                upd["dependencies"] = [{"triggerid": str(high_id)}]
+            if high_err:
+                return False, high_err
+            _apply_dependency_update_if_needed(upd, matched, [high_id])
             if link_tags is not None:
                 upd["tags"] = link_tags
             if upd:
-                zabbix_request(url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug)
+                _, upd_err = zabbix_request(
+                    url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug
+                )
+                if upd_err:
+                    return False, upd_err
         return True, None
     tags_payload = link_tags if link_tags is not None else [TRIGGER_TAG_SCRIPTS]
     # For new 90% triggers, we also set a dependence on 100%, so that there are no two PROBLEMs at the same time.
-    high_id = None
-    res_h, err_h = zabbix_request(
-        url,
-        token,
-        "trigger.get",
-        {
-            "hostids": [hostid],
-            "output": ["triggerid", "description"],
-            "search": {"description": "Interface {}:".format((iface_name or "").strip())},
-        },
-        debug=debug,
+    high_id, high_err = _resolve_high_burst_trigger_id(
+        url, token, hostid, iface_name, debug=debug
     )
-    if not err_h and res_h:
-        for th in res_h:
-            d = th.get("description") or ""
-            if (
-                d == high_description
-                or d == legacy_high_description
-                or d.endswith(TRIGGER_DESC_100_SUFFIX)
-                or d.endswith(LEGACY_TRIGGER_DESC_100_SUFFIX)
-            ):
-                high_id = th.get("triggerid")
-                if high_id:
-                    break
+    if high_err:
+        return False, high_err
 
     create_payload = {
         "description": description,
         "expression": expression,
         "priority": TRIGGER_PRIORITY_WARN,
         "tags": tags_payload,
+        "dependencies": [{"triggerid": str(high_id)}],
     }
-    if high_id:
-        create_payload["dependencies"] = [{"triggerid": str(high_id)}]
 
     create_res, create_err = zabbix_request(
         url, token, "trigger.create",
@@ -1231,32 +1228,43 @@ def ensure_burst_sla_breach_trigger(url, token, host_technical, hostid, iface_na
         "trigger.get",
         {
             "hostids": [hostid],
-            "output": ["triggerid", "description", "priority", "status", "expression"],
+            "output": ["triggerid", "description", "priority", "status", "expression", "dependencies"],
+            "selectDependencies": "extend",
             "search": {"description": "Interface {}:".format((iface_name or "").strip())},
         },
         debug=debug,
     )
     if err:
         return False, err
-    for t in (existing or []):
-        desc = t.get("description") or ""
-        if not (desc == description or desc.endswith(TRIGGER_DESC_SLA_BREACH_SUFFIX)):
-            continue
-        tid = t.get("triggerid")
+    matched, match_err = _resolve_burst_trigger_match(
+        existing,
+        description,
+        role_suffix=TRIGGER_DESC_SLA_BREACH_SUFFIX,
+    )
+    if match_err:
+        return False, match_err
+    if matched is not None:
+        desc = (matched.get("description") or "").strip()
+        tid = matched.get("triggerid")
         if tid:
             upd = {}
             if desc != description:
                 upd["description"] = description
-            if (t.get("expression") or "").strip() != expression:
+            if (matched.get("expression") or "").strip() != expression:
                 upd["expression"] = expression
-            if str(t.get("priority", "0")) != str(TRIGGER_PRIORITY_SLA_BREACH):
+            if str(matched.get("priority", "0")) != str(TRIGGER_PRIORITY_SLA_BREACH):
                 upd["priority"] = TRIGGER_PRIORITY_SLA_BREACH
-            if str(t.get("status", "0")) != "0":
+            if str(matched.get("status", "0")) != "0":
                 upd["status"] = "0"
             if link_tags is not None:
                 upd["tags"] = link_tags
+            _apply_dependency_update_if_needed(upd, matched, [])
             if upd:
-                zabbix_request(url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug)
+                _, upd_err = zabbix_request(
+                    url, token, "trigger.update", {"triggerid": tid, **upd}, debug=debug
+                )
+                if upd_err:
+                    return False, upd_err
         return True, None
     tags_payload = link_tags if link_tags is not None else [TRIGGER_TAG_SCRIPTS]
     create_res, create_err = zabbix_request(
@@ -1307,11 +1315,22 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(
         description=(
-            "Sync Zabbix: {$UPLINK.BPS.*} from NetBox; {$UPLINK.UTIL.*} + utilization triggers "
-            "from dry-ssh.json (all uplinks in file)."
+            "Sync Zabbix uplink macros and triggers from NetBox inventory. "
+            "With --inventory-file: commit rates and utilization scope come from the inventory report; "
+            "{$UPLINK.UTIL.*} macros and utilization triggers follow scoped inventory entries. "
+            "Optional --dry-ssh adds physical/logical interface mapping and extra device metadata."
         ),
     )
-    parser.add_argument("-d", "--dry-ssh", default=None, metavar="FILE", help="Legacy dry-ssh.json (optional; NetBox inventory is preferred)")
+    parser.add_argument(
+        "-d",
+        "--dry-ssh",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Optional dry-ssh.json for physical/logical interface mapping and supplemental device data "
+            "(utilization scope and BPS macros still come from NetBox inventory when --inventory-file is set)"
+        ),
+    )
     parser.add_argument(
         "--inventory-file",
         default=None,
@@ -1332,15 +1351,6 @@ def main():
         "--no-util-triggers",
         action="store_true",
         help="Do not create {$UPLINK.UTIL.*} macros or utilization triggers (default: enabled from inventory)",
-    )
-    parser.add_argument(
-        "-f", "--commit-rates", default=DEFAULT_COMMIT_RATES,
-        help="Path to commit_rates.json (legacy fallback; not read unless --legacy-commit-rates-fallback)",
-    )
-    parser.add_argument(
-        "--legacy-commit-rates-fallback",
-        action="store_true",
-        help="Merge missing Burst pairs/metadata from commit_rates.json (legacy transition mode)",
     )
     parser.add_argument(
         "--delete-link-triggers",
@@ -1385,14 +1395,9 @@ def main():
             sys.exit(1)
         netbox_relations = netbox_interface_relations_from_report(inventory_report)
         if netbox_relations is None:
-            if not nb_url or not nb_token:
-                print("Set NETBOX_URL and NETBOX_TOKEN", file=sys.stderr)
-                sys.exit(1)
-            nb = pynetbox.api(nb_url, token=nb_token)
-            device_names = device_names_from_complete_inventory(inventory_report)
-            netbox_relations = collect_netbox_interface_relations(
-                nb, device_names, debug=args.debug, stats=inventory_report.get("stats")
-            )
+            from uplinks.netbox.inventory import _empty_netbox_interface_relations
+
+            netbox_relations = _empty_netbox_interface_relations()
     else:
         if not nb_url or not nb_token:
             print("Set NETBOX_URL and NETBOX_TOKEN", file=sys.stderr)
@@ -1528,11 +1533,9 @@ def main():
     try:
         burst_pairs = (
             load_burst_pairs(
-                args.commit_rates,
                 inventory_report=inventory_report,
                 dry_ssh_devices=dry_ssh_devices,
                 netbox_relations=netbox_relations,
-                legacy_commit_rates_fallback=args.legacy_commit_rates_fallback,
                 debug=args.debug,
             )
             if args.create_link_triggers
@@ -1540,11 +1543,9 @@ def main():
         )
         burst_meta = (
             load_burst_metadata(
-                args.commit_rates,
                 inventory_report=inventory_report,
                 dry_ssh_devices=dry_ssh_devices,
                 netbox_relations=netbox_relations,
-                legacy_commit_rates_fallback=args.legacy_commit_rates_fallback,
                 debug=args.debug,
             )
             if args.create_link_triggers

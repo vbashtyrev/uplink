@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from tests.mocks.netbox_api import build_netbox_for_commit_rates
+from tests.mocks.inventory_scope import write_dry_ssh_minimal_inventory
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from zabbix_sync_commit_rate import KBPS_TO_BPS
 
@@ -13,9 +14,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 def test_main_missing_host_in_zabbix(monkeypatch, zabbix_env, netbox_env, tmp_path, capsys):
     import zabbix_sync_commit_rate as mod
-
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
     nb = build_netbox_for_commit_rates(device_name="ALA-KZT-7280TR-1", device_tag="border")
     inventory_report = {
         "complete": [
@@ -63,8 +62,8 @@ def test_main_missing_host_in_zabbix(monkeypatch, zabbix_env, netbox_env, tmp_pa
             "zabbix_sync_commit_rate.py",
             "-d",
             str(FIXTURES / "dry_ssh_minimal.json"),
-            "-f",
-            str(cr),
+            "--inventory-file",
+            str(inv),
             "--no-util-triggers",
         ],
     )

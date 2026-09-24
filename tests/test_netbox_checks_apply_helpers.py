@@ -1,6 +1,6 @@
 """netbox_checks apply helpers: MAC, IP, aggregate second pass."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import netbox_checks as nc
 
@@ -42,14 +42,12 @@ def test_apply_ip_create_and_bind():
     nb = MagicMock()
     nb_iface = MagicMock()
     nb_iface.id = 10
-    nb.ipam.ip_addresses.filter.side_effect = [
-        [],  # _get_interface_ip_addresses
-        [],  # _find_ip_in_netbox for add
-        [],  # _find_ip_in_netbox_any_vrf
-    ]
-    nc._apply_ip_addresses_to_interface(
-        nb, "dev1", "Eth1", nb_iface, ["203.0.113.1/24"], vrf_id_f=None
-    )
+    nb.ipam.ip_addresses.create = MagicMock()
+    with patch.object(nc, "_get_interface_ip_addresses", return_value=([], None)):
+        with patch.object(nc, "_find_ips_in_netbox", return_value=([], None)):
+            nc._apply_ip_addresses_to_interface(
+                nb, "dev1", "Eth1", nb_iface, ["203.0.113.1/24"], vrf_id_f=None
+            )
     nb.ipam.ip_addresses.create.assert_called_once()
 
 
@@ -58,15 +56,16 @@ def test_apply_ip_rebind_existing():
     nb_iface = MagicMock()
     nb_iface.id = 10
     ip_obj = MagicMock()
+    ip_obj.address = "203.0.113.1/24"
     ip_obj.assigned_object_id = None
-    ip_obj.vrf = None
-    nb.ipam.ip_addresses.filter.side_effect = [
-        [],  # current on iface
-        [ip_obj],  # find for add
-    ]
-    nc._apply_ip_addresses_to_interface(
-        nb, "dev1", "Eth1", nb_iface, ["203.0.113.1/24"], vrf_id_f=None
-    )
+    ip_obj.assigned_object_type = None
+    ip_obj.save = MagicMock()
+    with patch.object(nc, "_get_interface_ip_addresses", return_value=([], None)):
+        with patch.object(nc, "_find_ips_in_netbox", return_value=([ip_obj], None)):
+            with patch.object(nc, "_ip_assigned_to_interface", return_value=False):
+                nc._apply_ip_addresses_to_interface(
+                    nb, "dev1", "Eth1", nb_iface, ["203.0.113.1/24"], vrf_id_f=None
+                )
     assert ip_obj.assigned_object_id == 10
     ip_obj.save.assert_called()
 

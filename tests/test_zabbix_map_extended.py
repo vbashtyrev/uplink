@@ -53,7 +53,7 @@ def test_ensure_map_exists_creates(monkeypatch, zabbix_env):
 
 
 def test_update_map_with_existing_selements(monkeypatch, zabbix_env):
-    from zabbix_map import load_devices_json
+    from uplinks.data import load_devices_json
 
     data, _ = load_devices_json(str(FIXTURES / "dry_ssh_minimal.json"))
     devices = {"ALA-KZT-7280TR-1": data["devices"]["ALA-KZT-7280TR-1"]}

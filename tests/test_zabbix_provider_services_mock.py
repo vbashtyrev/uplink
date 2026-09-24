@@ -115,19 +115,26 @@ def test_delete_legacy_sla_source(monkeypatch):
 
 
 def test_main_creates_services(tmp_path, monkeypatch):
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text(
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
         json.dumps(
             {
-                "_provider_limits": {"Cogent": 10},
-                "_provider_sla": 99.95,
-                "h1": {
-                    "Eth1": {
-                        "billing_model": "Burst",
+                "complete": [
+                    {
+                        "device": "h1",
+                        "interface": "Eth1",
                         "provider": "Cogent",
                         "circuit_id": "Cogent-ALA-1",
-                    },
-                },
+                        "billing_model": "Burst",
+                        "commit_rate_kbps": 10000,
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "providers": 1},
+                "provider_limits_gbps": {"Cogent": 10},
+                "provider_slo_percent": {"Cogent": 99.95},
+                "provider_slo_read": "ok",
+                "provider_limits_read": "ok",
             }
         ),
         encoding="utf-8",
@@ -149,11 +156,9 @@ def test_main_creates_services(tmp_path, monkeypatch):
 
     monkeypatch.setenv("ZABBIX_URL", "https://zabbix.example")
     monkeypatch.setenv("ZABBIX_TOKEN", "token")
-    monkeypatch.setattr("zabbix_provider_services.netbox_client_from_env", lambda **k: None)
-
     with patch.object(
         svc.sys,
         "argv",
-        ["zabbix_provider_services.py", "-f", str(cr), "--legacy-commit-rates-fallback"],
+        ["zabbix_provider_services.py", "--inventory-file", str(inv)],
     ):
         svc.main()

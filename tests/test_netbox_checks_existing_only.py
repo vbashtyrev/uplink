@@ -49,7 +49,7 @@ def test_existing_only_skips_interface_create(monkeypatch, netbox_env, tmp_path,
         with patch("netbox_checks.is_juniper_platform", return_value=False):
             with patch("netbox_checks.is_arista_platform", return_value=True):
                 with patch("netbox_checks.get_device_platform_name", return_value="Arista EOS"):
-                    with patch.object(nc, "_get_interface_ip_addresses", return_value=[]):
+                    with patch.object(nc, "_get_interface_ip_addresses", return_value=([], None)):
                         monkeypatch.setattr(
                             sys,
                             "argv",
@@ -83,7 +83,7 @@ def test_auto_allows_interface_create(monkeypatch, netbox_env, tmp_path, capsys)
         with patch("netbox_checks.is_juniper_platform", return_value=False):
             with patch("netbox_checks.is_arista_platform", return_value=True):
                 with patch("netbox_checks.get_device_platform_name", return_value="Arista EOS"):
-                    with patch.object(nc, "_get_interface_ip_addresses", return_value=[]):
+                    with patch.object(nc, "_get_interface_ip_addresses", return_value=([], None)):
                         monkeypatch.setattr(
                             sys,
                             "argv",
@@ -140,7 +140,7 @@ def test_existing_only_skips_mac_create(monkeypatch, netbox_env, tmp_path, capsy
         with patch("netbox_checks.is_juniper_platform", return_value=False):
             with patch("netbox_checks.is_arista_platform", return_value=True):
                 with patch("netbox_checks.get_device_platform_name", return_value="Arista EOS"):
-                    with patch.object(nc, "_get_interface_ip_addresses", return_value=[]):
+                    with patch.object(nc, "_get_interface_ip_addresses", return_value=([], None)):
                         monkeypatch.setattr(
                             sys,
                             "argv",
@@ -201,9 +201,8 @@ def test_existing_only_skips_ip_create(monkeypatch, netbox_env, tmp_path, capsys
         with patch("netbox_checks.is_juniper_platform", return_value=False):
             with patch("netbox_checks.is_arista_platform", return_value=True):
                 with patch("netbox_checks.get_device_platform_name", return_value="Arista EOS"):
-                    with patch.object(nc, "_find_ip_in_netbox", return_value=[]):
-                        with patch.object(nc, "_find_ip_in_netbox_any_vrf", return_value=[]):
-                            with patch.object(nc, "_get_interface_ip_addresses", return_value=[]):
+                    with patch.object(nc, "_find_ips_in_netbox", return_value=([], None)):
+                            with patch.object(nc, "_get_interface_ip_addresses", return_value=([], None)):
                                 monkeypatch.setattr(
                                     sys,
                                     "argv",
@@ -253,7 +252,7 @@ def test_existing_only_still_updates_existing_interface(monkeypatch, netbox_env,
         with patch("netbox_checks.is_juniper_platform", return_value=False):
             with patch("netbox_checks.is_arista_platform", return_value=True):
                 with patch("netbox_checks.get_device_platform_name", return_value="Arista EOS"):
-                    with patch.object(nc, "_get_interface_ip_addresses", return_value=[]):
+                    with patch.object(nc, "_get_interface_ip_addresses", return_value=([], None)):
                         monkeypatch.setattr(
                             sys,
                             "argv",
@@ -310,8 +309,8 @@ def test_existing_only_skips_ip_unbind_via_main(monkeypatch, netbox_env, tmp_pat
         with patch("netbox_checks.is_juniper_platform", return_value=False):
             with patch("netbox_checks.is_arista_platform", return_value=True):
                 with patch("netbox_checks.get_device_platform_name", return_value="Arista EOS"):
-                    with patch.object(nc, "_get_interface_ip_addresses", return_value=[("203.0.113.9/24", None)]):
-                        with patch.object(nc, "_find_ip_in_netbox", return_value=[existing_ip]):
+                    with patch.object(nc, "_get_interface_ip_addresses", return_value=([("203.0.113.9/24", None)], None)):
+                        with patch.object(nc, "_find_ips_in_netbox", return_value=([existing_ip], None)):
                             monkeypatch.setattr(
                                 sys,
                                 "argv",
@@ -373,7 +372,7 @@ def test_existing_only_skips_mac_rebind_via_main(monkeypatch, netbox_env, tmp_pa
         with patch("netbox_checks.is_juniper_platform", return_value=False):
             with patch("netbox_checks.is_arista_platform", return_value=True):
                 with patch("netbox_checks.get_device_platform_name", return_value="Arista EOS"):
-                    with patch.object(nc, "_get_interface_ip_addresses", return_value=[]):
+                    with patch.object(nc, "_get_interface_ip_addresses", return_value=([], None)):
                         monkeypatch.setattr(
                             sys,
                             "argv",
@@ -457,7 +456,7 @@ def test_existing_only_skips_lag_parent_updates(monkeypatch, netbox_env, tmp_pat
         with patch("netbox_checks.is_juniper_platform", return_value=True):
             with patch("netbox_checks.is_arista_platform", return_value=False):
                 with patch("netbox_checks.get_device_platform_name", return_value="Juniper JunOS"):
-                    with patch.object(nc, "_get_interface_ip_addresses", return_value=[]):
+                    with patch.object(nc, "_get_interface_ip_addresses", return_value=([], None)):
                         monkeypatch.setattr(
                             sys,
                             "argv",

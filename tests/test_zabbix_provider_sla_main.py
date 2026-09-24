@@ -23,7 +23,6 @@ def test_main_with_commit_rates(monkeypatch, zabbix_env, tmp_path, capsys):
         commit_rate_kbps=10_000_000,
         tag_device=False,
     )
-    cr = tmp_path / "commit_rates.json"
     mocker = build_standard_zabbix_mocker().on(
         "trigger.get",
         lambda p: [
@@ -39,7 +38,7 @@ def test_main_with_commit_rates(monkeypatch, zabbix_env, tmp_path, capsys):
         "zabbix_provider_services.netbox_border_tag", return_value=None
     ):
         monkeypatch.setattr(
-            sys, "argv", ["zabbix_provider_sla.py", "-f", str(cr), "--days", "1"]
+            sys, "argv", ["zabbix_provider_sla.py", "--days", "1"]
         )
         mod.main()
     out = capsys.readouterr().out

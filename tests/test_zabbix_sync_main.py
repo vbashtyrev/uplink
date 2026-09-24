@@ -7,14 +7,16 @@ from unittest.mock import patch
 import pytest
 
 from tests.mocks.netbox_api import build_netbox_for_commit_rates
+from tests.mocks.inventory_scope import write_dry_ssh_minimal_inventory
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-def test_main_dry_run_sync(monkeypatch, zabbix_env, netbox_env, capsys):
+def test_main_dry_run_sync(monkeypatch, zabbix_env, netbox_env, tmp_path, capsys):
     import zabbix_sync_commit_rate as mod
 
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
     nb = build_netbox_for_commit_rates(
         device_name="ALA-KZT-7280TR-1",
         iface_name="Ethernet51/1",
@@ -44,8 +46,8 @@ def test_main_dry_run_sync(monkeypatch, zabbix_env, netbox_env, capsys):
             "--dry-run",
             "-d",
             str(FIXTURES / "dry_ssh_minimal.json"),
-            "-f",
-            str(FIXTURES / "dry_ssh_minimal.json"),
+            "--inventory-file",
+            str(inv),
         ],
     )
     mod.main()

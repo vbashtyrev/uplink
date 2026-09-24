@@ -8,6 +8,7 @@ import pytest
 from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
 from tests.mocks.map_state import MapStateTracker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
+from uplinks.data import load_devices_json
 from uplinks.netbox.inventory import load_inventory_report
 from zabbix_map import (
     ELEMENT_TYPE_HOST,
@@ -33,7 +34,6 @@ from zabbix_map import (
     MAP_WIDTH,
     SELEMENT_HEIGHT,
     SELEMENT_WIDTH,
-    load_devices_json,
     update_uplinks_map,
     _assign_layout_label_locations,
     _bounds_overlap,

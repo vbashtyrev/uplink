@@ -16,7 +16,7 @@ def test_main_export_map(monkeypatch, zabbix_env, capsys):
         lambda p: [{"sysmapid": "9", "name": "Uplinks", "selements": [], "links": []}],
     ).activate(monkeypatch)
     monkeypatch.setattr(
-        sys, "argv", ["zabbix_map.py", "--legacy-dry-ssh", "--export-map", "9"]
+        sys, "argv", ["zabbix_map.py", "--export-map", "9"]
     )
     with pytest.raises(SystemExit) as exc:
         map_main()
@@ -29,7 +29,7 @@ def test_main_create_map_only(monkeypatch, zabbix_env, capsys):
     build_standard_zabbix_mocker().on("map.get", lambda p: []).on(
         "map.create", lambda p: {"sysmapids": ["77"]}
     ).activate(monkeypatch)
-    monkeypatch.setattr(sys, "argv", ["zabbix_map.py", "--legacy-dry-ssh", "--create-map"])
+    monkeypatch.setattr(sys, "argv", ["zabbix_map.py", "--create-map"])
     with pytest.raises(SystemExit) as exc:
         map_main()
     assert exc.value.code == 0

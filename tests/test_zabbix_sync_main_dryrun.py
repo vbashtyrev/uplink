@@ -7,6 +7,11 @@ from pathlib import Path
 import pytest
 
 from tests.mocks.netbox_api import build_netbox_for_commit_rates
+from tests.mocks.inventory_scope import (
+    with_provider_metadata,
+    write_dry_ssh_minimal_inventory,
+    write_inventory_report,
+)
 from tests.mocks.zabbix_rpc import ZabbixRpcMocker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 
@@ -15,9 +20,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 def test_main_dry_run_with_util_and_bps(monkeypatch, zabbix_env, netbox_env, tmp_path, capsys):
     import zabbix_sync_commit_rate as mod
-
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
     nb = build_netbox_for_commit_rates(
         device_name="ALA-KZT-7280TR-1",
         iface_name="Ethernet51/1",
@@ -52,8 +55,8 @@ def test_main_dry_run_with_util_and_bps(monkeypatch, zabbix_env, netbox_env, tmp
             "--debug",
             "-d",
             str(FIXTURES / "dry_ssh_minimal.json"),
-            "-f",
-            str(cr),
+            "--inventory-file",
+            str(inv),
         ],
     )
     mod.main()
@@ -65,10 +68,7 @@ def test_main_dry_run_uses_border_device_tag(monkeypatch, zabbix_env, netbox_env
     """The configured device tag selects the border device."""
     import zabbix_sync_commit_rate as mod
     from uplinks.zabbix.plan import ZABBIX_MUTATING_METHODS
-
-
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
     nb = build_netbox_for_commit_rates(
         device_name="ALA-KZT-7280TR-1",
         iface_name="Ethernet51/1",
@@ -91,8 +91,8 @@ def test_main_dry_run_uses_border_device_tag(monkeypatch, zabbix_env, netbox_env
             "--dry-run",
             "-d",
             str(FIXTURES / "dry_ssh_minimal.json"),
-            "-f",
-            str(cr),
+            "--inventory-file",
+            str(inv),
         ],
     )
     mod.main()
@@ -122,8 +122,24 @@ def test_main_dry_run_util_scoped_excludes_out_of_scope_iface(
 }""",
         encoding="utf-8",
     )
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
+    inv = write_inventory_report(
+        tmp_path,
+        with_provider_metadata(
+            {
+                "complete": [
+                    {
+                        "device": "WAW-EQX-7280QR-2",
+                        "interface": "ethernet23/1",
+                        "provider": "Hurricane",
+                        "commit_rate_kbps": 10_000_000,
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "providers": 1, "providers_in_scope": 1},
+            }
+        ),
+        filename="waw-inventory.json",
+    )
     nb = build_netbox_for_commit_rates(
         device_name="WAW-EQX-7280QR-2",
         iface_name="Ethernet23/1",
@@ -147,8 +163,8 @@ def test_main_dry_run_util_scoped_excludes_out_of_scope_iface(
             "--dry-run",
             "-d",
             str(dry),
-            "-f",
-            str(cr),
+            "--inventory-file",
+            str(inv),
         ],
     )
     mod.main()
@@ -181,6 +197,7 @@ def test_main_dry_run_rejects_delete_triggers(monkeypatch, zabbix_env, netbox_en
 def test_main_apply_macro_failure(monkeypatch, zabbix_env, netbox_env, tmp_path, capsys):
     import zabbix_sync_commit_rate as mod
 
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
     nb = build_netbox_for_commit_rates(
         device_name="ALA-KZT-7280TR-1",
         iface_name="Ethernet51/1",
@@ -225,8 +242,8 @@ def test_main_apply_macro_failure(monkeypatch, zabbix_env, netbox_env, tmp_path,
             "zabbix_sync_commit_rate.py",
             "-d",
             str(FIXTURES / "dry_ssh_minimal.json"),
-            "-f",
-            str(FIXTURES / "dry_ssh_minimal.json"),
+            "--inventory-file",
+            str(inv),
         ],
     )
     mod.main()

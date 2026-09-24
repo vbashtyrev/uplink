@@ -10,12 +10,9 @@ import sys
 import pynetbox
 
 from env_urls import load_env_file_if_present
-from uplinks.data import resolve_uplink_cli_input
+from uplinks.data import load_description_map, load_devices_json, resolve_uplink_cli_input
 from zabbix_map import (
-    DESCRIPTION_MAP_FILE,
     ZABBIX_CACHE_FILE,
-    load_devices_json,
-    load_description_map,
     load_zabbix_cache,
     save_zabbix_cache,
     fetch_zabbix_hosts_and_items,
@@ -38,7 +35,6 @@ from uplinks.netbox.inventory import (
 )
 from uplinks_config import (
     THRESHOLD_PERCENT_WARN,
-    THRESHOLD_PERCENT_HIGH,
     TRIGGER_FUNCTION_PERIOD,
     TRIGGER_TAG_NAME,
     TRIGGER_TAG_VALUE,
@@ -51,7 +47,6 @@ from uplinks_config import (
 
 load_env_file_if_present()
 
-DEFAULT_COMMIT_RATES = "commit_rates.json"
 CALCULATED_ITEM_KEY_IN = "aggregate.bits.in[]"
 CALCULATED_ITEM_KEY_OUT = "aggregate.bits.out[]"
 CALCULATED_ITEM_TYPE = 15
@@ -84,6 +79,11 @@ def _load_netbox_aggregate_context(dry_ssh_devices, debug=False, inventory_repor
     Read-only NetBox inventory for provider aggregates.
     Return dict with device_iface_to_provider, providers, provider_limits_gbps, stats, read_error; or None.
     """
+    from uplinks.netbox.inventory import (
+        inventory_provider_metadata_complete,
+        provider_limits_gbps_from_inventory,
+    )
+
     ctx = load_uplink_provider_context(
         dry_ssh_devices,
         debug=debug,
@@ -92,20 +92,34 @@ def _load_netbox_aggregate_context(dry_ssh_devices, debug=False, inventory_repor
     if ctx is None:
         return None
 
-    nb = _get_netbox_client(debug=debug)
-    if nb is None:
-        return None
-
-    provider_limits_gbps, limits_err = collect_provider_limits_gbps(nb, debug=debug)
     stats = dict(ctx.get("stats") or {})
     read_error = bool(ctx.get("read_error"))
-    if limits_err:
-        if limits_err == ERROR_AUTH_DENIED:
-            stats["error"] = ERROR_AUTH_DENIED
-        elif limits_err == ERROR_PARTIAL_READ:
-            if stats.get("error") not in (ERROR_AUTH_DENIED, ERROR_PROVIDERS_UNAVAILABLE):
-                stats["error"] = ERROR_PARTIAL_READ
-        read_error = True
+    provider_limits_gbps = {}
+
+    if inventory_report is not None:
+        if inventory_provider_metadata_complete(inventory_report):
+            provider_limits_gbps = provider_limits_gbps_from_inventory(inventory_report)
+        else:
+            read_error = True
+            provider_limits_gbps = {}
+            limits_read = inventory_report.get("provider_limits_read") or "missing"
+            if limits_read == ERROR_AUTH_DENIED or limits_read == "auth_denied":
+                stats["error"] = ERROR_AUTH_DENIED
+            elif limits_read in ("partial_read", "error", "missing", "unavailable"):
+                if stats.get("error") not in (ERROR_AUTH_DENIED, ERROR_PROVIDERS_UNAVAILABLE):
+                    stats["error"] = ERROR_PARTIAL_READ
+    else:
+        nb = _get_netbox_client(debug=debug)
+        if nb is None:
+            return None
+        provider_limits_gbps, limits_err = collect_provider_limits_gbps(nb, debug=debug)
+        if limits_err:
+            if limits_err == ERROR_AUTH_DENIED:
+                stats["error"] = ERROR_AUTH_DENIED
+            elif limits_err == ERROR_PARTIAL_READ:
+                if stats.get("error") not in (ERROR_AUTH_DENIED, ERROR_PROVIDERS_UNAVAILABLE):
+                    stats["error"] = ERROR_PARTIAL_READ
+            read_error = True
 
     return {
         "device_iface_to_provider": ctx["device_iface_to_provider"],
@@ -116,40 +130,11 @@ def _load_netbox_aggregate_context(dry_ssh_devices, debug=False, inventory_repor
     }
 
 
-def _resolve_provider_limit_bps(
-    provider,
-    netbox_limits_gbps,
-    legacy_limits_gbps,
-    legacy_commit_rates_fallback=False,
-    debug=False,
-):
-    """NetBox aggregate_limit_gbps first; commit_rates.json _provider_limits only with legacy flag."""
+def _resolve_provider_limit_bps(provider, netbox_limits_gbps):
+    """NetBox aggregate_limit_gbps from inventory snapshot or live read."""
     if provider in netbox_limits_gbps:
         return netbox_limits_gbps[provider] * 1e9
-
-    if not legacy_commit_rates_fallback:
-        return None
-
-    legacy_entry = legacy_limits_gbps.get(provider)
-    if legacy_entry is None:
-        return None
-
-    print(
-        "Warning: provider {!r} has no aggregate_limit_gbps in NetBox; "
-        "using commit_rates.json _provider_limits (transition fallback)".format(provider),
-        file=sys.stderr,
-    )
-    if debug:
-        print(
-            "Transition fallback limit for {} from commit_rates.json: {} Gbps".format(
-                provider, legacy_entry
-            ),
-            file=sys.stderr,
-        )
-    try:
-        return float(legacy_entry) * 1e9
-    except (TypeError, ValueError):
-        return None
+    return None
 
 
 def _provider_name_for_iface(hostname, iface, desc_to_name, device_iface_to_provider=None):
@@ -287,8 +272,8 @@ def _create_or_update_calculated_item(url, token, hostid, key, name, formula, de
 
 def _ensure_triggers(url, token, hostid, host_technical, provider, itemid_in, limit_bps, debug=False):
     """Create or update 90%/100% provider aggregate triggers for a host.
-    If the limit in _provider_limits has changed (for example 20G -> 10G), old triggers with a different limit
-    are removed so as not to duplicate 90%/100% across different thresholds.
+    If aggregate_limit_gbps from NetBox inventory changed (for example 20G -> 10G), old triggers with a
+    different limit are removed so as not to duplicate 90%/100% across different thresholds.
     """
     warn_bps = int(limit_bps * THRESHOLD_PERCENT_WARN / 100)
     desc_warn = "Provider aggregate traffic >= {}% of limit ({} Gbps)".format(THRESHOLD_PERCENT_WARN, limit_bps / 1e9)
@@ -420,13 +405,11 @@ NETBOX_READ_PARTIAL_MSG = (
 def run(
     url,
     token,
-    commit_rates_path,
-    dry_ssh_path,
-    desc_map_path,
-    cache_path,
+    dry_ssh_path=None,
+    desc_map_path=None,
+    cache_path=None,
     debug=False,
     prune_triggers_without_limits=True,
-    legacy_commit_rates_fallback=False,
     inventory_scoped=True,
     inventory_file=None,
 ):
@@ -434,16 +417,6 @@ def run(
     ok, err = validate_zabbix_token(url, token, debug=debug)
     if not ok:
         return None, "Authorization error in Zabbix (token): {}".format(err)
-
-    provider_limits = {}
-    if legacy_commit_rates_fallback:
-        if not os.path.isfile(commit_rates_path):
-            return None, "commit_rates file not found: {}".format(commit_rates_path)
-        with open(commit_rates_path, "r", encoding="utf-8") as f:
-            cr = json.load(f)
-        provider_limits = cr.get("_provider_limits") or {}
-        if not isinstance(provider_limits, dict):
-            provider_limits = {}
 
     inventory_report = None
     inventory_inv_ctx = None
@@ -582,13 +555,7 @@ def run(
     for provider in providers_iter:
         if not provider:
             continue
-        limit_bps = _resolve_provider_limit_bps(
-            provider,
-            netbox_limits_gbps,
-            provider_limits,
-            legacy_commit_rates_fallback=legacy_commit_rates_fallback,
-            debug=debug,
-        )
+        limit_bps = _resolve_provider_limit_bps(provider, netbox_limits_gbps)
         links = by_provider.get(provider)
         if not links:
             if debug:
@@ -636,37 +603,23 @@ def run(
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Create Uplinks {Provider} hosts with total traffic and triggers by _provider_limits.",
+        description=(
+            "Create or update Uplinks {Provider} aggregate hosts in Zabbix from NetBox inventory "
+            "(--inventory-file): provider aggregate_limit_gbps drives calculated sum traffic items "
+            "and optional 90%/100% limit and SLA breach triggers."
+        ),
     )
-    parser.add_argument("-f", "--commit-rates", default=DEFAULT_COMMIT_RATES, help="Path to commit_rates.json")
-    parser.add_argument("-d", "--dry-ssh", default=None, help="Legacy path to dry-ssh.json")
     parser.add_argument(
         "--inventory-file",
         default=None,
         metavar="FILE",
         help="Scoped inventory JSON from netbox_uplinks_inventory.py --json",
     )
-    parser.add_argument("-m", "--description-map", default=DESCRIPTION_MAP_FILE, help="File description_to_name.json")
     parser.add_argument("--no-cache", action="store_true", help="Do not use Zabbix cache")
     parser.add_argument(
         "--keep-triggers-without-limits",
         action="store_true",
         help="Do not delete existing aggregate triggers for providers without aggregate_limit_gbps",
-    )
-    parser.add_argument(
-        "--legacy-commit-rates-fallback",
-        action="store_true",
-        help="Read _provider_limits from commit_rates.json when aggregate_limit_gbps is missing in NetBox",
-    )
-    parser.add_argument(
-        "--legacy-dry-ssh",
-        action="store_true",
-        help="Use legacy dry-ssh.json input (-d/--dry-ssh) instead of --inventory-file",
-    )
-    parser.add_argument(
-        "--legacy-provider-filter",
-        action="store_true",
-        help="Select uplink interfaces by Uplink: in description instead of NetBox inventory scope",
     )
     parser.add_argument("--debug", action="store_true", help="Debug output")
     args = parser.parse_args()
@@ -677,14 +630,11 @@ def main():
         sys.exit(1)
     input_mode, input_path, input_err = resolve_uplink_cli_input(
         inventory_file=args.inventory_file,
-        dry_ssh_file=args.dry_ssh,
-        legacy_dry_ssh=args.legacy_dry_ssh,
     )
     if input_err:
         print(input_err, file=sys.stderr)
         sys.exit(1)
-    dry_ssh_path = input_path if input_mode == "legacy_dry_ssh" else None
-    cache_base = args.inventory_file or dry_ssh_path or "."
+    cache_base = args.inventory_file or "."
     cache_path = None if args.no_cache else os.path.join(
         os.path.dirname(os.path.abspath(cache_base)) if cache_base else ".",
         ZABBIX_CACHE_FILE,
@@ -692,14 +642,9 @@ def main():
     done, err = run(
         url,
         token,
-        args.commit_rates,
-        dry_ssh_path,
-        args.description_map,
-        cache_path,
+        cache_path=cache_path,
         debug=args.debug,
         prune_triggers_without_limits=(not args.keep_triggers_without_limits),
-        legacy_commit_rates_fallback=args.legacy_commit_rates_fallback,
-        inventory_scoped=(not args.legacy_provider_filter),
         inventory_file=args.inventory_file,
     )
     if not done:

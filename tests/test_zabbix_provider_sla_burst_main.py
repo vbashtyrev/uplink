@@ -22,8 +22,6 @@ def test_main_burst_circuits_table(monkeypatch, zabbix_env, tmp_path, capsys):
         commit_rate_kbps=10_000_000,
         tag_device=False,
     )
-    cr = tmp_path / "commit_rates.json"
-
     def host_get(params):
         filt = params.get("filter") or {}
         if "host" in filt:
@@ -57,8 +55,6 @@ def test_main_burst_circuits_table(monkeypatch, zabbix_env, tmp_path, capsys):
             "argv",
             [
                 "zabbix_provider_sla.py",
-                "-f",
-                str(cr),
                 "--days",
                 "1",
                 "--from-ts",

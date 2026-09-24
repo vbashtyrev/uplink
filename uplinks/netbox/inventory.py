@@ -1146,6 +1146,71 @@ def collect_provider_slo_percent(nb, debug=False):
     return slo, None
 
 
+def _provider_metadata_read_status(err):
+    """Map collect_* error to a serializable inventory read status."""
+    if err is None:
+        return "ok"
+    if err == ERROR_AUTH_DENIED:
+        return "auth_denied"
+    if err == ERROR_PARTIAL_READ:
+        return "partial_read"
+    return "error"
+
+
+def provider_slo_percent_from_inventory(report):
+    """Provider SLO snapshot embedded in inventory JSON."""
+    raw = (report or {}).get("provider_slo_percent")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def provider_limits_gbps_from_inventory(report):
+    """Provider aggregate limit snapshot embedded in inventory JSON."""
+    raw = (report or {}).get("provider_limits_gbps")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def inventory_provider_metadata_complete(report):
+    """True when embedded provider SLO/limit metadata was read successfully."""
+    if not report:
+        return False
+    return (
+        report.get("provider_slo_read") == "ok"
+        and report.get("provider_limits_read") == "ok"
+        and isinstance(report.get("provider_slo_percent"), dict)
+        and isinstance(report.get("provider_limits_gbps"), dict)
+    )
+
+
+def inventory_has_provider_metadata_snapshot(report):
+    """True when inventory JSON carries a complete provider metadata snapshot."""
+    if not report:
+        return False
+    return (
+        "provider_slo_percent" in report
+        and "provider_limits_gbps" in report
+        and inventory_provider_metadata_complete(report)
+    )
+
+
+def enrich_inventory_provider_metadata(report, nb, debug=False):
+    """Attach provider SLO/limit snapshots and read status to inventory report."""
+    slo, slo_err = collect_provider_slo_percent(nb, debug=debug)
+    limits, limits_err = collect_provider_limits_gbps(nb, debug=debug)
+    report["provider_slo_read"] = _provider_metadata_read_status(slo_err)
+    report["provider_limits_read"] = _provider_metadata_read_status(limits_err)
+    report["provider_slo_percent"] = slo if slo_err is None else None
+    report["provider_limits_gbps"] = limits if limits_err is None else None
+    stats = report.get("stats")
+    if slo_err == ERROR_AUTH_DENIED or limits_err == ERROR_AUTH_DENIED:
+        if stats is not None:
+            stats["error"] = ERROR_AUTH_DENIED
+    elif slo_err == ERROR_PARTIAL_READ or limits_err == ERROR_PARTIAL_READ:
+        _bump_read_error(stats)
+    elif slo_err or limits_err:
+        _bump_read_error(stats)
+    return slo_err, limits_err
+
+
 def collect_provider_limits_gbps(nb, debug=False):
     """Provider.name -> aggregate_limit_gbps from NetBox custom fields.
 
@@ -1805,7 +1870,7 @@ def lag_member_superseded_in_scoped(
 
 
 def _iface_is_uplink_by_description(iface):
-    """True when dry-ssh interface description contains 'Uplink:' (--legacy-dry-ssh only)."""
+    """True when an unscoped SSH record contains ``Uplink:`` in its description."""
     desc = (iface.get("description") or "").strip()
     return "Uplink:" in desc
 
@@ -1816,7 +1881,7 @@ def is_uplink_iface(iface, hostname=None, device_iface_to_provider=None, invento
 
     When inventory_scoped is True (NetBox-first path), only interfaces present in
     scoped inventory count as uplinks (fail-closed).
-    When inventory_scoped is False (--legacy-dry-ssh), use the Uplink: description marker.
+    When inventory_scoped is False, use the Uplink: description marker.
     """
     if inventory_scoped:
         if not hostname:
@@ -1882,13 +1947,7 @@ def load_uplink_provider_context(
         report = inventory_report
         netbox_relations = netbox_interface_relations_from_report(report)
         if netbox_relations is None:
-            nb = netbox_client_from_env(debug=debug)
-            if nb is None:
-                return None
-            device_names = device_names_from_complete_inventory(report)
-            netbox_relations = collect_netbox_interface_relations(
-                nb, device_names, debug=debug, stats=report.get("stats")
-            )
+            netbox_relations = _empty_netbox_interface_relations()
     else:
         nb = netbox_client_from_env(debug=debug)
         if nb is None:
@@ -2026,6 +2085,7 @@ def main(argv=None):
         circuit_scope=project_circuit_scope(),
     )
     enrich_inventory_report_with_netbox_relations(report, nb, debug=args.debug)
+    enrich_inventory_provider_metadata(report, nb, debug=args.debug)
     stats = report.get("stats") or {}
     auth_error = stats.get("error") == ERROR_AUTH_DENIED
     providers_error = stats.get("error") == ERROR_PROVIDERS_UNAVAILABLE

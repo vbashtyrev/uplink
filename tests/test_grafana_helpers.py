@@ -10,8 +10,8 @@ from grafana_uplinks_graph import (
     _graph_to_inline_csv,
     _grafana_push_dashboard,
     build_edges,
-    load_devices_json,
 )
+from uplinks.data import load_devices_json
 
 
 def test_csv_escape_and_graph_csv():

@@ -525,6 +525,8 @@ def main():
     services_argv = [
         python,
         "zabbix_provider_services.py",
+        "--inventory-file",
+        inventory_path,
         "--parent-service",
         "Uplinks providers",
     ]

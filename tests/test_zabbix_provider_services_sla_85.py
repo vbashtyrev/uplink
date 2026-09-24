@@ -112,9 +112,28 @@ def test_ensure_provider_sla_create(monkeypatch):
 
 
 def test_main_provider_errors_continue(tmp_path, monkeypatch, capsys, zabbix_env):
-    cr = tmp_path / "cr.json"
-    cr.write_text(
-        json.dumps({"_provider_limits": {"Bad": 10}, "_provider_sla": 99.0}),
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "h1",
+                        "interface": "Eth1",
+                        "provider": "Bad",
+                        "circuit_id": "Bad-1",
+                        "billing_model": "Flat",
+                        "commit_rate_kbps": 1000,
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "providers": 1},
+                "provider_limits_gbps": {"Bad": 10},
+                "provider_slo_percent": {"Bad": 99.0},
+                "provider_slo_read": "ok",
+                "provider_limits_read": "ok",
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -131,11 +150,10 @@ def test_main_provider_errors_continue(tmp_path, monkeypatch, capsys, zabbix_env
         .on("service.create", lambda p: (_ for _ in ()).throw(RuntimeError("create fail")))
         .activate(monkeypatch)
     )
-    monkeypatch.setattr("zabbix_provider_services.netbox_client_from_env", lambda **k: None)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["zabbix_provider_services.py", "-f", str(cr), "--legacy-commit-rates-fallback"],
+        ["zabbix_provider_services.py", "--inventory-file", str(inv)],
     )
     svc.main()
     err = capsys.readouterr().err
@@ -210,11 +228,6 @@ def test_main_with_events_and_from_ts(tmp_path, monkeypatch, zabbix_env, capsys)
         provider_custom_fields={"aggregate_limit_gbps": 10},
         tag_device=False,
     )
-    cr = tmp_path / "cr.json"
-    cr.write_text(
-        json.dumps({"_provider_limits": {"Cogent": 10}, "_provider_sla": 99.0}),
-        encoding="utf-8",
-    )
     agg = sla.UPLINKS_AGGREGATE_HOST_PREFIX + "Cogent"
     (
         ZabbixRpcMocker()
@@ -246,8 +259,6 @@ def test_main_with_events_and_from_ts(tmp_path, monkeypatch, zabbix_env, capsys)
             "argv",
             [
                 "zabbix_provider_sla.py",
-                "-f",
-                str(cr),
                 "--from-ts",
                 "0",
                 "--to-ts",

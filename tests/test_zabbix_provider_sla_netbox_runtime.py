@@ -112,7 +112,7 @@ def test_main_netbox_without_commit_rates_file(tmp_path, monkeypatch, capsys, za
         monkeypatch.setattr(
             sys,
             "argv",
-            ["zabbix_provider_sla.py", "-f", str(missing_cr), "--days", "1"],
+            ["zabbix_provider_sla.py", "--days", "1"],
         )
         sla_mod.main()
 
@@ -121,79 +121,6 @@ def test_main_netbox_without_commit_rates_file(tmp_path, monkeypatch, capsys, za
     assert "ManualISP" in out
     assert "CKT-55" in out
     assert "Burst circuits" in out
-
-
-def test_main_invalid_commit_rates_without_legacy_uses_netbox_only(
-    tmp_path, monkeypatch, capsys, zabbix_env
-):
-    nb = build_netbox_for_commit_rates(
-        device_name="ALA-KZT-7280TR-1",
-        iface_name="Ethernet51/1",
-        provider_name="ManualISP",
-        provider_custom_fields={"slo_percent": 99.88},
-        tag_device=False,
-    )
-    bad_cr = tmp_path / "commit_rates.json"
-    bad_cr.write_text("{not json", encoding="utf-8")
-
-    agg = sla_mod.UPLINKS_AGGREGATE_HOST_PREFIX + "ManualISP"
-    (
-        ZabbixRpcMocker()
-        .on(
-            "host.get",
-            lambda p: [{"hostid": "50", "host": agg, "name": agg}],
-        )
-        .on(
-            "trigger.get",
-            lambda p: [
-                {
-                    "triggerid": "agg-sla",
-                    "description": "Provider aggregate SLA breach: ManualISP",
-                    "hosts": [{"hostid": "50"}],
-                },
-            ],
-        )
-        .on("event.get", lambda p: [])
-        .activate(monkeypatch)
-    )
-
-    with patch("zabbix_provider_services.netbox_client_from_env", return_value=nb), patch(
-        "zabbix_provider_services.netbox_border_tag", return_value=None
-    ):
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            ["zabbix_provider_sla.py", "-f", str(bad_cr), "--days", "1"],
-        )
-        sla_mod.main()
-
-    captured = capsys.readouterr()
-    assert "invalid JSON" not in captured.err
-    assert "legacy fallback" not in captured.err
-    assert "ManualISP" in captured.out
-
-
-def test_main_legacy_flag_rejects_invalid_commit_rates(tmp_path, monkeypatch, capsys, zabbix_env):
-    bad_cr = tmp_path / "commit_rates.json"
-    bad_cr.write_text("{not json", encoding="utf-8")
-
-    monkeypatch.setattr("zabbix_provider_services.netbox_client_from_env", lambda **k: None)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "zabbix_provider_sla.py",
-            "-f",
-            str(bad_cr),
-            "--legacy-commit-rates-fallback",
-            "--days",
-            "1",
-        ],
-    )
-    with pytest.raises(SystemExit) as exc:
-        sla_mod.main()
-    assert exc.value.code == 1
-    assert "invalid JSON" in capsys.readouterr().err
 
 
 def test_beeline_burst_sla_report_circuit_41(tmp_path, monkeypatch, capsys, zabbix_env):
@@ -219,8 +146,6 @@ def test_beeline_burst_sla_report_circuit_41(tmp_path, monkeypatch, capsys, zabb
             "argv",
             [
                 "zabbix_provider_sla.py",
-                "-f",
-                str(tmp_path / "ignored.json"),
                 "--days",
                 "1",
                 "--from-ts",
@@ -265,8 +190,6 @@ def test_ertelecom_burst_sla_report_circuit_42(tmp_path, monkeypatch, capsys, za
             "argv",
             [
                 "zabbix_provider_sla.py",
-                "-f",
-                str(tmp_path / "ignored.json"),
                 "--days",
                 "1",
                 "--from-ts",
@@ -306,8 +229,6 @@ def test_fiord_burst_sla_report_circuit_52(tmp_path, monkeypatch, capsys, zabbix
             "argv",
             [
                 "zabbix_provider_sla.py",
-                "-f",
-                str(tmp_path / "ignored.json"),
                 "--days",
                 "1",
                 "--from-ts",
@@ -335,9 +256,6 @@ def test_runtime_slo_uses_project_config_not_commit_rates(tmp_path, monkeypatch,
         circuit_custom_fields={"billing_model": "Burst"},
         tag_device=False,
     )
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text(json.dumps({"_provider_sla": 99.0}), encoding="utf-8")
-
     agg = sla_mod.UPLINKS_AGGREGATE_HOST_PREFIX + "ManualISP"
     (
         ZabbixRpcMocker()
@@ -370,8 +288,6 @@ def test_runtime_slo_uses_project_config_not_commit_rates(tmp_path, monkeypatch,
             "argv",
             [
                 "zabbix_provider_sla.py",
-                "-f",
-                str(cr),
                 "--from-ts",
                 "0",
                 "--to-ts",
@@ -387,15 +303,9 @@ def test_runtime_slo_uses_project_config_not_commit_rates(tmp_path, monkeypatch,
     assert "Target SLA (_provider_sla)" not in out
 
 
-def test_main_auth_denied_exits_without_legacy_json_fallback(
+def test_main_auth_denied_exits_without_json_fallback(
     tmp_path, monkeypatch, capsys, zabbix_env
 ):
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text(
-        json.dumps({"_provider_limits": {"Cogent": 10}, "_provider_sla": 99.0}),
-        encoding="utf-8",
-    )
-
     def fake_load_ctx(debug=False, inventory_report=None):
         return {
             "read_error": True,
@@ -411,21 +321,13 @@ def test_main_auth_denied_exits_without_legacy_json_fallback(
     monkeypatch.setattr(
         sys,
         "argv",
-        [
-            "zabbix_provider_sla.py",
-            "-f",
-            str(cr),
-            "--legacy-commit-rates-fallback",
-            "--days",
-            "1",
-        ],
+        ["zabbix_provider_sla.py", "--days", "1"],
     )
     with pytest.raises(SystemExit) as exc:
         sla_mod.main()
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "NetBox error" in captured.err
-    assert "Cogent" not in captured.out
 
 
 def test_resolve_provider_slo_order():

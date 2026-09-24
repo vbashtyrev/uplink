@@ -289,33 +289,26 @@ def test_main_inventory_unavailable_excludes_fiord(monkeypatch, zabbix_env, tmp_
     """When scoped inventory is unavailable, description-only uplinks like Fiord are ignored."""
     import zabbix_uplinks_dashboard as mod
 
-    dry = tmp_path / "dry.json"
-    dry.write_text(
+    from tests.mocks.inventory_scope import with_provider_metadata
+
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
         json.dumps(
-            {
-                "devices": {
-                    "WAW-EQX-7280QR-2": [
+            with_provider_metadata(
+                {
+                    "complete": [
                         {
-                            "name": "Ethernet23/1",
-                            "description": "Uplink: HurricaneE",
-                        },
-                        {
-                            "name": "Ethernet34/1",
-                            "description": "Uplink: Fiord and MSK PING-WIN 3Gbps link",
-                        },
+                            "device": "WAW-EQX-7280QR-2",
+                            "interface": "Ethernet23/1",
+                            "provider": "Hurricane",
+                        }
                     ],
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    desc = tmp_path / "desc.json"
-    desc.write_text(
-        json.dumps(
-            {
-                "Uplink: HurricaneE": "Hurricane Legacy",
-                "Uplink: Fiord and MSK PING-WIN 3Gbps link": "Fiord Legacy",
-            }
+                    "incomplete": [],
+                    "stats": {"complete": 1, "providers": 1},
+                },
+                slo={"Hurricane": 99.9},
+                limits={"Hurricane": 10},
+            )
         ),
         encoding="utf-8",
     )
@@ -365,11 +358,8 @@ def test_main_inventory_unavailable_excludes_fiord(monkeypatch, zabbix_env, tmp_
         "argv",
         [
             "zabbix_uplinks_dashboard.py",
-            "--legacy-dry-ssh",
-            "-f",
-            str(dry),
-            "-m",
-            str(desc),
+            "--inventory-file",
+            str(inv),
             "--no-cache",
             "--dashboard-by-location",
             "",
@@ -482,8 +472,6 @@ def test_main_inventory_file_wires_netbox_relations_to_build_edges(
             "zabbix_uplinks_dashboard.py",
             "--inventory-file",
             str(inv),
-            "-m",
-            str(desc),
             "--no-cache",
             "--dashboard-by-location",
             "",

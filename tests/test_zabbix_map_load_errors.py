@@ -1,9 +1,9 @@
-"""zabbix_map load_devices_json error paths."""
+"""uplinks.data load_devices_json error paths."""
 
 import json
 from pathlib import Path
 
-from zabbix_map import load_devices_json
+from uplinks.data import load_devices_json
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
