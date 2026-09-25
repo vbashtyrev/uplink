@@ -1,0 +1,13 @@
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E9", "F821"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/fixtures/netbox_choices_snippet.py" = ["F821"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+follow_imports = "skip"

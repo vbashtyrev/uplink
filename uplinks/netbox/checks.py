@@ -715,7 +715,7 @@ def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f, e
             except Exception as e2:
                 print("Error setting primary_mac_address {} {}: {} - {}".format(dev_name, iface_display_name, mac_id, e2), file=sys.stderr, flush=True)
     except Exception as e:
-        print("MAC Error {} {} {}: {} - {}".format(dev_name, iface_display_name, mac_netbox, e), file=sys.stderr, flush=True)
+        print("MAC Error {} {} {}: {}".format(dev_name, iface_display_name, mac_netbox, e), file=sys.stderr, flush=True)
 
 
 def load_mt_ref(path):

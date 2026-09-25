@@ -12,7 +12,7 @@ DASHBOARD_NAME_BY_LOCATION = "Uplinks (by location)"
 
 DASHBOARD_NAME_BY_PROVIDER = "Uplinks by providers"
 
-PROVIDERS_FOR_SUMMARY = []
+PROVIDERS_FOR_SUMMARY: list[str] = []
 
 UPLINKS_AGGREGATE_HOST_PREFIX = "Uplinks "
 
