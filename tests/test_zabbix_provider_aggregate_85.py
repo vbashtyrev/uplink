@@ -191,10 +191,9 @@ def test_run_prune_triggers_without_limit(monkeypatch, tmp_path):
             done, err = agg.run(
                 "https://z.example/api_jsonrpc.php",
                 "t",
-                str(cr),
                 str(FIXTURES / "dry_ssh_minimal.json"),
                 str(desc),
-                None,
+                cache_path=None,
                 prune_triggers_without_limits=True,
             )
     assert err is None

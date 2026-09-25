@@ -61,7 +61,7 @@ def test_apply_updates_existing_interface(monkeypatch, netbox_env, tmp_path, cap
         with patch("netbox_checks.is_juniper_platform", return_value=True):
             with patch("netbox_checks.is_arista_platform", return_value=False):
                 with patch("netbox_checks.get_device_platform_name", return_value="Juniper JunOS"):
-                    with patch.object(nc, "_get_interface_ip_addresses", return_value=[]):
+                    with patch.object(nc, "_get_interface_ip_addresses", return_value=([], None)):
                         monkeypatch.setattr(
                             sys,
                             "argv",

@@ -37,7 +37,7 @@ def test_vrf_resolve():
     nb.ipam.vrfs.filter.return_value = [vrf]
     nb.ipam.vrfs.get.return_value = vrf
     cache = {}
-    assert nc._resolve_vrf_name_to_id(nb, "internet", cache) == 3
+    assert nc._resolve_vrf_name_to_id(nb, "internet", cache)[0] == 3
     id_cache = {}
     assert nc._resolve_vrf_id_to_name(nb, 3, id_cache) == "internet"
 
@@ -47,5 +47,6 @@ def test_find_ip_helpers():
     ip = MagicMock()
     ip.vrf = None
     nb.ipam.ip_addresses.filter.return_value = [ip]
-    assert nc._find_ip_in_netbox(nb, "203.0.113.1/24", None) == [ip]
-    assert nc._find_ip_in_netbox_any_vrf(nb, "203.0.113.1/24") == [ip]
+    candidates, err = nc._find_ips_in_netbox(nb, "203.0.113.1/24", None)
+    assert err is None
+    assert candidates == [ip]

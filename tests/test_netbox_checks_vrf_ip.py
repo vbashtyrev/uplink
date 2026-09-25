@@ -9,7 +9,7 @@ def test_resolve_vrf_name_and_id():
     nb = MagicMock()
     nb.ipam.vrfs.filter.return_value = [type("V", (), {"id": 7, "name": "internet"})()]
     cache = {}
-    assert nc._resolve_vrf_name_to_id(nb, "internet", cache) == 7
+    assert nc._resolve_vrf_name_to_id(nb, "internet", cache)[0] == 7
     assert cache["internet"] == 7
     id_cache = {}
     nb.ipam.vrfs.get = MagicMock(return_value=type("V", (), {"id": 7, "name": "internet"})())
@@ -23,6 +23,7 @@ def test_get_interface_ip_addresses_filters_private():
         MagicMock(address="10.0.0.1/24", vrf=None),
         MagicMock(address="203.0.113.1/24", vrf=None),
     ]
-    addrs = nc._get_interface_ip_addresses(nb, nb_iface)
+    addrs, err = nc._get_interface_ip_addresses(nb, nb_iface)
+    assert err is None
     assert any("203.0.113" in a for a, _ in addrs)
     assert not any(a.startswith("10.") for a, _ in addrs)

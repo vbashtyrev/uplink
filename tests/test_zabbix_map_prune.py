@@ -5,7 +5,8 @@ from pathlib import Path
 from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
 from tests.mocks.map_state import MapStateTracker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
-from zabbix_map import load_devices_json, update_uplinks_map
+from uplinks.data import load_devices_json
+from zabbix_map import update_uplinks_map
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 

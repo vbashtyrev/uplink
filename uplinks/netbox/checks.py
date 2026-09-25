@@ -158,8 +158,9 @@ TXPOWER_NOTE_DIFF = 14  # txPower (dry-ssh) and tx_power (Netbox) are different
 # Code for forwardingModel/mode (15)
 FWD_NOTE_DIFF = 15     # forwardingModel (dry-ssh) and mode (Netbox) are different
 
-# Code for IP addresses (17)
+# Code for IP addresses (17, 20)
 IP_NOTE_DIFF = 17      # ipv4/ipv6 addresses (file) and those associated with the interface in Netbox are different
+IP_NOTE_READ = 20      # NetBox IP/VRF lookup failed (not treated as empty data)
 
 # Code for LAG/Related Interfaces (18)
 LAG_NOTE_DIFF = 18     # aggregateInterface (file) and lag (Netbox) are different
@@ -183,6 +184,7 @@ ALL_LEGEND = {
     TXPOWER_NOTE_DIFF: "txPower (dry-ssh) and tx_power (Netbox) are different",
     FWD_NOTE_DIFF: "forwardingModel (dry-ssh) and mode (Netbox) are different",
     IP_NOTE_DIFF: "IPv4/IPv6 addresses (file) and those associated with the interface in Netbox are different",
+    IP_NOTE_READ: "NetBox IP or VRF lookup failed (not treated as empty/matching data)",
     LAG_NOTE_DIFF: "aggregateInterface (file) and LAG/Related Interfaces (Netbox) are different",
     PARENT_NOTE_DIFF: "aggregateInterface (file) and Parent interface (Netbox) are different for logical interfaces",
 }
@@ -299,15 +301,29 @@ def _is_global_routable_address(addr_with_prefix):
     return True
 
 
+def _ip_vrf_id(ip_obj):
+    """Extract VRF id from a NetBox IP object (None = global)."""
+    vrf = getattr(ip_obj, "vrf", None)
+    if vrf is None:
+        return None
+    if isinstance(vrf, int):
+        return vrf
+    return getattr(vrf, "id", None)
+
+
 def _get_interface_ip_addresses(nb, nb_iface):
     """List of IPs (addr, vrf_id) associated with the interface in Netbox. Global routable only.
-    vrf_id — VRF id in NetBox or None (global)."""
+
+    Return (addrs, error_msg). error_msg is set on NetBox read failure (not treated as empty).
+    """
     if nb is None or nb_iface is None:
-        return []
+        return [], None
     try:
         ip_list = list(nb.ipam.ip_addresses.filter(interface_id=nb_iface.id))
-    except Exception:
-        return []
+    except Exception as e:
+        return None, "IP read failed for interface {}: {}".format(
+            getattr(nb_iface, "id", "?"), e
+        )
     out = []
     for ip_obj in ip_list:
         addr = getattr(ip_obj, "address", None)
@@ -316,30 +332,38 @@ def _get_interface_ip_addresses(nb, nb_iface):
         addr_norm = _normalize_ip_address(addr)
         if not _is_global_routable_address(addr_norm):
             continue
-        vrf = getattr(ip_obj, "vrf", None)
-        vrf_id = None
-        if vrf is not None:
-            vrf_id = vrf if isinstance(vrf, (int, type(None))) else getattr(vrf, "id", None)
-        out.append((addr_norm, vrf_id))
-    return sorted(out)
+        out.append((addr_norm, _ip_vrf_id(ip_obj)))
+    return sorted(out), None
 
 
-def _resolve_vrf_name_to_id(nb, vrf_name, cache):
-    """By VRF name in NetBox, return id. cache - dict for cache (name -> id)."""
+def _resolve_vrf_name_to_id(nb, vrf_name, cache, error_cache=None):
+    """Resolve VRF name to id. cache stores successful/not-found lookups; error_cache stores read errors."""
     if not nb or not vrf_name or not str(vrf_name).strip():
-        return None
+        return None, None
     name = str(vrf_name).strip()
+    if error_cache is not None and name in error_cache:
+        return None, error_cache[name]
     if name in cache:
-        return cache[name]
+        return cache[name], None
     try:
         vrfs = list(nb.ipam.vrfs.filter(name=name))
-        if vrfs:
-            cache[name] = vrfs[0].id
-            return vrfs[0].id
-    except Exception:
-        pass
-    cache[name] = None
-    return None
+    except Exception as e:
+        msg = "VRF lookup failed for {!r}: {}".format(name, e)
+        if error_cache is not None:
+            error_cache[name] = msg
+        return None, msg
+    if len(vrfs) > 1:
+        msg = "ambiguous VRF name {!r} ({} matches)".format(name, len(vrfs))
+        if error_cache is not None:
+            error_cache[name] = msg
+        return None, msg
+    if vrfs:
+        cache[name] = vrfs[0].id
+        return vrfs[0].id, None
+    msg = "VRF not found: {!r}".format(name)
+    if error_cache is not None:
+        error_cache[name] = msg
+    return None, msg
 
 
 def _resolve_vrf_id_to_name(nb, vrf_id, id_to_name_cache):
@@ -408,129 +432,202 @@ def _apply_aggregate_relation_second_pass(dev_name, payload, nb_by_iface_name, r
                 print("Installation error {} {} {} → {}: {}".format(dev_name, int_name, relation_label, aggregate_name, e), file=sys.stderr, flush=True)
 
 
-def _find_ip_in_netbox(nb, address, vrf_id):
-    """Find IP in NetBox by address and vrf_id (None = global). Return a list of 0 or 1 element."""
+def _find_ips_in_netbox(nb, address, vrf_id):
+    """Find IPs in NetBox by address and vrf_id (None = global). Return (candidates, error_msg)."""
     try:
         if vrf_id is not None:
             candidates = list(nb.ipam.ip_addresses.filter(address=address, vrf_id=vrf_id))
+            for c in candidates:
+                if _ip_vrf_id(c) != vrf_id:
+                    return None, (
+                        "IP lookup VRF mismatch for {}: object vrf_id {} != expected {}".format(
+                            address, _ip_vrf_id(c), vrf_id
+                        )
+                    )
         else:
             candidates = list(nb.ipam.ip_addresses.filter(address=address))
-            candidates = [c for c in candidates if getattr(c, "vrf", None) is None]
-        return candidates[:1]
-    except Exception:
-        return []
+            candidates = [c for c in candidates if _ip_vrf_id(c) is None]
+        return candidates, None
+    except Exception as e:
+        return None, "IP lookup failed for {}: {}".format(address, e)
 
 
-def _find_ip_in_netbox_any_vrf(nb, address):
-    """Find in NetBox any IP with a given address (any VRF or without VRF). Return a list of 0 or 1 element."""
-    try:
-        candidates = list(nb.ipam.ip_addresses.filter(address=address))
-        return candidates[:1]
-    except Exception:
-        return []
+def _ip_assigned_to_interface(ip_obj, nb_iface):
+    """True when IP is explicitly assigned to nb_iface via dcim.interface."""
+    obj_type = getattr(ip_obj, "assigned_object_type", None)
+    obj_id = getattr(ip_obj, "assigned_object_id", None)
+    if obj_type != "dcim.interface":
+        return False
+    return obj_id == getattr(nb_iface, "id", None)
 
 
 def _apply_ip_addresses_to_interface(nb, dev_name, iface_display_name, nb_iface, addrs_f, vrf_id_f=None, existing_only=False):
     """Bring the IP binding to the interface in NetBox to the list from the file.
-    addrs_f — list of global addresses (strings), vrf_id_f — VRF id in NetBox or None (global).
-    VRF is taken into account: the same address in different VRFs is considered different.
-    When existing_only is True (--existing-only): no create, unbind or rebind; only in-place updates
-    for IPs already bound to this interface."""
+
+    Lookups run before any mutation. Search is limited to the target VRF; ambiguous matches
+    and read errors abort without partial writes. existing_only forbids create/unbind/rebind/VRF change.
+    """
     if nb is None or nb_iface is None:
         return
-    addrs_n_tuples = _get_interface_ip_addresses(nb, nb_iface)
+
+    addrs_n_tuples, read_err = _get_interface_ip_addresses(nb, nb_iface)
+    if read_err:
+        print(
+            "IP {} {}: {}".format(dev_name, iface_display_name, read_err),
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+
     set_f = set((a, vrf_id_f) for a in (addrs_f or []))
-    set_n = set(addrs_n_tuples)
+    set_n = set(addrs_n_tuples or [])
     to_remove = set_n - set_f
     to_add = set_f - set_n
-    try:
-        for addr, vrf_id_n in to_remove:
+
+    unbind_ops = []
+    bind_ops = []
+    create_ops = []
+
+    for addr, vrf_id_n in sorted(to_remove):
+        if existing_only:
+            print(
+                "IP {} {} {}: extra on interface, skipped (--existing-only)".format(
+                    dev_name, iface_display_name, addr
+                ),
+                flush=True,
+            )
+            continue
+        candidates, lookup_err = _find_ips_in_netbox(nb, addr, vrf_id_n)
+        if lookup_err:
+            print(
+                "IP {} {} {}: {}".format(dev_name, iface_display_name, addr, lookup_err),
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        bound = [c for c in (candidates or []) if _ip_assigned_to_interface(c, nb_iface)]
+        if len(bound) > 1:
+            print(
+                "IP {} {} {}: ambiguous IP objects in target VRF, skipped".format(
+                    dev_name, iface_display_name, addr
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if not bound:
+            print(
+                "IP {} {} {}: expected bound IP not found in target VRF, skipped".format(
+                    dev_name, iface_display_name, addr
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        unbind_ops.append(bound[0])
+
+    for addr, vrf_id in sorted(to_add):
+        candidates, lookup_err = _find_ips_in_netbox(nb, addr, vrf_id)
+        if lookup_err:
+            print(
+                "IP {} {} {}: {}".format(dev_name, iface_display_name, addr, lookup_err),
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if len(candidates or []) > 1:
+            print(
+                "IP {} {} {}: ambiguous IP objects in target VRF, skipped".format(
+                    dev_name, iface_display_name, addr
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if candidates:
+            ip_obj = candidates[0]
+            if _ip_assigned_to_interface(ip_obj, nb_iface):
+                continue
             if existing_only:
                 print(
-                    "IP {} {} {}: extra on interface, skipped (--existing-only)".format(
+                    "IP {} {} {}: not bound to this interface, skipped (--existing-only)".format(
                         dev_name, iface_display_name, addr
                     ),
                     flush=True,
                 )
                 continue
-            existing = _find_ip_in_netbox(nb, addr, vrf_id_n)
-            if existing:
-                ip_obj = existing[0]
-                ip_obj.assigned_object_id = None
-                ip_obj.assigned_object_type = None
-                ip_obj.save()
-                print("IP {} {} {}: unlinked from interface".format(dev_name, iface_display_name, addr), flush=True)
-        for addr, vrf_id in to_add:
-            existing = _find_ip_in_netbox(nb, addr, vrf_id)
-            if existing:
-                ip_obj = existing[0]
-                cur_id = getattr(ip_obj, "assigned_object_id", None)
-                if cur_id == nb_iface.id:
-                    continue
-                if existing_only:
-                    print(
-                        "IP {} {} {}: not bound to this interface, skipped (--existing-only)".format(
-                            dev_name, iface_display_name, addr
-                        ),
-                        flush=True,
-                    )
-                    continue
-                ip_obj.assigned_object_id = nb_iface.id
-                ip_obj.assigned_object_type = "dcim.interface"
-                ip_obj.save()
-                print("IP {} {} {}: bound to interface".format(dev_name, iface_display_name, addr), flush=True)
-            else:
-                # An IP with the required VRF was not found - perhaps the address is in another VRF (for example global); update VRF and bind
-                existing_any = _find_ip_in_netbox_any_vrf(nb, addr)
-                if existing_any:
-                    ip_obj = existing_any[0]
-                    cur_vrf = getattr(ip_obj, "vrf", None)
-                    cur_vrf_id = cur_vrf if isinstance(cur_vrf, (int, type(None))) else getattr(cur_vrf, "id", None)
-                    cur_id = getattr(ip_obj, "assigned_object_id", None)
-                    if existing_only:
-                        if cur_id == nb_iface.id and cur_vrf_id != vrf_id:
-                            ip_obj.vrf = vrf_id
-                            ip_obj.save()
-                            print("IP {} {} {}: VRF changed to target".format(dev_name, iface_display_name, addr), flush=True)
-                        elif cur_id != nb_iface.id:
-                            print(
-                                "IP {} {} {}: not bound to this interface, skipped (--existing-only)".format(
-                                    dev_name, iface_display_name, addr
-                                ),
-                                flush=True,
-                            )
-                        continue
-                    if cur_vrf_id != vrf_id or cur_id != nb_iface.id:
-                        if cur_vrf_id != vrf_id:
-                            ip_obj.vrf = vrf_id
-                        if cur_id != nb_iface.id:
-                            ip_obj.assigned_object_id = nb_iface.id
-                            ip_obj.assigned_object_type = "dcim.interface"
-                        ip_obj.save()
-                        if cur_vrf_id != vrf_id:
-                            print("IP {} {} {}: VRF changed to target".format(dev_name, iface_display_name, addr), flush=True)
-                        if cur_id != nb_iface.id:
-                            print("IP {} {} {}: bound to interface".format(dev_name, iface_display_name, addr), flush=True)
-                else:
-                    if existing_only:
-                        print(
-                            "IP {} {} {}: not found in NetBox, skipped (--existing-only)".format(
-                                dev_name, iface_display_name, addr
-                            ),
-                            flush=True,
-                        )
-                        continue
-                    create_kw = dict(
-                        address=addr,
-                        assigned_object_id=nb_iface.id,
-                        assigned_object_type="dcim.interface",
-                    )
-                    if vrf_id is not None:
-                        create_kw["vrf"] = vrf_id
-                    nb.ipam.ip_addresses.create(**create_kw)
-                    print("IP {} {} {}: created and bound to interface".format(dev_name, iface_display_name, addr), flush=True)
+            cur_type = getattr(ip_obj, "assigned_object_type", None)
+            cur_id = getattr(ip_obj, "assigned_object_id", None)
+            if cur_type and cur_type != "dcim.interface":
+                print(
+                    "IP {} {} {}: assigned_object_type is {}, skipped".format(
+                        dev_name, iface_display_name, addr, cur_type
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            if cur_id is not None and not (cur_type and str(cur_type).strip()):
+                print(
+                    "IP {} {} {}: assigned_object_type missing with assigned_object_id set, skipped".format(
+                        dev_name, iface_display_name, addr
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            bind_ops.append(ip_obj)
+        else:
+            if existing_only:
+                print(
+                    "IP {} {} {}: not found in NetBox, skipped (--existing-only)".format(
+                        dev_name, iface_display_name, addr
+                    ),
+                    flush=True,
+                )
+                continue
+            create_ops.append((addr, vrf_id))
+
+    try:
+        for ip_obj in unbind_ops:
+            addr = getattr(ip_obj, "address", "")
+            ip_obj.assigned_object_id = None
+            ip_obj.assigned_object_type = None
+            ip_obj.save()
+            print(
+                "IP {} {} {}: unlinked from interface".format(dev_name, iface_display_name, addr),
+                flush=True,
+            )
+        for ip_obj in bind_ops:
+            addr = getattr(ip_obj, "address", "")
+            ip_obj.assigned_object_id = nb_iface.id
+            ip_obj.assigned_object_type = "dcim.interface"
+            ip_obj.save()
+            print(
+                "IP {} {} {}: bound to interface".format(dev_name, iface_display_name, addr),
+                flush=True,
+            )
+        for addr, vrf_id in create_ops:
+            create_kw = {
+                "address": addr,
+                "assigned_object_id": nb_iface.id,
+                "assigned_object_type": "dcim.interface",
+            }
+            if vrf_id is not None:
+                create_kw["vrf"] = vrf_id
+            nb.ipam.ip_addresses.create(**create_kw)
+            print(
+                "IP {} {} {}: created and bound to interface".format(
+                    dev_name, iface_display_name, addr
+                ),
+                flush=True,
+            )
     except Exception as e:
-        print("Error applying IP {} {}: {}".format(dev_name, iface_display_name, e), file=sys.stderr, flush=True)
+        print(
+            "Error applying IP {} {}: {}".format(dev_name, iface_display_name, e),
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f, existing_only=False):
@@ -986,6 +1083,7 @@ def main():
         rows = []
         note_codes_used = set()
         vrf_cache = {}
+        vrf_error_cache = {}
         vrf_id_to_name_cache = {}
         skipped_no_netbox = []
         skipped_not_list = []
@@ -1227,20 +1325,31 @@ def main():
                         ipv6_f = [ipv6_f] if ipv6_f is not None else []
                     addrs_f = sorted([n for a in ipv4_f + ipv6_f if a for n in (_normalize_ip_address(a),) if _is_global_routable_address(n)])
                     ip_vrf_f = (entry.get("ip_vrf") or "").strip() or None
-                    vrf_id_f = _resolve_vrf_name_to_id(nb, ip_vrf_f, vrf_cache) if ip_vrf_f else None
-                    addrs_n_tuples = _get_interface_ip_addresses(nb, nb_iface) if nb_iface else []
+                    vrf_id_f = None
+                    vrf_lookup_err = None
+                    if ip_vrf_f:
+                        vrf_id_f, vrf_lookup_err = _resolve_vrf_name_to_id(
+                            nb, ip_vrf_f, vrf_cache, vrf_error_cache
+                        )
+                    addrs_n_tuples = []
+                    ip_read_err = None
+                    if nb_iface is not None:
+                        addrs_n_tuples, ip_read_err = _get_interface_ip_addresses(nb, nb_iface)
                     set_f = set((a, vrf_id_f) for a in (addrs_f or []))
-                    set_n = set(addrs_n_tuples)
+                    set_n = set(addrs_n_tuples or []) if addrs_n_tuples is not None else set()
                     ip_f = ", ".join(addrs_f) if addrs_f else ""
-                    ip_n = ", ".join(a for a, _ in addrs_n_tuples) if addrs_n_tuples else ""
+                    ip_n = ", ".join(a for a, _ in (addrs_n_tuples or [])) if addrs_n_tuples else ""
                     ip_vrf_f_display = (ip_vrf_f or "—").strip() if ip_vrf_f else "—"
-                    vrf_ids_n = list({vid for _, vid in addrs_n_tuples})
+                    vrf_ids_n = list({vid for _, vid in (addrs_n_tuples or [])})
                     if not vrf_ids_n:
                         ip_vrf_n_display = "—"
                     else:
                         names_n = [_resolve_vrf_id_to_name(nb, vid, vrf_id_to_name_cache) for vid in vrf_ids_n]
                         ip_vrf_n_display = ", ".join(sorted(set(names_n)))
-                    if set_f != set_n:
+                    if vrf_lookup_err or ip_read_err:
+                        nIp = str(IP_NOTE_READ)
+                        note_codes_used.add(IP_NOTE_READ)
+                    elif set_f != set_n:
                         nIp = str(IP_NOTE_DIFF)
                         note_codes_used.add(IP_NOTE_DIFF)
                 lag_f = ""
@@ -1338,10 +1447,23 @@ def main():
                             nb, dev_name, nb_name or int_name, nb_iface, mac_f, existing_only=existing_only_mode
                         )
                     # IP in Netbox - ipam.ip_addresses with assigned_object_id/type; result in a list from a file
-                    if args.ip_address and nIp and nb_iface is not None:
-                        _apply_ip_addresses_to_interface(
-                            nb, dev_name, nb_name or int_name, nb_iface, addrs_f, vrf_id_f, existing_only=existing_only_mode
-                        )
+                    if args.ip_address and nIp == str(IP_NOTE_DIFF) and nb_iface is not None:
+                        if vrf_lookup_err:
+                            print(
+                                "IP {} {}: {}".format(dev_name, nb_name or int_name, vrf_lookup_err),
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                        else:
+                            _apply_ip_addresses_to_interface(
+                                nb,
+                                dev_name,
+                                nb_name or int_name,
+                                nb_iface,
+                                addrs_f,
+                                vrf_id_f,
+                                existing_only=existing_only_mode,
+                            )
                 elif args.apply and args.intname and note_code == NOTE_MISSING and existing_only_mode:
                     print(
                         "Interface {} {}: not found in NetBox, skipped (--existing-only)".format(dev_name, int_name),
@@ -1406,9 +1528,22 @@ def main():
                                 nb, dev_name, int_name, nb_iface, mac_f, existing_only=existing_only_mode
                             )
                         if args.ip_address and addrs_f:
-                            _apply_ip_addresses_to_interface(
-                                nb, dev_name, int_name, nb_iface, addrs_f, vrf_id_f, existing_only=existing_only_mode
-                            )
+                            if vrf_lookup_err:
+                                print(
+                                    "IP {} {}: {}".format(dev_name, int_name, vrf_lookup_err),
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                            else:
+                                _apply_ip_addresses_to_interface(
+                                    nb,
+                                    dev_name,
+                                    int_name,
+                                    nb_iface,
+                                    addrs_f,
+                                    vrf_id_f,
+                                    existing_only=existing_only_mode,
+                                )
                     except Exception as e:
                         print("Error creating {} {}: {} - {}".format(dev_name, int_name, create_data, e), file=sys.stderr, flush=True)
                 mt_to_set_display = mt_to_set if nM else ""

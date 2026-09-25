@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context, write_dry_ssh_minimal_inventory
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
-from zabbix_map import ZABBIX_CACHE_FILE, load_devices_json, save_zabbix_cache
+from zabbix_map import ZABBIX_CACHE_FILE, save_zabbix_cache
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -64,8 +64,6 @@ def test_main_print_table_with_cache(monkeypatch, zabbix_env, tmp_path, capsys):
                     "zabbix_map.py",
                     "--inventory-file",
                     str(inv),
-                    "-m",
-                    str(desc),
                     "--print-table",
                     "--zabbix",
                     "--debug",

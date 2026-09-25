@@ -36,41 +36,14 @@ def load_description_map(path):
 
 
 INVENTORY_FILE_REQUIRED_MSG = (
-    "Provide --inventory-file (NetBox-only path). "
-    "For legacy dry-ssh.json use --legacy-dry-ssh with -f/--file or -d/--dry-ssh."
+    "Provide --inventory-file (NetBox snapshot path for Zabbix uplinks scripts)."
 )
-LEGACY_DRY_SSH_REQUIRED_MSG = (
-    "dry-ssh input requires --legacy-dry-ssh; use --inventory-file for the NetBox-only path"
-)
-LEGACY_DRY_SSH_PATH_REQUIRED_MSG = (
-    "Pass -f/--file or -d/--dry-ssh with --legacy-dry-ssh"
-)
-INVENTORY_AND_DRY_SSH_CONFLICT_MSG = (
-    "Cannot use --inventory-file together with -f/--file or -d/--dry-ssh"
-)
-MAP_LEGACY_UTILITY_REQUIRES_LEGACY_MSG = (
-    "Map utility modes --create-map and --export-map require --legacy-dry-ssh; "
-    "use --inventory-file with --zabbix/--update-map for the NetBox-only path"
-)
-GENERATE_DESCRIPTION_MAP_REQUIRES_LEGACY_MSG = (
-    "--generate-description-map requires --legacy-dry-ssh with -f/--file"
-)
-
-
-def resolve_uplink_cli_input(inventory_file=None, dry_ssh_file=None, legacy_dry_ssh=False):
+def resolve_uplink_cli_input(inventory_file=None):
     """
-    Validate NetBox-only vs legacy dry-ssh CLI input.
+    Validate NetBox inventory CLI input for Zabbix uplinks scripts.
 
-    Return (mode, path, error_msg) where mode is 'inventory' or 'legacy_dry_ssh'.
+    Return (mode, path, error_msg) where mode is 'inventory'.
     """
-    if inventory_file and dry_ssh_file:
-        return None, None, INVENTORY_AND_DRY_SSH_CONFLICT_MSG
     if inventory_file:
         return "inventory", inventory_file, None
-    if dry_ssh_file:
-        if not legacy_dry_ssh:
-            return None, None, LEGACY_DRY_SSH_REQUIRED_MSG
-        return "legacy_dry_ssh", dry_ssh_file, None
-    if legacy_dry_ssh:
-        return None, None, LEGACY_DRY_SSH_PATH_REQUIRED_MSG
     return None, None, INVENTORY_FILE_REQUIRED_MSG

@@ -20,23 +20,27 @@ def test_burst_sla_breach_includes_sla_tag():
     assert {"tag": "sla", "value": "true"} in tags
 
 
-def test_load_burst_metadata(tmp_path):
-    path = tmp_path / "cr.json"
-    path.write_text(
-        """
-        {
-          "host1": {
-            "Eth1": {
-              "billing_model": "Burst",
-              "provider": "Cogent",
-              "circuit_id": "Cogent-ALA-1"
+def test_load_burst_metadata_from_inventory():
+    report = {
+        "complete": [
+            {
+                "device": "host1",
+                "interface": "Eth1",
+                "billing_model": "Burst",
+                "provider": "Cogent",
+                "circuit_id": "Cogent-ALA-1",
             },
-            "Eth2": {"billing_model": "Flat", "provider": "X", "circuit_id": "X-1"}
-          }
-        }
-        """,
-        encoding="utf-8",
-    )
-    meta = load_burst_metadata(str(path))
+            {
+                "device": "host1",
+                "interface": "Eth2",
+                "billing_model": "Flat",
+                "provider": "X",
+                "circuit_id": "X-1",
+            },
+        ],
+        "incomplete": [],
+        "stats": {"complete": 2},
+    }
+    meta = load_burst_metadata(inventory_report=report)
     assert meta[("host1", "Eth1")] == {"provider": "Cogent", "circuit_id": "Cogent-ALA-1"}
     assert ("host1", "Eth2") not in meta

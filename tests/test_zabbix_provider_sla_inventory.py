@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from tests.mocks.inventory_scope import with_provider_metadata
 from tests.mocks.netbox_api import build_netbox_for_commit_rates
 from tests.mocks.zabbix_rpc import ZabbixRpcMocker
 from tests.test_zabbix_sync_extended import MSK_MX204_1_DRY_SSH
@@ -109,7 +110,7 @@ def test_main_inventory_file_maps_physical_to_logical_without_dry_ssh(
         commit_rate_kbps=10_000_000,
         tag_device=False,
     )
-    report = _inventory_report_for_circuit(nb)
+    report = with_provider_metadata(_inventory_report_for_circuit(nb))
     report["netbox_interface_relations"] = inv_mod.serialize_netbox_interface_relations(
         _mx204_beeline_netbox_relations()
     )
@@ -161,7 +162,7 @@ def test_main_no_implicit_dry_ssh_for_burst_mapping(
         commit_rate_kbps=10_000_000,
         tag_device=False,
     )
-    report = _inventory_report_for_circuit(nb)
+    report = with_provider_metadata(_inventory_report_for_circuit(nb))
     inventory = tmp_path / "inventory.json"
     inventory.write_text(json.dumps(report), encoding="utf-8")
 

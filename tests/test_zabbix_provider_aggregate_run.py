@@ -91,7 +91,6 @@ def test_run_creates_aggregate_host_and_triggers(tmp_path, monkeypatch):
             done, err = agg.run(
                 "https://z.example/api_jsonrpc.php",
                 "token",
-                str(commit_rates),
                 str(dry_ssh),
                 str(desc_map),
                 cache_path=None,
@@ -153,7 +152,6 @@ def test_run_prunes_triggers_without_limit(tmp_path, monkeypatch):
             done, err = agg.run(
                 "https://z.example/api_jsonrpc.php",
                 "t",
-                str(commit_rates),
                 str(dry_ssh),
                 str(desc_map),
                 cache_path=None,

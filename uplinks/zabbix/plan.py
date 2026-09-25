@@ -16,6 +16,11 @@ from uplinks.netbox.inventory import (
     collect_provider_limits_gbps,
     collect_provider_slo_percent,
     collect_uplink_inventory,
+    _provider_metadata_read_status,
+    inventory_has_provider_metadata_snapshot,
+    inventory_provider_metadata_complete,
+    provider_limits_gbps_from_inventory,
+    provider_slo_percent_from_inventory,
     device_names_from_complete_inventory,
     enrich_inventory_provider_stats,
     finalize_inventory_read_stats,
@@ -353,6 +358,384 @@ def _plan_util_triggers(url, token, host_to_ifaces, hostid_by_name, allow_delete
     return categories, current
 
 
+_BURST_SIMPLE_EXPR_RE = re.compile(
+    r"^(max|min)\(/([^/]+)/(.+),\s*([^)]+)\)>(.+)$",
+)
+_CANONICAL_FUNCTION_REF_RE = re.compile(r"^\{(\d+)\}$")
+
+
+def _burst_expression_threshold(expression):
+    expr = (expression or "").strip()
+    sep = expr.rfind(">")
+    if sep < 0:
+        return None
+    return expr[sep + 1 :].strip()
+
+
+def _burst_expression_function_ref(expression):
+    expr = (expression or "").strip()
+    sep = expr.rfind(">")
+    if sep < 0:
+        return None
+    return expr[:sep].strip()
+
+
+def _parse_burst_simple_expression(expression):
+    match = _BURST_SIMPLE_EXPR_RE.match((expression or "").strip())
+    if not match:
+        return None
+    return {
+        "function": match.group(1).lower(),
+        "host": match.group(2),
+        "item_key": match.group(3),
+        "parameter": match.group(4).strip(),
+        "threshold": match.group(5).strip(),
+    }
+
+
+def _normalize_burst_zabbix_parameter(parameter):
+    """Strip whitespace only; Zabbix may return '$ , 15m' for '$,15m'."""
+    return re.sub(r"\s+", "", (parameter or ""))
+
+
+def _expected_burst_zabbix_parameter(period):
+    return "$,{}".format((period or "").strip())
+
+
+def _burst_trigger_has_function_metadata(existing_trig):
+    return bool(existing_trig.get("functions")) or bool(existing_trig.get("items"))
+
+
+def _burst_validate_functions_and_items(existing_trig, parsed, existing_expression, literal_match):
+    functions = existing_trig.get("functions") or []
+    items = existing_trig.get("items") or []
+    if len(functions) != 1 or not items:
+        return False
+    fn = functions[0]
+    if (fn.get("function") or "").strip().lower() != parsed["function"]:
+        return False
+    want_parameter = _expected_burst_zabbix_parameter(parsed["parameter"])
+    if _normalize_burst_zabbix_parameter(fn.get("parameter")) != want_parameter:
+        return False
+    item_key_by_id = {
+        str(row.get("itemid")): (row.get("key_") or "").strip()
+        for row in items
+        if row.get("itemid") is not None
+    }
+    item_key = item_key_by_id.get(str(fn.get("itemid") or ""))
+    if item_key != parsed["item_key"]:
+        return False
+    function_ref = _burst_expression_function_ref(existing_expression)
+    ref_match = (
+        _CANONICAL_FUNCTION_REF_RE.fullmatch(function_ref) if function_ref else None
+    )
+    if ref_match:
+        if _burst_expression_threshold(existing_expression) != parsed["threshold"]:
+            return False
+        if str(fn.get("functionid") or "") != ref_match.group(1):
+            return False
+    elif not literal_match:
+        return False
+    return True
+
+
+def _burst_trigger_expression_matches(existing_trig, expected_expression):
+    """True when Zabbix expression matches expected max/min burst form (literal or canonical)."""
+    existing_expression = (existing_trig.get("expression") or "").strip()
+    expected_expression = (expected_expression or "").strip()
+    literal_match = existing_expression == expected_expression
+    if literal_match and not _burst_trigger_has_function_metadata(existing_trig):
+        return True
+    parsed = _parse_burst_simple_expression(expected_expression)
+    if not parsed:
+        return False
+    if literal_match:
+        return _burst_validate_functions_and_items(
+            existing_trig, parsed, existing_expression, literal_match=True
+        )
+    return _burst_validate_functions_and_items(
+        existing_trig, parsed, existing_expression, literal_match=False
+    )
+
+
+def _burst_trigger_matches_spec(existing_trig, expected, role_to_triggerid):
+    """Compare one Zabbix trigger row against an expected Burst spec."""
+    if (existing_trig.get("description") or "").strip() != expected["description"]:
+        return False
+    if not _burst_trigger_expression_matches(existing_trig, expected["expression"]):
+        return False
+    if str(existing_trig.get("priority", "0")) != str(expected["priority"]):
+        return False
+    from zabbix_sync_commit_rate import (
+        _dependency_id_list_from_trigger,
+        normalize_trigger_tags,
+    )
+
+    if normalize_trigger_tags(existing_trig.get("tags")) != normalize_trigger_tags(
+        expected.get("tags")
+    ):
+        return False
+    if str(existing_trig.get("status", "0")) != "0":
+        return False
+
+    depends_on = expected.get("depends_on_role")
+    if depends_on:
+        want_id = role_to_triggerid.get(depends_on)
+        if not want_id:
+            return False
+        expected_dep_sorted = sorted([str(want_id)])
+    else:
+        expected_dep_sorted = []
+    actual_dep_sorted = _dependency_id_list_from_trigger(existing_trig)
+    if actual_dep_sorted != expected_dep_sorted:
+        return False
+    return True
+
+
+def _burst_roles_blocked_by_dependencies(specs, matched, ambiguous_roles, role_to_triggerid):
+    """Roles that cannot be created/updated while a required depends_on_role is unresolved."""
+    roles_being_created = {
+        s["role"]
+        for s in specs
+        if s["role"] not in matched and s["role"] not in ambiguous_roles
+    }
+    blocked = set()
+    for spec in specs:
+        role = spec["role"]
+        dep = spec.get("depends_on_role")
+        if not dep:
+            continue
+        if dep in ambiguous_roles:
+            blocked.add(role)
+            continue
+        if dep not in role_to_triggerid:
+            if role in matched:
+                blocked.add(role)
+            elif role in roles_being_created and dep not in roles_being_created:
+                blocked.add(role)
+    return blocked
+
+
+def _plan_burst_triggers(
+    url,
+    token,
+    burst_pairs,
+    burst_meta,
+    hostid_by_name,
+    host_technical_by_hostid,
+    allow_delete=True,
+    debug=False,
+):
+    from zabbix_sync_commit_rate import (
+        TRIGGER_DESC_90_SUFFIX,
+        TRIGGER_DESC_100_SUFFIX,
+        TRIGGER_DESC_SLA_BREACH_SUFFIX,
+        expected_burst_trigger_specs,
+        get_bits_received_item_key,
+    )
+
+    categories = _empty_categories()
+    current = {}
+    expected_by_host_iface = {}
+    for dev_name, iface_name in sorted(burst_pairs or []):
+        if dev_name not in hostid_by_name:
+            categories["skipped"].append(
+                {
+                    "host": dev_name,
+                    "interface": iface_name,
+                    "reason": "host not found in Zabbix",
+                }
+            )
+            continue
+        hostid = hostid_by_name[dev_name]
+        host_technical = host_technical_by_hostid.get(hostid) or dev_name
+        item_key = get_bits_received_item_key(url, token, hostid, iface_name, debug=debug)
+        if not item_key:
+            categories["skipped"].append(
+                {
+                    "host": dev_name,
+                    "interface": iface_name,
+                    "reason": "Bits received item not found",
+                }
+            )
+            continue
+        meta = (burst_meta or {}).get((dev_name, iface_name)) or {}
+        specs = expected_burst_trigger_specs(
+            host_technical,
+            iface_name,
+            item_key,
+            provider=meta.get("provider"),
+            circuit_id=meta.get("circuit_id"),
+        )
+        expected_by_host_iface[(dev_name, iface_name)] = specs
+
+    for dev_name, iface_name in sorted(expected_by_host_iface.keys()):
+        hostid = hostid_by_name[dev_name]
+        specs = expected_by_host_iface[(dev_name, iface_name)]
+        res, err = zabbix_request(
+            url,
+            token,
+            "trigger.get",
+            {
+                "hostids": [hostid],
+                "output": ["triggerid", "description", "expression", "priority", "status"],
+                "search": {"description": "Interface {}:".format((iface_name or "").strip())},
+                "selectTags": "extend",
+                "selectDependencies": "extend",
+                "selectFunctions": "extend",
+                "selectItems": ["itemid", "key_"],
+            },
+            debug=debug,
+        )
+        if err:
+            return None, None, "trigger.get burst: {}".format(err)
+        suffixes = (
+            TRIGGER_DESC_90_SUFFIX,
+            TRIGGER_DESC_100_SUFFIX,
+            TRIGGER_DESC_SLA_BREACH_SUFFIX,
+        )
+        existing_burst = []
+        for trig in res or []:
+            desc = (trig.get("description") or "").strip()
+            if not any(desc.endswith(suffix) for suffix in suffixes):
+                continue
+            tags = trig.get("tags") or []
+            if tags and not any(
+                tg.get("tag") == "billing" and tg.get("value") == "burst" for tg in tags
+            ):
+                continue
+            existing_burst.append(trig)
+        current.setdefault(dev_name, []).extend(
+            {
+                "triggerid": t.get("triggerid"),
+                "description": t.get("description"),
+                "interface": iface_name,
+            }
+            for t in existing_burst
+        )
+        matched = {}
+        ambiguous_roles = set()
+        role_to_triggerid = {}
+        for spec in specs:
+            desc_want = spec["description"]
+            trig_match = None
+            ambiguous = False
+            for trig in existing_burst:
+                if (trig.get("description") or "").strip() != desc_want:
+                    continue
+                if trig_match is not None:
+                    ambiguous = True
+                    break
+                trig_match = trig
+            if ambiguous:
+                ambiguous_roles.add(spec["role"])
+                categories["skipped"].append(
+                    {
+                        "host": dev_name,
+                        "interface": iface_name,
+                        "description": desc_want,
+                        "role": spec["role"],
+                        "reason": "ambiguous burst trigger description match",
+                    }
+                )
+                continue
+            if trig_match is not None:
+                matched[spec["role"]] = trig_match
+                tid = trig_match.get("triggerid")
+                if tid:
+                    role_to_triggerid[spec["role"]] = tid
+        dependency_blocked = _burst_roles_blocked_by_dependencies(
+            specs, matched, ambiguous_roles, role_to_triggerid
+        )
+        for spec in specs:
+            if spec["role"] not in dependency_blocked:
+                continue
+            categories["skipped"].append(
+                {
+                    "host": dev_name,
+                    "interface": iface_name,
+                    "description": spec["description"],
+                    "role": spec["role"],
+                    "reason": "burst trigger dependency unavailable",
+                }
+            )
+        missing = [
+            s
+            for s in specs
+            if s["role"] not in matched
+            and s["role"] not in ambiguous_roles
+            and s["role"] not in dependency_blocked
+        ]
+        if missing:
+            categories["create"].append(
+                {
+                    "host": dev_name,
+                    "interface": iface_name,
+                    "triggers": [s["description"] for s in missing],
+                }
+            )
+        unchanged = []
+        for spec in specs:
+            if spec["role"] not in matched:
+                continue
+            if spec["role"] in ambiguous_roles or spec["role"] in dependency_blocked:
+                continue
+            trig = matched[spec["role"]]
+            if _burst_trigger_matches_spec(trig, spec, role_to_triggerid):
+                unchanged.append(spec)
+            else:
+                categories["update"].append(
+                    {
+                        "host": dev_name,
+                        "interface": iface_name,
+                        "triggerid": trig.get("triggerid"),
+                        "description": spec["description"],
+                    }
+                )
+        if unchanged and not missing:
+            categories["unchanged"].append(
+                {
+                    "host": dev_name,
+                    "interface": iface_name,
+                    "triggers": [s["description"] for s in unchanged],
+                }
+            )
+        elif unchanged and missing:
+            for spec in unchanged:
+                trig = matched[spec["role"]]
+                categories["unchanged"].append(
+                    {
+                        "host": dev_name,
+                        "interface": iface_name,
+                        "triggerid": trig.get("triggerid"),
+                        "description": spec["description"],
+                    }
+                )
+        expected_desc = {s["description"] for s in specs}
+        for trig in existing_burst:
+            desc = (trig.get("description") or "").strip()
+            tid = trig.get("triggerid")
+            if desc in expected_desc:
+                continue
+            entry = {
+                "host": dev_name,
+                "interface": iface_name,
+                "triggerid": tid,
+                "description": desc,
+            }
+            if allow_delete:
+                categories["delete"].append(entry)
+            else:
+                categories["skipped"].append(
+                    dict(
+                        entry,
+                        suppressed="delete",
+                        reason="delete suppressed (destructive plan disabled)",
+                    )
+                )
+    return categories, current, None
+
+
 def _sanitize_provider_host_name(name):
     from zabbix_provider_aggregate import _sanitize_provider_name
 
@@ -683,6 +1066,7 @@ def _prepare_uplink_plan_context(
     dry_ssh_devices,
     hostid_by_name,
     netbox_relations,
+    inventory_from_file=False,
     debug=False,
 ):
     """Load scoped edges and optional NetBox provider limits for map/dashboard/aggregate planning."""
@@ -739,19 +1123,33 @@ def _prepare_uplink_plan_context(
     provider_slo_percent = {}
     provider_limits_read = "ok"
     provider_slo_read = "ok"
-    nb = netbox_client_from_env(debug=debug)
-    if nb is None:
-        provider_limits_read = "unavailable"
-        provider_slo_read = "unavailable"
+    if inventory_from_file or inventory_has_provider_metadata_snapshot(inventory_report):
+        provider_slo_read = inventory_report.get("provider_slo_read") or "missing"
+        provider_limits_read = inventory_report.get("provider_limits_read") or "missing"
+        if inventory_provider_metadata_complete(inventory_report):
+            provider_limits_gbps = provider_limits_gbps_from_inventory(inventory_report)
+            provider_slo_percent = provider_slo_percent_from_inventory(inventory_report)
+        elif inventory_from_file:
+            return None, (
+                "inventory snapshot missing or incomplete provider SLO/limit metadata "
+                "(provider_slo_read={}, provider_limits_read={})".format(
+                    provider_slo_read, provider_limits_read
+                )
+            )
     else:
-        provider_limits_gbps, limits_err = collect_provider_limits_gbps(nb, debug=debug)
-        if limits_err:
-            provider_limits_read = "error"
-        slo, slo_err = collect_provider_slo_percent(nb, debug=debug)
-        if slo_err:
-            provider_slo_read = "error"
+        nb = netbox_client_from_env(debug=debug)
+        if nb is None:
+            provider_limits_read = "unavailable"
+            provider_slo_read = "unavailable"
         else:
-            provider_slo_percent = slo or {}
+            provider_limits_gbps, limits_err = collect_provider_limits_gbps(nb, debug=debug)
+            if limits_err:
+                provider_limits_read = _provider_metadata_read_status(limits_err)
+            slo, slo_err = collect_provider_slo_percent(nb, debug=debug)
+            if slo_err:
+                provider_slo_read = _provider_metadata_read_status(slo_err)
+            else:
+                provider_slo_percent = slo or {}
 
     limits_read_error = provider_limits_read != "ok"
     slo_read_error = provider_slo_read != "ok"
@@ -1571,19 +1969,13 @@ def build_zabbix_plan(
         inventory_report = collect_scoped_inventory(nb, tag, debug=debug)
 
     netbox_relations = netbox_interface_relations_from_report(inventory_report)
-    nb_for_relations = None
     if netbox_relations is None:
+        from uplinks.netbox.inventory import _empty_netbox_interface_relations
+
         if inventory_file:
-            nb_url = os.environ.get("NETBOX_URL", "").strip()
-            nb_token = os.environ.get("NETBOX_TOKEN", "").strip()
-            if nb_url and nb_token:
-                try:
-                    nb_for_relations = pynetbox.api(nb_url, token=nb_token)
-                except Exception:
-                    nb_for_relations = None
+            netbox_relations = _empty_netbox_interface_relations()
         else:
             nb_for_relations = nb
-        if nb_for_relations is not None:
             try:
                 device_names = device_names_from_complete_inventory(inventory_report)
                 netbox_relations = collect_netbox_interface_relations(
@@ -1632,9 +2024,11 @@ def build_zabbix_plan(
         netbox_relations=netbox_relations,
     )
     hostnames = sorted(set(host_to_iface_bps.keys()) | set(host_to_util_ifaces.keys()))
-    hostid_by_name, _host_technical = _resolve_hostids(zabbix_url, zabbix_token, hostnames, debug=debug)
+    hostid_by_name, host_technical_by_hostid = _resolve_hostids(
+        zabbix_url, zabbix_token, hostnames, debug=debug
+    )
     if hostid_by_name is None:
-        return None, _host_technical
+        return None, host_technical_by_hostid
 
     providers = providers_from_complete_inventory(inventory_report)
     allow_delete = not inventory_read_failed(inventory_report)
@@ -1646,6 +2040,7 @@ def build_zabbix_plan(
         dry_ssh_devices,
         hostid_by_name,
         netbox_relations,
+        inventory_from_file=bool(inventory_file),
         debug=debug,
     )
     if uplink_err:
@@ -1731,10 +2126,37 @@ def build_zabbix_plan(
         return None, svc_err
 
     burst_plan = _empty_categories()
+    burst_current = {}
     if create_link_triggers:
-        burst_plan = _category_not_evaluated(
-            "Burst link trigger diff not implemented in plan mode; use zabbix_sync_commit_rate --dry-run"
+        from zabbix_sync_commit_rate import (
+            load_burst_metadata,
+            load_burst_pairs,
         )
+
+        burst_pairs = load_burst_pairs(
+            inventory_report=inventory_report,
+            dry_ssh_devices=dry_ssh_devices,
+            netbox_relations=netbox_relations,
+            debug=debug,
+        )
+        burst_meta = load_burst_metadata(
+            inventory_report=inventory_report,
+            dry_ssh_devices=dry_ssh_devices,
+            netbox_relations=netbox_relations,
+            debug=debug,
+        )
+        burst_plan, burst_current, burst_err = _plan_burst_triggers(
+            zabbix_url,
+            zabbix_token,
+            burst_pairs,
+            burst_meta,
+            hostid_by_name,
+            host_technical_by_hostid,
+            allow_delete=allow_delete,
+            debug=debug,
+        )
+        if burst_err:
+            return None, burst_err
     else:
         burst_plan = _category_not_evaluated("Burst link triggers disabled (no --create-link-triggers)")
 
@@ -1751,6 +2173,7 @@ def build_zabbix_plan(
             "hosts_resolved": {name: str(hostid) for name, hostid in sorted(hostid_by_name.items())},
             "macros": macro_current,
             "util_triggers": util_current,
+            "burst_triggers": burst_current,
             "aggregate_hosts": agg_current,
             "maps": map_current,
             "dashboards": dash_current,

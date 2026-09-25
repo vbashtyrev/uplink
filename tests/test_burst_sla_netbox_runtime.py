@@ -71,35 +71,8 @@ def test_load_burst_pairs_prefers_inventory(tmp_path):
         json.dumps({"Other": {"Eth9": {"billing_model": "Burst"}}}),
         encoding="utf-8",
     )
-    pairs = load_burst_pairs(str(cr), inventory_report=report, debug=True)
+    pairs = load_burst_pairs(inventory_report=report, debug=True)
     assert pairs == {("R1", "Eth1")}
-    pairs_legacy = load_burst_pairs(
-        str(cr),
-        inventory_report=report,
-        legacy_commit_rates_fallback=True,
-        debug=True,
-    )
-    assert pairs_legacy == {("R1", "Eth1"), ("Other", "Eth9")}
-
-
-def test_load_burst_pairs_partial_fallback_warning(tmp_path, capsys):
-    nb = build_netbox_for_commit_rates(tag_device=False)
-    with patch("uplinks.netbox.inventory.netbox_border_tag", return_value=None):
-        report = collect_uplink_inventory(nb, tag=None)
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text(
-        json.dumps({"H": {"Eth1": {"billing_model": "Burst"}}}),
-        encoding="utf-8",
-    )
-    pairs = load_burst_pairs(
-        str(cr),
-        inventory_report=report,
-        legacy_commit_rates_fallback=True,
-        debug=False,
-    )
-    assert pairs == {("H", "Eth1")}
-    err = capsys.readouterr().err
-    assert "legacy fallback" in err
 
 
 def test_load_burst_metadata_prefers_inventory(tmp_path):
@@ -128,64 +101,9 @@ def test_load_burst_metadata_prefers_inventory(tmp_path):
         ),
         encoding="utf-8",
     )
-    meta = load_burst_metadata(str(cr), inventory_report=report)
+    meta = load_burst_metadata(inventory_report=report)
     assert meta[("R1", "Eth1")] == {"provider": "Cogent", "circuit_id": "CKT-7"}
     assert ("Other", "Eth9") not in meta
-
-
-def test_load_burst_metadata_partial_fallback(tmp_path, capsys):
-    nb = build_netbox_for_commit_rates(
-        device_name="R1",
-        iface_name="Eth1",
-        provider_name="Cogent",
-        circuit_id=7,
-        circuit_custom_fields={"billing_model": "Burst"},
-        tag_device=False,
-    )
-    with patch("uplinks.netbox.inventory.netbox_border_tag", return_value=None):
-        report = collect_uplink_inventory(nb, tag=None)
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text(
-        json.dumps(
-            {
-                "R1": {
-                    "Eth1": {
-                        "billing_model": "Burst",
-                        "provider": "Wrong",
-                        "circuit_id": "WRONG",
-                    },
-                },
-                "Other": {
-                    "Eth9": {
-                        "billing_model": "Burst",
-                        "provider": "LegacyISP",
-                        "circuit_id": "CKT-JSON",
-                    },
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    meta = load_burst_metadata(
-        str(cr),
-        inventory_report=report,
-        legacy_commit_rates_fallback=True,
-    )
-    assert meta[("R1", "Eth1")] == {"provider": "Cogent", "circuit_id": "CKT-7"}
-    assert meta[("Other", "Eth9")] == {"provider": "LegacyISP", "circuit_id": "CKT-JSON"}
-    err = capsys.readouterr().err
-    assert "Eth9" in err or "Other" in err
-    assert "legacy fallback" in err
-
-
-def test_load_burst_pairs_invalid_json_with_inventory_ignored_without_legacy(tmp_path):
-    nb = build_netbox_for_commit_rates(tag_device=False)
-    with patch("uplinks.netbox.inventory.netbox_border_tag", return_value=None):
-        report = collect_uplink_inventory(nb, tag=None)
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{not json", encoding="utf-8")
-    pairs = load_burst_pairs(str(cr), inventory_report=report)
-    assert isinstance(pairs, set)
 
 
 def test_burst_circuits_unique_from_inventory():
@@ -277,49 +195,8 @@ def test_resolve_providers_netbox_manual_without_tag():
     ):
         ctx = svc._load_netbox_services_context(debug=False)
     assert ctx is not None
-    providers = svc._resolve_providers(ctx, {}, debug=False)
+    providers = svc._resolve_providers(ctx, debug=False)
     assert providers == ["ManualISP"]
-
-
-def test_resolve_providers_fallback_commit_rates(capsys):
-    commit_rates = {"_provider_limits": {"LegacyISP": 10}}
-    providers = svc._resolve_providers(
-        None, commit_rates, legacy_commit_rates_fallback=True, debug=True
-    )
-    assert providers == ["LegacyISP"]
-    assert "legacy fallback" in capsys.readouterr().err
-
-
-def test_resolve_providers_partial_fallback_from_commit_rates(capsys):
-    ctx = {"providers": {"ManualISP"}}
-    commit_rates = {"_provider_limits": {"ManualISP": 5, "LegacyISP": 10}}
-    providers = svc._resolve_providers(
-        ctx, commit_rates, legacy_commit_rates_fallback=True, debug=False
-    )
-    assert providers == ["LegacyISP", "ManualISP"]
-    err = capsys.readouterr().err
-    assert "LegacyISP" in err
-    assert "legacy fallback" in err
-
-
-def test_resolve_burst_circuits_partial_fallback(capsys):
-    ctx = {"burst_circuits": [("CKT-NB", "ManualISP")]}
-    commit_rates = {
-        "h1": {
-            "Eth1": {
-                "billing_model": "Burst",
-                "provider": "LegacyISP",
-                "circuit_id": "CKT-JSON",
-            },
-        },
-    }
-    burst_pairs = svc._resolve_burst_circuits(
-        ctx, commit_rates, legacy_commit_rates_fallback=True, debug=False
-    )
-    assert burst_pairs == [("CKT-JSON", "LegacyISP"), ("CKT-NB", "ManualISP")]
-    err = capsys.readouterr().err
-    assert "CKT-JSON" in err
-    assert "legacy fallback" in err
 
 
 def test_load_netbox_services_context_auth_denied(monkeypatch):
@@ -367,7 +244,7 @@ def test_main_auth_denied_exits_without_commit_rates_fallback(tmp_path, monkeypa
         .activate(monkeypatch)
     )
 
-    def fake_load_ctx(debug=False):
+    def fake_load_ctx(debug=False, inventory_report=None):
         return {
             "read_error": True,
             "stats": {"error": svc.ERROR_AUTH_DENIED},
@@ -379,7 +256,7 @@ def test_main_auth_denied_exits_without_commit_rates_fallback(tmp_path, monkeypa
         }
 
     monkeypatch.setattr("zabbix_provider_services._load_netbox_services_context", fake_load_ctx)
-    monkeypatch.setattr(sys, "argv", ["zabbix_provider_services.py", "-f", str(missing_cr)])
+    monkeypatch.setattr(sys, "argv", ["zabbix_provider_services.py"])
     with pytest.raises(SystemExit) as exc:
         svc.main()
     assert exc.value.code == 1
@@ -422,83 +299,13 @@ def test_main_netbox_without_commit_rates_file(tmp_path, monkeypatch):
         monkeypatch.setattr(
             sys,
             "argv",
-            ["zabbix_provider_services.py", "-f", str(missing_cr), "--parent-service", "Uplinks providers"],
+            ["zabbix_provider_services.py", "--parent-service", "Uplinks providers"],
         )
         svc.main()
 
     service_names = [s["name"] for s in stores["services"]]
     assert "Uplinks ManualISP" in service_names
     assert "Uplinks Burst CKT-55" in service_names
-
-
-def test_main_invalid_commit_rates_without_legacy_uses_netbox_only(tmp_path, monkeypatch, capsys):
-    """NetBox-first runtime must ignore broken commit_rates.json unless legacy flag is set."""
-    nb = build_netbox_for_commit_rates(
-        device_name="ALA-KZT-7280TR-1",
-        iface_name="Ethernet51/1",
-        provider_name="ManualISP",
-        provider_custom_fields={"slo_percent": 99.88},
-        tag_device=False,
-    )
-    bad_cr = tmp_path / "commit_rates.json"
-    bad_cr.write_text("{not json", encoding="utf-8")
-
-    stores, service_get, service_create, service_update, service_delete, sla_get, sla_create, sla_update = _service_handlers()
-    (
-        ZabbixRpcMocker()
-        .on("user.get", lambda p: [{"userid": "1"}])
-        .on("service.get", service_get)
-        .on("service.create", service_create)
-        .on("service.update", service_update)
-        .on("service.delete", service_delete)
-        .on("sla.get", sla_get)
-        .on("sla.create", sla_create)
-        .on("sla.update", sla_update)
-        .activate(monkeypatch)
-    )
-
-    monkeypatch.setenv("ZABBIX_URL", "https://zabbix.example")
-    monkeypatch.setenv("ZABBIX_TOKEN", "token")
-    with patch("zabbix_provider_services.netbox_client_from_env", return_value=nb), patch(
-        "zabbix_provider_services.netbox_border_tag", return_value=None
-    ):
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            ["zabbix_provider_services.py", "-f", str(bad_cr)],
-        )
-        svc.main()
-
-    err = capsys.readouterr().err
-    assert "invalid JSON" not in err
-    assert "legacy fallback" not in err
-    assert any(s["name"] == "Uplinks ManualISP" for s in stores["services"])
-
-
-def test_main_legacy_flag_rejects_invalid_commit_rates(tmp_path, monkeypatch, capsys, zabbix_env):
-    bad_cr = tmp_path / "commit_rates.json"
-    bad_cr.write_text("{not json", encoding="utf-8")
-
-    (
-        ZabbixRpcMocker()
-        .on("user.get", lambda p: [{"userid": "1"}])
-        .activate(monkeypatch)
-    )
-    monkeypatch.setattr("zabbix_provider_services.netbox_client_from_env", lambda **k: None)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "zabbix_provider_services.py",
-            "-f",
-            str(bad_cr),
-            "--legacy-commit-rates-fallback",
-        ],
-    )
-    with pytest.raises(SystemExit) as exc:
-        svc.main()
-    assert exc.value.code == 1
-    assert "invalid JSON" in capsys.readouterr().err
 
 
 def test_resolve_provider_slo_netbox_then_project_config(capsys):
@@ -509,20 +316,6 @@ def test_resolve_provider_slo_netbox_then_project_config(capsys):
     assert svc._resolve_provider_slo("Cogent", ctx, project_slo=99.95) == 99.9
     assert svc._resolve_provider_slo("ManualISP", ctx, project_slo=99.95) == 99.95
     assert capsys.readouterr().err == ""
-
-
-def test_resolve_provider_slo_legacy_commit_rates_fallback(capsys):
-    ctx = {"providers": {"ManualISP"}, "provider_slo_percent": {}}
-    assert svc._resolve_provider_slo(
-        "ManualISP",
-        ctx,
-        project_slo=None,
-        legacy_global_slo=99.5,
-        legacy_commit_rates_fallback=True,
-    ) == 99.5
-    err = capsys.readouterr().err
-    assert "slo_percent" in err
-    assert "legacy fallback" in err
 
 
 def _inventory_report_for_circuit(nb):
@@ -562,12 +355,10 @@ def test_beeline_burst_metadata_from_netbox_circuit_41(tmp_path, capsys):
     report = _inventory_report_for_circuit(nb)
     cr = _burst_commit_rates_with_wrong_logical(tmp_path, "MSK-M9-MX204-1", "ae5.0")
     meta = load_burst_metadata(
-        str(cr),
         inventory_report=report,
         dry_ssh_devices=MSK_MX204_1_DRY_SSH,
     )
     pairs = load_burst_pairs(
-        str(cr),
         inventory_report=report,
         dry_ssh_devices=MSK_MX204_1_DRY_SSH,
     )
@@ -591,7 +382,6 @@ def test_ertelecom_burst_metadata_from_netbox_circuit_42(tmp_path, capsys):
     report = _inventory_report_for_circuit(nb)
     cr = _burst_commit_rates_with_wrong_logical(tmp_path, "MSK-M9-MX204-2", "ae3.0")
     meta = load_burst_metadata(
-        str(cr),
         inventory_report=report,
         dry_ssh_devices=MSK_MX204_2_DRY_SSH,
     )
@@ -613,7 +403,7 @@ def test_fiord_burst_metadata_from_netbox_circuit_52(tmp_path, capsys):
     )
     report = _inventory_report_for_circuit(nb)
     cr = _burst_commit_rates_with_wrong_logical(tmp_path, "WAW-EQX-7280QR-2", "Ethernet34/1")
-    meta = load_burst_metadata(str(cr), inventory_report=report)
+    meta = load_burst_metadata(inventory_report=report)
     assert meta[("WAW-EQX-7280QR-2", "Ethernet34/1")] == {
         "provider": "Fiord",
         "circuit_id": "CKT-52",
@@ -630,9 +420,6 @@ def test_runtime_slo_uses_project_config_not_commit_rates(tmp_path, monkeypatch)
         circuit_custom_fields={"billing_model": "Burst"},
         tag_device=False,
     )
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text(json.dumps({"_provider_sla": 99.0}), encoding="utf-8")
-
     stores, service_get, service_create, service_update, service_delete, sla_get, sla_create, sla_update = _service_handlers()
     (
         ZabbixRpcMocker()
@@ -655,7 +442,7 @@ def test_runtime_slo_uses_project_config_not_commit_rates(tmp_path, monkeypatch)
         monkeypatch.setattr(
             sys,
             "argv",
-            ["zabbix_provider_services.py", "-f", str(cr), "--parent-service", "Uplinks providers"],
+            ["zabbix_provider_services.py", "--parent-service", "Uplinks providers"],
         )
         svc.main()
 
@@ -718,24 +505,6 @@ def test_main_netbox_burst_and_slo(tmp_path, monkeypatch):
         circuit_custom_fields={"billing_model": "Burst"},
         tag_device=False,
     )
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text(
-        json.dumps(
-            {
-                "_provider_limits": {"Wrong": 1},
-                "_provider_sla": 99.0,
-                "ignored": {
-                    "Eth1": {
-                        "billing_model": "Burst",
-                        "provider": "Wrong",
-                        "circuit_id": "WRONG",
-                    },
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
     stores, service_get, service_create, service_update, service_delete, sla_get, sla_create, sla_update = _service_handlers()
     (
         ZabbixRpcMocker()
@@ -758,7 +527,7 @@ def test_main_netbox_burst_and_slo(tmp_path, monkeypatch):
         monkeypatch.setattr(
             sys,
             "argv",
-            ["zabbix_provider_services.py", "-f", str(cr), "--parent-service", "Uplinks providers"],
+            ["zabbix_provider_services.py", "--parent-service", "Uplinks providers"],
         )
         svc.main()
 

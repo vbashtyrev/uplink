@@ -184,10 +184,18 @@ def test_ensure_simple_threshold_trigger_update(monkeypatch):
 
 def test_ensure_simple_warn_trigger_create(monkeypatch):
     created = []
+    desc100 = "Interface Eth1: {}".format(TRIGGER_DESC_100_SUFFIX)
+
+    def trigger_get(params):
+        out = params.get("output") or []
+        if out == ["triggerid", "description"]:
+            return [{"triggerid": "high1", "description": desc100}]
+        return []
+
     mocker = (
         ZabbixRpcMocker()
         .on("item.get", _item_handlers_for_util())
-        .on("trigger.get", lambda p: [])
+        .on("trigger.get", trigger_get)
         .on("trigger.create", lambda p: created.append(p) or {"triggerids": ["w1"]})
     )
     mocker.activate(monkeypatch)

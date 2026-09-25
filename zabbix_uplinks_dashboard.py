@@ -9,10 +9,7 @@ import sys
 from env_urls import load_env_file_if_present
 from uplinks.data import resolve_uplink_cli_input
 from zabbix_map import (
-    DESCRIPTION_MAP_FILE,
     ZABBIX_CACHE_FILE,
-    load_devices_json,
-    load_description_map,
     load_zabbix_cache,
     save_zabbix_cache,
     fetch_zabbix_hosts_and_items,
@@ -597,7 +594,7 @@ def create_dashboard_by_provider(
                 {"type": 1, "name": "reference", "value": ref_agg},
                 {"type": 0, "name": "legend_statistic", "value": 1},
                 {"type": 0, "name": "legend_lines", "value": 1},
-                {"type": 0, "name": "simple_triggers", "value": 1}, # threshold line 90%/100% by _provider_limits
+                {"type": 0, "name": "simple_triggers", "value": 1},  # 90%/100% from provider aggregate_limit_gbps (NetBox inventory)
                 {"type": 0, "name": "ds.0.dataset_type", "value": 0},
                 {"type": 4, "name": "ds.0.itemids.0", "value": item_id_int},
                 {"type": 1, "name": "ds.0.color.0", "value": "1A7F37" if kind == "in" else "E02F44"},
@@ -671,16 +668,14 @@ def create_dashboard_by_provider(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Create/update Zabbix dashboard with In/Out graphs by uplink from dry-ssh.json.",
+        description="Create/update Zabbix dashboard with In/Out graphs by uplink from NetBox inventory.",
     )
-    parser.add_argument("-f", "--file", default=None, help="Legacy path to dry-ssh.json")
     parser.add_argument(
         "--inventory-file",
         default=None,
         metavar="FILE",
         help="Scoped inventory JSON from netbox_uplinks_inventory.py --json",
     )
-    parser.add_argument("-m", "--description-map", default=DESCRIPTION_MAP_FILE, help="File description_to_name.json")
     parser.add_argument("--dashboard-name", default=DASHBOARD_NAME, help="Name of the main dashboard in Zabbix")
     parser.add_argument("--dashboard-by-location", default=DASHBOARD_NAME_BY_LOCATION, metavar="NAME",
                         help="Create a second dashboard with graphs by page (one page = one location). Empty line - do not create")
@@ -691,24 +686,12 @@ def main():
     parser.add_argument("--no-cache", action="store_true", help="Do not use Zabbix cache")
     parser.add_argument("--no-show-threshold", action="store_true",
                         help="Do not draw trigger thresholds (Simple triggers) on graphs")
-    parser.add_argument(
-        "--legacy-dry-ssh",
-        action="store_true",
-        help="Use legacy dry-ssh.json input (-f/--file) instead of --inventory-file",
-    )
-    parser.add_argument(
-        "--legacy-provider-filter",
-        action="store_true",
-        help="Use description-based uplink filter instead of NetBox circuit scope (legacy)",
-    )
     parser.add_argument("--debug", action="store_true", help="Debug output")
     args = parser.parse_args()
     show_threshold = not args.no_show_threshold
 
     input_mode, input_path, input_err = resolve_uplink_cli_input(
         inventory_file=args.inventory_file,
-        dry_ssh_file=args.file,
-        legacy_dry_ssh=args.legacy_dry_ssh,
     )
     if input_err:
         print(input_err, file=sys.stderr)
@@ -729,31 +712,23 @@ def main():
         if not devices:
             print("No devices in scoped inventory", file=sys.stderr)
             sys.exit(1)
-    else:
-        desc_to_name = load_description_map(args.description_map)
-        data, err = load_devices_json(input_path)
-        if err:
-            print(err, file=sys.stderr)
-            sys.exit(1)
-        devices = data["devices"]
 
     device_iface_to_provider = {}
-    inventory_scoped = not args.legacy_provider_filter
+    inventory_scoped = True
     inventory_read_error = False
     netbox_relations = None
-    if not args.legacy_provider_filter:
-        if inv_ctx is None:
-            inv_ctx = load_uplink_provider_context(
-                devices,
-                debug=args.debug,
-                inventory_report=inventory_report,
-            )
-        if inv_ctx is not None:
-            device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
-            netbox_relations = inv_ctx.get("netbox_interface_relations")
-            inventory_read_error = bool(inv_ctx.get("read_error"))
-            if inventory_read_error:
-                arm_netbox_incomplete_guard(inv_ctx.get("stats"))
+    if inv_ctx is None:
+        inv_ctx = load_uplink_provider_context(
+            devices,
+            debug=args.debug,
+            inventory_report=inventory_report,
+        )
+    if inv_ctx is not None:
+        device_iface_to_provider = inv_ctx.get("device_iface_to_provider") or {}
+        netbox_relations = inv_ctx.get("netbox_interface_relations")
+        inventory_read_error = bool(inv_ctx.get("read_error"))
+        if inventory_read_error:
+            arm_netbox_incomplete_guard(inv_ctx.get("stats"))
 
     url, token = _get_zabbix_url_token()
     if not url:
@@ -761,7 +736,7 @@ def main():
         sys.exit(1)
 
     hostnames = set(devices.keys())
-    cache_base = args.inventory_file or args.file
+    cache_base = args.inventory_file
     cache_path = os.path.join(
         os.path.dirname(os.path.abspath(cache_base)) if cache_base else ".",
         ZABBIX_CACHE_FILE,

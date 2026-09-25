@@ -120,7 +120,6 @@ def test_main_no_zabbix_env(monkeypatch, tmp_path):
         "argv",
         [
             "zabbix_uplinks_dashboard.py",
-            "--legacy-dry-ssh",
             "-f",
             str(FIXTURES / "dry_ssh_minimal.json"),
             "--no-cache",

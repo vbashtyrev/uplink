@@ -1,0 +1,100 @@
+{
+  "complete": [
+    {
+      "device": "ALA-KZT-7280TR-1",
+      "provider": "KZT",
+      "interface": "Ethernet51/1"
+    },
+    {
+      "device": "ALA-KZT-7280TR-2",
+      "provider": "KZT",
+      "interface": "Ethernet51/1"
+    },
+    {
+      "device": "DFW-DR-07-7280QR-1",
+      "provider": "Cogent",
+      "interface": "Ethernet24/1"
+    },
+    {
+      "device": "DFW-DR-07-7280QR-2",
+      "provider": "Hurricane",
+      "interface": "Ethernet24/1"
+    },
+    {
+      "device": "MIA-EQX-7280QR-1",
+      "provider": "Cogent",
+      "interface": "Ethernet23/1"
+    },
+    {
+      "device": "MIA-EQX-7280QR-2",
+      "provider": "Hurricane",
+      "interface": "Ethernet24/1"
+    },
+    {
+      "device": "MIA2-365DC-7280QR-1",
+      "provider": "365 Data Centers",
+      "interface": "Ethernet59/1"
+    },
+    {
+      "device": "MNL-7280QR-1",
+      "provider": "InfiniVAN",
+      "interface": "Ethernet13/1"
+    },
+    {
+      "device": "MNL-7280QR-2",
+      "provider": "InfiniVAN",
+      "interface": "Ethernet13/1"
+    },
+    {
+      "device": "MSK-M9-MX204-1",
+      "provider": "Beeline",
+      "interface": "et-0/0/3"
+    },
+    {
+      "device": "MSK-M9-MX204-1",
+      "provider": "Piter-IX",
+      "interface": "et-0/0/2"
+    },
+    {
+      "device": "MSK-M9-MX204-2",
+      "provider": "Ertelecom",
+      "interface": "et-0/0/3"
+    },
+    {
+      "device": "MSK-M9-MX204-2",
+      "provider": "Piter-IX",
+      "interface": "et-0/0/2"
+    },
+    {
+      "device": "SFO-DR-116-7280TR-1",
+      "provider": "Cogent",
+      "interface": "Ethernet49/1"
+    },
+    {
+      "device": "SFO-DR-116-7280TR-2",
+      "provider": "Hurricane",
+      "interface": "Ethernet49/1"
+    },
+    {
+      "device": "WAW-EQX-7280QR-1",
+      "provider": "Cogent",
+      "interface": "Ethernet30/1"
+    },
+    {
+      "device": "WAW-EQX-7280QR-2",
+      "provider": "Fiord / PING-WIN",
+      "interface": "Ethernet34/1"
+    },
+    {
+      "device": "WAW-EQX-7280QR-2",
+      "provider": "Hurricane",
+      "interface": "Ethernet23/1"
+    }
+  ],
+  "incomplete": [],
+  "stats": {
+    "complete": 18,
+    "incomplete": 0,
+    "providers": 9
+  }
+}

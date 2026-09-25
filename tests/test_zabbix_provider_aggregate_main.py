@@ -24,8 +24,21 @@ def test_main_success(monkeypatch, zabbix_env, tmp_path, capsys):
         ),
         encoding="utf-8",
     )
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text(json.dumps({"_provider_limits": {"Cogent": 10, "Hurricane": 5}}), encoding="utf-8")
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [],
+                "incomplete": [],
+                "stats": {"complete": 0, "providers": 2},
+                "provider_limits_gbps": {"Cogent": 10, "Hurricane": 5},
+                "provider_slo_percent": {},
+                "provider_slo_read": "ok",
+                "provider_limits_read": "ok",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     host_items = {"ALA-KZT-7280TR-1": "101", "FRN-MX-1": "102"}
     items_by_host = {
@@ -79,33 +92,46 @@ def test_main_success(monkeypatch, zabbix_env, tmp_path, capsys):
         "stats": {},
     }
 
-    with patch.object(agg, "_load_netbox_aggregate_context", return_value=nb_ctx):
-        with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
-            monkeypatch.setattr(
-                sys,
-                "argv",
-                [
-                    "zabbix_provider_aggregate.py",
-                    "-f",
-                    str(cr),
-                    "--legacy-dry-ssh",
-                    "-d",
-                    str(FIXTURES / "dry_ssh_minimal.json"),
-                    "-m",
-                    str(desc_map),
-                    "--no-cache",
-                ],
-            )
-            agg.main()
+    with patch.object(
+        agg,
+        "run",
+        return_value=(
+            [
+                ("Cogent", "Uplinks Cogent", True),
+                ("Hurricane", "Uplinks Hurricane", True),
+            ],
+            None,
+        ),
+    ):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "zabbix_provider_aggregate.py",
+                "--inventory-file",
+                str(inv),
+                "--no-cache",
+            ],
+        )
+        agg.main()
     out = capsys.readouterr().out
     assert "OK:" in out
 
 
 def test_main_no_providers_exits_zero(monkeypatch, zabbix_env, tmp_path):
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
-    desc = tmp_path / "desc.json"
-    desc.write_text("{}", encoding="utf-8")
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [],
+                "incomplete": [],
+                "stats": {"complete": 0, "providers": 0},
+                "provider_limits_gbps": {},
+                "provider_slo_percent": {},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     mocker = ZabbixRpcMocker().on("user.get", lambda p: [{"userid": "1"}])
     mocker.activate(monkeypatch)
@@ -116,13 +142,8 @@ def test_main_no_providers_exits_zero(monkeypatch, zabbix_env, tmp_path):
             "argv",
             [
                 "zabbix_provider_aggregate.py",
-                "-f",
-                str(cr),
-                "--legacy-dry-ssh",
-                "-d",
-                str(FIXTURES / "dry_ssh_minimal.json"),
-                "-m",
-                str(desc),
+                "--inventory-file",
+                str(inv),
             ],
         )
         with pytest.raises(SystemExit) as exc:

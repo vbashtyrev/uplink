@@ -168,22 +168,13 @@ def test_collect_provider_limits_gbps():
     assert limits == {"Cogent": 10.0}
 
 
-def test_resolve_provider_limit_prefers_netbox():
-    limit_bps = _resolve_provider_limit_bps("Cogent", {"Cogent": 12}, {"Cogent": 5})
+def test_resolve_provider_limit_from_snapshot():
+    limit_bps = _resolve_provider_limit_bps("Cogent", {"Cogent": 12})
     assert limit_bps == 12 * 1e9
 
 
-def test_resolve_provider_limit_fallback_commit_rates(capsys):
-    limit_bps = _resolve_provider_limit_bps(
-        "Cogent", {}, {"Cogent": 8}, legacy_commit_rates_fallback=True, debug=True
-    )
-    assert limit_bps == 8 * 1e9
-    err = capsys.readouterr().err
-    assert "transition fallback" in err
-
-
-def test_resolve_provider_limit_ignores_legacy_without_flag():
-    assert _resolve_provider_limit_bps("Cogent", {}, {"Cogent": 8}) is None
+def test_resolve_provider_limit_missing_returns_none():
+    assert _resolve_provider_limit_bps("Cogent", {}) is None
 
 
 def test_load_netbox_aggregate_context_manual_provider(monkeypatch):
@@ -286,7 +277,6 @@ def test_run_netbox_inventory_provider_and_limit(tmp_path, monkeypatch):
             done, err = agg.run(
                 "https://z.example/api_jsonrpc.php",
                 "token",
-                str(commit_rates),
                 str(dry_ssh),
                 str(desc_map),
                 cache_path=None,
@@ -352,7 +342,6 @@ def test_run_without_commit_rates_file_no_legacy(tmp_path, monkeypatch):
             done, err = agg.run(
                 "https://z.example/api_jsonrpc.php",
                 "token",
-                str(missing_cr),
                 str(dry_ssh),
                 str(desc_map),
                 cache_path=None,
@@ -360,93 +349,6 @@ def test_run_without_commit_rates_file_no_legacy(tmp_path, monkeypatch):
 
     assert err is None
     assert done
-
-
-def test_run_legacy_commit_rates_fallback_uses_file(tmp_path, monkeypatch):
-    dry_ssh = FIXTURES / "dry_ssh_minimal.json"
-    desc_map = tmp_path / "description_to_name.json"
-    desc_map.write_text("{}", encoding="utf-8")
-    commit_rates = tmp_path / "commit_rates.json"
-    commit_rates.write_text(json.dumps({"_provider_limits": {"Cogent": 8}}), encoding="utf-8")
-
-    nb_ctx = {
-        "device_iface_to_provider": {("ALA-KZT-7280TR-1", "ethernet51/1"): "Cogent"},
-        "providers": {"Cogent"},
-        "provider_limits_gbps": {},
-        "stats": {},
-        "read_error": False,
-    }
-    host_items = {"ALA-KZT-7280TR-1": "101"}
-    items_by_host = {
-        ("ALA-KZT-7280TR-1", "ethernet51/1"): {
-            "bits_in": "net.if.in[51]",
-            "bits_out": "net.if.out[51]",
-        },
-    }
-
-    def fake_fetch(url, token, hostnames, debug=False):
-        return dict(host_items), dict(items_by_host), None
-
-    trigger_created = []
-
-    mocker = (
-        ZabbixRpcMocker()
-        .on("user.get", lambda p: [{"userid": "1"}])
-        .on("hostgroup.get", lambda p: [{"groupid": "2"}])
-        .on(
-            "host.get",
-            lambda p: [
-                {"hostid": "101", "host": "ALA-KZT-7280TR-1", "name": "ALA-KZT-7280TR-1"}
-            ],
-        )
-        .on("host.create", lambda p: {"hostids": ["999"]})
-        .on("item.get", lambda p: [])
-        .on("item.create", lambda p: {"itemids": ["i1"]})
-        .on("item.update", lambda p: True)
-        .on("trigger.get", lambda p: [])
-        .on("trigger.create", lambda p: trigger_created.append(p) or {"triggerids": ["t1"]})
-        .on("trigger.update", lambda p: True)
-    )
-    mocker.activate(monkeypatch)
-
-    with patch.object(agg, "_load_netbox_aggregate_context", return_value=nb_ctx):
-        with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
-            done, err = agg.run(
-                "https://z.example/api_jsonrpc.php",
-                "token",
-                str(commit_rates),
-                str(dry_ssh),
-                str(desc_map),
-                cache_path=None,
-                legacy_commit_rates_fallback=True,
-            )
-
-    assert err is None
-    assert done
-    expressions = [t["expression"] for t in trigger_created]
-    assert any("8000000000" in expr for expr in expressions)
-
-
-def test_run_legacy_commit_rates_missing_file_returns_error(tmp_path, monkeypatch):
-    dry_ssh = FIXTURES / "dry_ssh_minimal.json"
-    desc_map = tmp_path / "description_to_name.json"
-    desc_map.write_text("{}", encoding="utf-8")
-    missing_cr = tmp_path / "missing_commit_rates.json"
-
-    mocker = ZabbixRpcMocker().on("user.get", lambda p: [{"userid": "1"}])
-    mocker.activate(monkeypatch)
-
-    done, err = agg.run(
-        "https://z.example/api_jsonrpc.php",
-        "token",
-        str(missing_cr),
-        str(dry_ssh),
-        str(desc_map),
-        cache_path=None,
-        legacy_commit_rates_fallback=True,
-    )
-    assert done is None
-    assert "not found" in err
 
 
 def test_sanitize_provider_name():
@@ -456,6 +358,19 @@ def test_sanitize_provider_name():
 
 def _inventory_report_for_provider_limits():
     return {
+        "provider_limits_gbps": {
+            "Cogent": 15,
+            "KZT": 12,
+            "Piter-IX": 20,
+        },
+        "provider_slo_percent": {},
+        "provider_slo_read": "ok",
+        "provider_limits_read": "ok",
+        "netbox_interface_relations": {
+            "member_to_aggregate": {},
+            "parent_children": {},
+            "display_names": {},
+        },
         "complete": [
             {
                 "provider": "Cogent",
@@ -505,8 +420,8 @@ def _netbox_with_provider_limits():
     return nb
 
 
-def test_run_inventory_file_loads_provider_limits_from_netbox(tmp_path, monkeypatch):
-    """--inventory-file path must still read aggregate_limit_gbps from NetBox."""
+def test_run_inventory_file_uses_embedded_provider_limits(tmp_path, monkeypatch):
+    """--inventory-file path must use embedded aggregate_limit_gbps snapshot."""
     inventory = tmp_path / "inventory.json"
     inventory.write_text(json.dumps(_inventory_report_for_provider_limits()), encoding="utf-8")
     desc_map = tmp_path / "description_to_name.json"
@@ -566,16 +481,11 @@ def test_run_inventory_file_loads_provider_limits_from_netbox(tmp_path, monkeypa
     )
     mocker.activate(monkeypatch)
 
-    nb = _netbox_with_provider_limits()
-    with patch("zabbix_provider_aggregate.pynetbox.api", return_value=nb):
-        monkeypatch.setenv("NETBOX_URL", "https://nb.example")
-        monkeypatch.setenv("NETBOX_TOKEN", "tok")
-        with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
-            with patch.object(agg, "_ensure_triggers", side_effect=fake_ensure_triggers):
-                done, err = agg.run(
+    with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
+        with patch.object(agg, "_ensure_triggers", side_effect=fake_ensure_triggers):
+            done, err = agg.run(
                     "https://z.example/api_jsonrpc.php",
                     "token",
-                    str(missing_cr),
                     None,
                     str(desc_map),
                     cache_path=None,
@@ -588,6 +498,48 @@ def test_run_inventory_file_loads_provider_limits_from_netbox(tmp_path, monkeypa
     assert limits_by_provider["Cogent"] == 15 * 1e9
     assert limits_by_provider["KZT"] == 12 * 1e9
     assert limits_by_provider["Piter-IX"] == 20 * 1e9
+
+
+def test_load_aggregate_context_inventory_skips_live_limits(monkeypatch):
+    """Inventory snapshot must not call live NetBox for provider limits."""
+    from unittest.mock import MagicMock
+
+    report = {
+        "complete": [
+            {
+                "provider": "Cogent",
+                "device": "ALA-KZT-7280TR-1",
+                "interface": "Ethernet51/1",
+            }
+        ],
+        "incomplete": [],
+        "stats": {"complete": 1, "providers": 1},
+        "provider_limits_read": "partial_read",
+        "provider_slo_read": "ok",
+        "provider_limits_gbps": {},
+        "provider_slo_percent": {"Cogent": 99.9},
+    }
+    live_client = MagicMock(side_effect=AssertionError("live NetBox client must not run"))
+    live_collect = MagicMock(side_effect=AssertionError("live limits collect must not run"))
+    monkeypatch.setattr(agg, "_get_netbox_client", live_client)
+    monkeypatch.setattr(agg, "collect_provider_limits_gbps", live_collect)
+    monkeypatch.setattr(
+        agg,
+        "load_uplink_provider_context",
+        lambda dry_ssh_devices, debug=False, inventory_report=None: {
+            "device_iface_to_provider": {("ALA-KZT-7280TR-1", "ethernet51/1"): "Cogent"},
+            "providers": {"Cogent"},
+            "stats": {"complete": 1},
+            "read_error": False,
+        },
+    )
+
+    ctx = _load_netbox_aggregate_context(None, inventory_report=report)
+
+    assert ctx["read_error"] is True
+    assert ctx["provider_limits_gbps"] == {}
+    live_client.assert_not_called()
+    live_collect.assert_not_called()
 
 
 def test_run_inventory_file_limits_read_error_skips_trigger_cleanup(tmp_path, monkeypatch):
@@ -646,22 +598,22 @@ def test_run_inventory_file_limits_read_error_skips_trigger_cleanup(tmp_path, mo
     )
     mocker.activate(monkeypatch)
 
-    nb = _netbox_with_provider_limits()
+    live_client = patch.object(
+        agg,
+        "_get_netbox_client",
+        side_effect=AssertionError("live NetBox client must not run"),
+    )
+    live_collect = patch.object(
+        agg,
+        "collect_provider_limits_gbps",
+        side_effect=AssertionError("live limits collect must not run"),
+    )
 
-    class _BrokenProviders:
-        def all(self):
-            raise RuntimeError("providers unavailable")
-
-    nb.circuits.providers = _BrokenProviders()
-
-    with patch("zabbix_provider_aggregate.pynetbox.api", return_value=nb):
-        monkeypatch.setenv("NETBOX_URL", "https://nb.example")
-        monkeypatch.setenv("NETBOX_TOKEN", "tok")
+    with live_client, live_collect:
         with patch.object(agg, "fetch_zabbix_hosts_and_items", side_effect=fake_fetch):
             done, err = agg.run(
                 "https://z.example/api_jsonrpc.php",
                 "token",
-                str(missing_cr),
                 None,
                 str(desc_map),
                 cache_path=None,
@@ -720,7 +672,6 @@ def test_run_read_error_skips_all_zabbix_writes_including_host_create(
             done, err = agg.run(
                 "https://z.example/api_jsonrpc.php",
                 "token",
-                str(tmp_path / "missing.json"),
                 str(FIXTURES / "dry_ssh_minimal.json"),
                 str(desc_map),
                 cache_path=None,

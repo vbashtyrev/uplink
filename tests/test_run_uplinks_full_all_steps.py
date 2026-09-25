@@ -86,7 +86,8 @@ def test_main_human_mode_all_steps_success(monkeypatch, tmp_path):
     assert "-d" not in aggregate
 
     services = next(c for c in calls if c[1] == "zabbix_provider_services.py")
-    assert services[2:4] == ["--parent-service", "Uplinks providers"]
+    assert "--inventory-file" in services
+    assert "--parent-service" in services
     assert "-f" not in services
 
     assert scripts.index("zabbix_provider_aggregate.py") < scripts.index("zabbix_map.py")
@@ -146,7 +147,8 @@ def test_main_provider_services_without_commit_rates_file(monkeypatch, tmp_path)
     assert exc.value.code == 0
 
     services = next(c for c in calls if c[1] == "zabbix_provider_services.py")
-    assert services[2:4] == ["--parent-service", "Uplinks providers"]
+    assert "--inventory-file" in services
+    assert "--parent-service" in services
     assert "-f" not in services
     assert not (tmp_path / "commit_rates.json").exists()
 

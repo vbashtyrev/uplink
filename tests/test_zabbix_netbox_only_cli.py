@@ -13,49 +13,29 @@ from tests.mocks.inventory_scope import (
 )
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from tests.mocks.zabbix_rpc import ZabbixRpcMocker
-from uplinks.data import (
-    GENERATE_DESCRIPTION_MAP_REQUIRES_LEGACY_MSG,
-    INVENTORY_FILE_REQUIRED_MSG,
-    LEGACY_DRY_SSH_REQUIRED_MSG,
-    MAP_LEGACY_UTILITY_REQUIRES_LEGACY_MSG,
-)
+from uplinks.data import INVENTORY_FILE_REQUIRED_MSG
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-def test_map_legacy_utilities_require_legacy_flag(monkeypatch, zabbix_env, capsys):
+def test_map_create_and_export_without_inventory(monkeypatch, zabbix_env, capsys):
     import zabbix_map as zm
 
-    for argv in (
-        ["zabbix_map.py", "--create-map"],
-        ["zabbix_map.py", "--export-map", "1"],
-    ):
-        monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(sys, "argv", ["zabbix_map.py", "--create-map"])
+    with patch.object(zm, "ensure_map_exists", return_value=("42", None)):
         with pytest.raises(SystemExit) as exc:
             zm.main()
-        assert exc.value.code == 1
-        assert MAP_LEGACY_UTILITY_REQUIRES_LEGACY_MSG in capsys.readouterr().err
+    assert exc.value.code == 0
 
-
-def test_map_generate_description_map_requires_legacy_flag(
-    monkeypatch, zabbix_env, capsys
-):
-    import zabbix_map as zm
-
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "zabbix_map.py",
-            "-f",
-            str(FIXTURES / "dry_ssh_minimal.json"),
-            "--generate-description-map",
-        ],
-    )
-    with pytest.raises(SystemExit) as exc:
-        zm.main()
-    assert exc.value.code == 1
-    assert GENERATE_DESCRIPTION_MAP_REQUIRES_LEGACY_MSG in capsys.readouterr().err
+    monkeypatch.setattr(sys, "argv", ["zabbix_map.py", "--export-map", "1"])
+    with patch.object(
+        zm,
+        "zabbix_request",
+        return_value=([{"sysmapid": "1", "selements": [], "links": []}], None),
+    ):
+        with pytest.raises(SystemExit) as exc:
+            zm.main()
+    assert exc.value.code == 0
 
 
 def test_map_requires_inventory_file(monkeypatch, zabbix_env, tmp_path, capsys):
@@ -70,25 +50,6 @@ def test_map_requires_inventory_file(monkeypatch, zabbix_env, tmp_path, capsys):
         zm.main()
     assert exc.value.code == 1
     assert INVENTORY_FILE_REQUIRED_MSG in capsys.readouterr().err
-
-
-def test_map_rejects_dry_ssh_without_legacy_flag(monkeypatch, zabbix_env, capsys):
-    import zabbix_map as zm
-
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "zabbix_map.py",
-            "-f",
-            str(FIXTURES / "dry_ssh_minimal.json"),
-            "--print-table",
-        ],
-    )
-    with pytest.raises(SystemExit) as exc:
-        zm.main()
-    assert exc.value.code == 1
-    assert LEGACY_DRY_SSH_REQUIRED_MSG in capsys.readouterr().err
 
 
 def test_map_inventory_file_ignores_description_map(
@@ -107,17 +68,13 @@ def test_map_inventory_file_ignores_description_map(
             "zabbix_map.py",
             "--inventory-file",
             str(inv),
-            "-m",
-            str(desc),
             "--print-table",
         ],
     )
-    with patch.object(zm, "load_description_map") as load_desc:
-        with patch.object(
-            zm, "load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()
-        ):
-            zm.main()
-    load_desc.assert_not_called()
+    with patch.object(
+        zm, "load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()
+    ):
+        zm.main()
     out = capsys.readouterr().out
     assert "Cogent" in out
     assert "WrongName" not in out
@@ -208,7 +165,6 @@ def test_aggregate_inventory_file_ignores_description_map(tmp_path, monkeypatch)
                 done, err = agg.run(
                     "https://z.example/api_jsonrpc.php",
                     "token",
-                    str(tmp_path / "missing.json"),
                     None,
                     str(desc),
                     cache_path=None,

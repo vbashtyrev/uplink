@@ -13,7 +13,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
+from tests.mocks.inventory_scope import (
+    dry_ssh_minimal_inventory_context,
+    with_provider_metadata,
+    write_dry_ssh_minimal_inventory,
+    write_inventory_report,
+)
 from tests.mocks.netbox_api import build_netbox_for_commit_rates
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from tests.mocks.zabbix_rpc import ZabbixRpcMocker, mock_response
@@ -105,20 +110,24 @@ def _providers_unavailable_inventory_report():
 
 
 def _healthy_inventory_report():
-    return {
-        "complete": [
-            {
-                "device": HOST,
-                "interface": "Ethernet51/1",
-                "provider": "Cogent",
-                "circuit_id": "CKT-1",
-                "commit_rate_kbps": 10000000,
-                "billing_model": "Fixed",
-            }
-        ],
-        "incomplete": [],
-        "stats": {},
-    }
+    return with_provider_metadata(
+        {
+            "complete": [
+                {
+                    "device": HOST,
+                    "interface": "Ethernet51/1",
+                    "provider": "Cogent",
+                    "circuit_id": "CKT-1",
+                    "commit_rate_kbps": 10000000,
+                    "billing_model": "Fixed",
+                }
+            ],
+            "incomplete": [],
+            "stats": {"complete": 1, "providers": 1},
+        },
+        slo={"Cogent": 99.9},
+        limits={"Cogent": 10},
+    )
 
 
 def _burst_partial_inventory_report():
@@ -450,8 +459,7 @@ def test_sync_delete_only_exits_on_read_failure_without_writes(
     import zabbix_sync_commit_rate as mod
 
     failure_report = failure_report_fn()
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
+    inv = write_inventory_report(tmp_path, failure_report)
     mocker = _build_guarantee_mocker(
         hosts=[{"hostid": HOST_ID, "host": HOST, "name": HOST}],
         items=_items_alakzt(),
@@ -460,11 +468,10 @@ def test_sync_delete_only_exits_on_read_failure_without_writes(
 
     monkeypatch.setattr(mod, "validate_zabbix_token", lambda *a, **k: True)
     monkeypatch.setattr(mod.pynetbox, "api", lambda url, token: MagicMock())
-    monkeypatch.setattr(mod, "fetch_uplink_inventory_report", lambda *a, **k: failure_report)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["zabbix_sync_commit_rate.py", "-d", str(DRY_SSH), "-f", str(cr), delete_flag],
+        ["zabbix_sync_commit_rate.py", "-d", str(DRY_SSH), "--inventory-file", str(inv), delete_flag],
     )
     with pytest.raises(SystemExit) as exc:
         mod.main()
@@ -489,8 +496,7 @@ def test_sync_skip_blocks_deletes_on_read_failure(
     import zabbix_sync_commit_rate as mod
 
     failure_report = failure_report_fn()
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
+    inv = write_inventory_report(tmp_path, failure_report)
     mocker = _build_guarantee_mocker(
         hosts=[{"hostid": HOST_ID, "host": HOST, "name": HOST}],
         items=_items_alakzt(),
@@ -499,11 +505,10 @@ def test_sync_skip_blocks_deletes_on_read_failure(
 
     monkeypatch.setattr(mod, "validate_zabbix_token", lambda *a, **k: True)
     monkeypatch.setattr(mod.pynetbox, "api", lambda url, token: MagicMock())
-    monkeypatch.setattr(mod, "fetch_uplink_inventory_report", lambda *a, **k: failure_report)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["zabbix_sync_commit_rate.py", "-d", str(DRY_SSH), "-f", str(cr)],
+        ["zabbix_sync_commit_rate.py", "-d", str(DRY_SSH), "--inventory-file", str(inv)],
     )
     with pytest.raises(SystemExit) as exc:
         mod.main()
@@ -556,13 +561,8 @@ def test_aggregate_skip_blocks_formula_update_on_read_failure(
                     "argv",
                     [
                         "zabbix_provider_aggregate.py",
-                        "--legacy-dry-ssh",
-                        "-d",
-                        str(DRY_SSH),
-                        "-f",
-                        str(desc_map),
-                        "--commit-rates",
-                        str(tmp_path / "missing.json"),
+                        "--inventory-file",
+                        str(write_dry_ssh_minimal_inventory(tmp_path)),
                     ],
                 )
                 with pytest.raises(SystemExit) as exc:
@@ -572,7 +572,6 @@ def test_aggregate_skip_blocks_formula_update_on_read_failure(
                 done, err = agg.run(
                     ZABBIX_URL,
                     ZABBIX_TOKEN,
-                    str(tmp_path / "missing.json"),
                     str(DRY_SSH),
                     str(desc_map),
                     cache_path=None,
@@ -593,7 +592,7 @@ def test_aggregate_skip_blocks_formula_update_on_read_failure(
     ids=["partial_read", "auth_denied", "providers_unavailable"],
 )
 def test_dashboard_skip_blocks_writes_on_read_failure(
-    monkeypatch, zabbix_env, netbox_env, failure_ctx
+    monkeypatch, zabbix_env, netbox_env, tmp_path, failure_ctx
 ):
     import zabbix_uplinks_dashboard as dash
 
@@ -609,7 +608,7 @@ def test_dashboard_skip_blocks_writes_on_read_failure(
         monkeypatch.setattr(
             sys,
             "argv",
-            ["zabbix_uplinks_dashboard.py", "--legacy-dry-ssh", "-f", str(DRY_SSH), "--no-cache"],
+            ["zabbix_uplinks_dashboard.py", "--inventory-file", str(write_dry_ssh_minimal_inventory(tmp_path)), "--no-cache"],
         )
         with pytest.raises(SystemExit) as exc:
             dash.main()
@@ -655,7 +654,11 @@ def test_services_skip_blocks_legacy_delete_on_read_failure(
     mocker.activate(monkeypatch)
     _disarm_guard(monkeypatch, svc)
 
-    monkeypatch.setattr(svc, "_load_netbox_services_context", lambda debug=False: ctx)
+    monkeypatch.setattr(
+        svc,
+        "_load_netbox_services_context",
+        lambda debug=False, inventory_report=None: ctx,
+    )
     monkeypatch.setattr(sys, "argv", ["zabbix_provider_services.py"])
     with pytest.raises(SystemExit) as exc:
         svc.main()
@@ -751,11 +754,8 @@ def test_map_skip_blocks_map_update_on_read_failure(
                     "argv",
                     [
                         "zabbix_map.py",
-                        "--legacy-dry-ssh",
-                        "-f",
-                        str(DRY_SSH),
-                        "-m",
-                        str(desc),
+                        "--inventory-file",
+                        str(write_dry_ssh_minimal_inventory(tmp_path)),
                         "--update-map",
                         "--no-cache",
                     ],
@@ -811,11 +811,8 @@ def test_map_default_create_skips_writes_on_read_failure(
                     "argv",
                     [
                         "zabbix_map.py",
-                        "--legacy-dry-ssh",
-                        "-f",
-                        str(DRY_SSH),
-                        "-m",
-                        str(desc),
+                        "--inventory-file",
+                        str(write_dry_ssh_minimal_inventory(tmp_path)),
                         "--no-cache",
                     ],
                 )
@@ -838,8 +835,7 @@ def test_sync_partial_read_blocks_util_trigger_writes(
     import zabbix_sync_commit_rate as mod
 
     failure_report = _partial_inventory_report()
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
+    inv = write_inventory_report(tmp_path, failure_report)
     mocker = _build_guarantee_mocker(
         hosts=[{"hostid": HOST_ID, "host": HOST, "name": HOST}],
         items=_items_alakzt(),
@@ -848,11 +844,10 @@ def test_sync_partial_read_blocks_util_trigger_writes(
 
     monkeypatch.setattr(mod, "validate_zabbix_token", lambda *a, **k: True)
     monkeypatch.setattr(mod.pynetbox, "api", lambda url, token: MagicMock())
-    monkeypatch.setattr(mod, "fetch_uplink_inventory_report", lambda *a, **k: failure_report)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["zabbix_sync_commit_rate.py", "-d", str(DRY_SSH), "-f", str(cr)],
+        ["zabbix_sync_commit_rate.py", "-d", str(DRY_SSH), "--inventory-file", str(inv)],
     )
     with pytest.raises(SystemExit) as exc:
         mod.main()
@@ -867,8 +862,7 @@ def test_sync_partial_read_blocks_burst_trigger_writes(
     import zabbix_sync_commit_rate as mod
 
     failure_report = _burst_partial_inventory_report()
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
+    inv = write_inventory_report(tmp_path, failure_report)
     mocker = _build_guarantee_mocker(
         hosts=[{"hostid": HOST_ID, "host": HOST, "name": HOST}],
         items=_items_alakzt(),
@@ -877,7 +871,6 @@ def test_sync_partial_read_blocks_burst_trigger_writes(
 
     monkeypatch.setattr(mod, "validate_zabbix_token", lambda *a, **k: True)
     monkeypatch.setattr(mod.pynetbox, "api", lambda url, token: MagicMock())
-    monkeypatch.setattr(mod, "fetch_uplink_inventory_report", lambda *a, **k: failure_report)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -885,8 +878,8 @@ def test_sync_partial_read_blocks_burst_trigger_writes(
             "zabbix_sync_commit_rate.py",
             "-d",
             str(DRY_SSH),
-            "-f",
-            str(cr),
+            "--inventory-file",
+            str(inv),
             "--create-link-triggers",
         ],
     )
@@ -908,10 +901,6 @@ def test_sync_skip_blocks_macro_delete_on_relations_read_failure(
         device_tag="border",
         provider_name="Cogent",
     )
-    inv_report = _healthy_inventory_report()
-    inv_path = tmp_path / "inventory.json"
-    inv_path.write_text(json.dumps(inv_report), encoding="utf-8")
-
     def fail_interfaces_filter(**kwargs):
         raise RuntimeError("dcim.interfaces.filter unavailable")
 
@@ -926,12 +915,17 @@ def test_sync_skip_blocks_macro_delete_on_relations_read_failure(
     monkeypatch.setattr(mod, "validate_zabbix_token", lambda *a, **k: True)
     monkeypatch.setattr(mod.pynetbox, "api", lambda url, token: nb)
     monkeypatch.setattr(
+        mod,
+        "fetch_uplink_inventory_report",
+        lambda *a, **k: _healthy_inventory_report(),
+    )
+    monkeypatch.setattr(
         sys,
         "argv",
         [
             "zabbix_sync_commit_rate.py",
-            "--inventory-file",
-            str(inv_path),
+            "-d",
+            str(DRY_SSH),
             "--no-util-triggers",
         ],
     )
@@ -950,8 +944,7 @@ def test_positive_sync_deletes_stale_bps_macros(monkeypatch, zabbix_env, netbox_
         device_tag="border",
         provider_name="Cogent",
     )
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
 
     macro_deleted = []
     mocker = _build_guarantee_mocker(
@@ -971,8 +964,8 @@ def test_positive_sync_deletes_stale_bps_macros(monkeypatch, zabbix_env, netbox_
             "zabbix_sync_commit_rate.py",
             "-d",
             str(DRY_SSH),
-            "-f",
-            str(cr),
+            "--inventory-file",
+            str(inv),
             "--no-util-triggers",
         ],
     )
@@ -989,8 +982,7 @@ def test_positive_sync_deletes_stale_util_trigger(monkeypatch, zabbix_env, netbo
         device_tag="border",
         provider_name="Cogent",
     )
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
 
     trigger_deleted = []
     mocker = _build_guarantee_mocker(
@@ -1006,7 +998,7 @@ def test_positive_sync_deletes_stale_util_trigger(monkeypatch, zabbix_env, netbo
     monkeypatch.setattr(
         sys,
         "argv",
-        ["zabbix_sync_commit_rate.py", "-d", str(DRY_SSH), "-f", str(cr)],
+        ["zabbix_sync_commit_rate.py", "-d", str(DRY_SSH), "--inventory-file", str(write_dry_ssh_minimal_inventory(tmp_path))],
     )
     mod.main()
     assert trigger_deleted
@@ -1022,8 +1014,7 @@ def test_positive_sync_deletes_threshold_items(monkeypatch, zabbix_env, netbox_e
         device_tag="border",
         provider_name="Cogent",
     )
-    cr = tmp_path / "commit_rates.json"
-    cr.write_text("{}", encoding="utf-8")
+    inv = write_dry_ssh_minimal_inventory(tmp_path)
 
     item_deleted = []
     mocker = _build_guarantee_mocker(
@@ -1043,8 +1034,8 @@ def test_positive_sync_deletes_threshold_items(monkeypatch, zabbix_env, netbox_e
             "zabbix_sync_commit_rate.py",
             "-d",
             str(DRY_SSH),
-            "-f",
-            str(cr),
+            "--inventory-file",
+            str(inv),
             "--no-util-triggers",
         ],
     )
@@ -1078,7 +1069,6 @@ def test_positive_aggregate_updates_formula_item(monkeypatch, zabbix_env, tmp_pa
             done, err = agg.run(
                 ZABBIX_URL,
                 ZABBIX_TOKEN,
-                str(tmp_path / "missing.json"),
                 str(DRY_SSH),
                 str(desc_map),
                 cache_path=None,
@@ -1118,11 +1108,8 @@ def test_positive_map_updates_links_on_healthy_read(monkeypatch, zabbix_env, tmp
                     "argv",
                     [
                         "zabbix_map.py",
-                        "--legacy-dry-ssh",
-                        "-f",
-                        str(DRY_SSH),
-                        "-m",
-                        str(desc),
+                        "--inventory-file",
+                        str(write_dry_ssh_minimal_inventory(tmp_path)),
                         "--update-map",
                         "--no-cache",
                     ],
@@ -1131,7 +1118,7 @@ def test_positive_map_updates_links_on_healthy_read(monkeypatch, zabbix_env, tmp
     assert _map_update_with_links(mocker)
 
 
-def test_positive_dashboard_writes_on_healthy_read(monkeypatch, zabbix_env, netbox_env):
+def test_positive_dashboard_writes_on_healthy_read(monkeypatch, zabbix_env, netbox_env, tmp_path):
     import zabbix_uplinks_dashboard as dash
 
     dashboard_items = [
@@ -1182,20 +1169,13 @@ def test_positive_dashboard_writes_on_healthy_read(monkeypatch, zabbix_env, netb
     )
     mocker.activate(monkeypatch)
 
-    desc_map = {
-        "Uplink: Cogent 10G": "Cogent",
-        "Uplink: Hurricane": "Hurricane",
-        "Uplink: Hurricane member": "Hurricane",
-        "Uplink: Hurricane LAG": "Hurricane",
-    }
-    with patch.object(dash, "load_description_map", return_value=desc_map):
-        with patch.object(dash, "load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()):
-            monkeypatch.setattr(
-                sys,
-                "argv",
-                ["zabbix_uplinks_dashboard.py", "--legacy-dry-ssh", "-f", str(DRY_SSH), "--no-cache"],
-            )
-            dash.main()
+    with patch.object(dash, "load_uplink_provider_context", return_value=dry_ssh_minimal_inventory_context()):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["zabbix_uplinks_dashboard.py", "--inventory-file", str(write_dry_ssh_minimal_inventory(tmp_path)), "--no-cache"],
+        )
+        dash.main()
     assert "dashboard.create" in _method_names(mocker) or "dashboard.update" in _method_names(mocker)
 
 
@@ -1224,7 +1204,11 @@ def test_positive_services_deletes_legacy_sla_source(monkeypatch, zabbix_env):
     )
     mocker.activate(monkeypatch)
 
-    monkeypatch.setattr(svc, "_load_netbox_services_context", lambda debug=False: ctx)
+    monkeypatch.setattr(
+        svc,
+        "_load_netbox_services_context",
+        lambda debug=False, inventory_report=None: ctx,
+    )
     monkeypatch.setattr(sys, "argv", ["zabbix_provider_services.py"])
     svc.main()
     assert service_deleted

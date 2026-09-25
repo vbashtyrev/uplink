@@ -1,6 +1,5 @@
 """Compact provider-block layout: inventory model, label-aware validation."""
 
-import os
 from pathlib import Path
 
 import pytest
@@ -8,6 +7,7 @@ import pytest
 from tests.mocks.inventory_scope import dry_ssh_minimal_inventory_context
 from tests.mocks.map_state import MapStateTracker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
+from uplinks.data import load_devices_json
 from uplinks.netbox.inventory import load_inventory_report
 from zabbix_map import (
     ELEMENT_TYPE_HOST,
@@ -33,7 +33,6 @@ from zabbix_map import (
     MAP_WIDTH,
     SELEMENT_HEIGHT,
     SELEMENT_WIDTH,
-    load_devices_json,
     update_uplinks_map,
     _assign_layout_label_locations,
     _bounds_overlap,
@@ -82,10 +81,9 @@ def _edge(hostname, hostid, iface, isp, suffix=""):
 
 
 def _netbox_inventory_edges():
-    """18 edges / 9 providers / 15 hosts from sanitized netbox_inventory.json."""
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    inventory_path = os.path.join(repo_root, "netbox_inventory.json")
-    report = load_inventory_report(inventory_path)
+    """18 edges / 9 providers / 15 hosts from tracked layout inventory fixture."""
+    inventory_path = Path(__file__).resolve().parent / "fixtures" / "netbox_inventory_layout_complete.json"
+    report = load_inventory_report(str(inventory_path))
     complete = report.get("complete") or []
     host_ids = {
         device: str(1000 + idx)

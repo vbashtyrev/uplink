@@ -12,7 +12,8 @@ from tests.mocks.inventory_scope import (
 )
 from tests.mocks.map_state import MapStateTracker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
-from zabbix_map import MAP_NAME, update_uplinks_map, load_devices_json
+from uplinks.data import load_devices_json
+from zabbix_map import MAP_NAME, update_uplinks_map
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -68,8 +69,6 @@ def test_main_update_map(monkeypatch, zabbix_env, tmp_path, capsys):
                         "zabbix_map.py",
                         "--inventory-file",
                         str(inv),
-                        "-m",
-                        str(desc),
                         "--update-map",
                         "--no-cache",
                     ],

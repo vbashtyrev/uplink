@@ -109,7 +109,7 @@ def test_apply_ip_addresses(monkeypatch, capsys):
     nb.ipam.ip_addresses.filter.return_value = [ip_existing]
     nb.ipam.ip_addresses.create = MagicMock()
 
-    with patch.object(nc, "_get_interface_ip_addresses", return_value=[]):
+    with patch.object(nc, "_get_interface_ip_addresses", return_value=([], None)):
         nc._apply_ip_addresses_to_interface(
             nb, "dev", "Eth1", nb_iface, ["203.0.113.1/24"], vrf_id_f=None
         )

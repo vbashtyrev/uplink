@@ -44,7 +44,7 @@ def test_apply_creates_ae_logical_unit(monkeypatch, netbox_env, tmp_path, capsys
         with patch("netbox_checks.is_juniper_platform", return_value=True):
             with patch("netbox_checks.is_arista_platform", return_value=False):
                 with patch("netbox_checks.get_device_platform_name", return_value="Juniper JunOS"):
-                    with patch.object(nc, "_get_interface_ip_addresses", return_value=[]):
+                    with patch.object(nc, "_get_interface_ip_addresses", return_value=([], None)):
                         with patch.object(nc, "_apply_ip_addresses_to_interface") as ip_apply:
                             monkeypatch.setattr(
                                 sys,

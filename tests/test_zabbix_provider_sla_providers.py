@@ -20,7 +20,6 @@ def test_main_aggregate_providers_below_sla(monkeypatch, zabbix_env, tmp_path, c
         provider_custom_fields={"aggregate_limit_gbps": 10, "slo_percent": 99.99},
         tag_device=False,
     )
-    cr = tmp_path / "commit_rates.json"
     agg = mod.UPLINKS_AGGREGATE_HOST_PREFIX + "Cogent"
 
     def host_get(params):
@@ -59,8 +58,6 @@ def test_main_aggregate_providers_below_sla(monkeypatch, zabbix_env, tmp_path, c
             "argv",
             [
                 "zabbix_provider_sla.py",
-                "-f",
-                str(cr),
                 "--from-ts",
                 "0",
                 "--to-ts",

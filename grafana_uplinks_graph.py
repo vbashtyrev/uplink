@@ -8,12 +8,14 @@ import re
 import sys
 
 from env_urls import load_env_file_if_present
-from zabbix_map import (
+from uplinks.data import (
     DEFAULT_INPUT,
     DESCRIPTION_MAP_FILE,
-    ZABBIX_CACHE_FILE,
-    load_devices_json,
     load_description_map,
+    load_devices_json,
+)
+from zabbix_map import (
+    ZABBIX_CACHE_FILE,
     load_zabbix_cache,
     save_zabbix_cache,
     fetch_zabbix_hosts_and_items,
@@ -87,12 +89,10 @@ def _graph_to_inline_csv(graph):
     """Convert graph (nodes, edges) to two CSV strings for Infinity inline mode."""
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
-    #
     rows_n = []
     for n in nodes:
         rows_n.append(",".join([_csv_escape(n.get("id", "")), _csv_escape(n.get("title", ""))]))
     nodes_csv = "id,title\n" + "\n".join(rows_n)
-    #
     edge_cols = ["id", "source", "target", "detail__hostname", "detail__iface", "detail__isp", "detail__itemid_in", "detail__itemid_out"]
     rows_e = []
     for e in edges:
@@ -312,7 +312,6 @@ def main():
             node_ids.add(iid)
             nodes.append({"id": iid, "title": isp or "—"})
 
-    #
     edges_out = []
     for i, (hostname, hostid, iface_name, isp, itemid_in, itemid_out, key_in, key_out, description) in enumerate(edges):
         edge_obj = {

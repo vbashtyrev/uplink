@@ -1,47 +1,38 @@
-"""zabbix_sync_commit_rate NetBox fetch edge cases."""
+"""zabbix_sync_commit_rate NetBox inventory helpers (wave 3)."""
 
 import sys
 from unittest.mock import MagicMock
 
 import pytest
 
-from tests.mocks.netbox_api import MockNetBox, _Record, build_netbox_for_commit_rates, wire_inventory_collector
+from tests.mocks.netbox_api import build_netbox_for_commit_rates
 from zabbix_sync_commit_rate import (
-    _is_netbox_auth_error,
-    _macro_name_for_interface,
-    commit_rates_from_inventory_report,
     fetch_uplink_inventory_report,
-    is_physical_uplink_iface,
     load_burst_pairs,
     load_dry_ssh,
 )
 
 
-def test_is_netbox_auth_error():
-    assert _is_netbox_auth_error(Exception("403 Forbidden")) is True
-    assert _is_netbox_auth_error(Exception("401 Unauthorized")) is True
-    assert _is_netbox_auth_error(Exception("other")) is False
-
-
-def test_macro_names_empty_iface():
-    assert "iface" in _macro_name_for_interface("Eth1") or "Eth1" in _macro_name_for_interface("Eth1")
-
-
-def test_is_physical_uplink_iface():
-    assert is_physical_uplink_iface({"name": "ae5", "isLag": True}) is False
-    assert is_physical_uplink_iface({"name": "Ethernet1"}) is True
-    assert is_physical_uplink_iface("notdict") is True
+def test_load_burst_pairs_from_inventory():
+    report = {
+        "complete": [
+            {
+                "device": "H",
+                "interface": "Eth1",
+                "billing_model": "Burst",
+                "provider": "Cogent",
+                "circuit_id": "CKT-1",
+            }
+        ],
+        "incomplete": [],
+        "stats": {"complete": 1},
+    }
+    pairs = load_burst_pairs(inventory_report=report)
+    assert ("H", "Eth1") in pairs
 
 
 def test_load_dry_ssh_missing(tmp_path):
     assert load_dry_ssh(str(tmp_path / "nope.json")) is None
-
-
-def test_load_burst_pairs(tmp_path):
-    p = tmp_path / "cr.json"
-    p.write_text('{"H": {"Eth1": {"billing_model": "Burst"}}}', encoding="utf-8")
-    pairs = load_burst_pairs(str(p))
-    assert ("H", "Eth1") in pairs
 
 
 def test_fetch_inventory_auth_exit(monkeypatch):
@@ -53,6 +44,58 @@ def test_fetch_inventory_auth_exit(monkeypatch):
     assert exc.value.code == 1
 
 
+def test_sync_inventory_file_skips_live_relations_collect(monkeypatch, zabbix_env, tmp_path):
+    """--inventory-file without embedded relations must not live-fetch NetBox."""
+    import json
+    import sys
+
+    import zabbix_sync_commit_rate as mod
+    from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
+
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
+        json.dumps(
+            {
+                "complete": [
+                    {
+                        "device": "ALA-KZT-7280TR-1",
+                        "interface": "Ethernet51/1",
+                        "provider": "Cogent",
+                        "commit_rate_kbps": 10_000_000,
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "providers": 1},
+                "provider_slo_percent": {"Cogent": 99.9},
+                "provider_limits_gbps": {"Cogent": 10.0},
+                "provider_slo_read": "ok",
+                "provider_limits_read": "ok",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    live_collect = MagicMock(side_effect=AssertionError("live relations collect must not run"))
+    monkeypatch.setattr(mod, "collect_netbox_interface_relations", live_collect)
+    build_standard_zabbix_mocker(
+        hosts=[{"hostid": "101", "host": "ALA-KZT-7280TR-1", "name": "ALA-KZT-7280TR-1"}],
+    ).activate(monkeypatch)
+    monkeypatch.setattr(mod, "validate_zabbix_token", lambda *a, **k: True)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "zabbix_sync_commit_rate.py",
+            "--inventory-file",
+            str(inv),
+            "--dry-run",
+            "--no-util-triggers",
+        ],
+    )
+    mod.main()
+    live_collect.assert_not_called()
+
+
 def test_fetch_inventory_auth_on_devices_filter_exit(monkeypatch):
     nb = build_netbox_for_commit_rates()
     nb.dcim.devices.filter = lambda **kw: (_ for _ in ()).throw(Exception("403 forbidden"))
@@ -60,28 +103,3 @@ def test_fetch_inventory_auth_on_devices_filter_exit(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         fetch_uplink_inventory_report(nb, tag="border", debug=True)
     assert exc.value.code == 1
-
-
-def test_fetch_inventory_no_cable_debug(capsys):
-    circuit = _Record(id=2, cid="CKT-2", commit_rate=1000, status="active", provider_id=1)
-    ct = _Record(id=1, term_side="A", cable=None, circuit=circuit, circuit_id=2)
-    nb = MockNetBox(devices=[], interfaces=[], cables=[], terminations=[ct], circuits=[circuit])
-    wire_inventory_collector(nb)
-    report = fetch_uplink_inventory_report(nb, tag=None, debug=True)
-    result = commit_rates_from_inventory_report(report, debug=True)
-    assert result == {}
-    assert len(report.get("incomplete") or []) == 1
-    assert report["incomplete"][0]["reason"] == "no_cable"
-    err = capsys.readouterr().err.lower()
-    assert "incomplete" in err
-
-
-def test_fetch_inventory_cable_get_fails():
-    nb = build_netbox_for_commit_rates()
-    nb.dcim.cables.get = lambda pk: (_ for _ in ()).throw(RuntimeError("fail"))
-    report = fetch_uplink_inventory_report(nb, tag="border", debug=True)
-    result = commit_rates_from_inventory_report(report, debug=True)
-    assert result == {}
-    assert report["stats"]["read_errors"] >= 1
-    assert report["stats"].get("error") == "partial_read"
-    assert len(report.get("incomplete") or []) >= 1

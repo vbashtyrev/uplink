@@ -14,11 +14,11 @@ from tests.mocks.inventory_scope import (
 from tests.mocks.map_state import MapStateTracker
 from tests.mocks.zabbix_defaults import build_standard_zabbix_mocker
 from tests.mocks.zabbix_rpc import ZabbixRpcMocker
+from uplinks.data import load_devices_json
 from zabbix_map import (
     MAP_HEIGHT,
     MAP_NAME,
     MAP_WIDTH,
-    load_devices_json,
     main,
     update_uplinks_map,
 )
@@ -78,26 +78,6 @@ def test_update_uplinks_map_creates_map(monkeypatch, zabbix_env):
         assert isinstance(el["y"], int)
 
 
-def test_main_generate_description_map(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "zabbix_map.py",
-            "--legacy-dry-ssh",
-            "-f",
-            str(FIXTURES / "dry_ssh_minimal.json"),
-            "--generate-description-map",
-        ],
-    )
-    with pytest.raises(SystemExit) as exc:
-        main()
-    assert exc.value.code == 0
-    out = capsys.readouterr().out
-    data = json.loads(out)
-    assert "Uplink: Cogent 10G" in data
-
-
 def test_main_print_table_with_zabbix(monkeypatch, zabbix_env, tmp_path, capsys):
     items = [
         {
@@ -151,7 +131,7 @@ def test_main_create_map_only(monkeypatch, zabbix_env, capsys):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["zabbix_map.py", "--legacy-dry-ssh", "--create-map"],
+        ["zabbix_map.py", "--create-map"],
     )
     with pytest.raises(SystemExit) as exc:
         main()
@@ -162,7 +142,7 @@ def test_main_export_map(monkeypatch, zabbix_env, capsys):
     mocker = ZabbixRpcMocker().on("map.get", lambda p: [{"sysmapid": "1", "name": "Uplinks"}])
     mocker.activate(monkeypatch)
     monkeypatch.setattr(
-        sys, "argv", ["zabbix_map.py", "--legacy-dry-ssh", "--export-map", "1"]
+        sys, "argv", ["zabbix_map.py", "--export-map", "1"]
     )
     with pytest.raises(SystemExit) as exc:
         main()

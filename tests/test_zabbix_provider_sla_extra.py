@@ -11,16 +11,6 @@ from uplinks_config import TRIGGER_DESC_90_SUFFIX, TRIGGER_DESC_SLA_BREACH_SUFFI
 import zabbix_provider_sla as sla_mod
 
 
-def test_load_commit_rates_errors(tmp_path):
-    _, err = sla_mod._load_commit_rates(str(tmp_path / "missing.json"))
-    assert "not found" in err
-
-    bad = tmp_path / "bad.json"
-    bad.write_text("{", encoding="utf-8")
-    _, err = sla_mod._load_commit_rates(str(bad))
-    assert "invalid JSON" in err
-
-
 def test_unix_ts_variants():
     now = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
     assert sla_mod._unix_ts(1717243200) == 1717243200
@@ -69,19 +59,26 @@ def test_get_burst_link_triggers_classify(monkeypatch):
 
 
 def test_main_burst_host_missing(tmp_path, monkeypatch, zabbix_env, capsys):
-    cr = tmp_path / "cr.json"
-    cr.write_text(
+    inv = tmp_path / "inventory.json"
+    inv.write_text(
         json.dumps(
             {
-                "_provider_sla": 99.0,
-                "MISSING-DEV": {
-                    "Eth1": {
-                        "billing_model": "Burst",
+                "complete": [
+                    {
+                        "device": "MISSING-DEV",
+                        "interface": "Eth1",
                         "provider": "Cogent",
                         "circuit_id": "CKT-99",
-                        "commit_rate_gbps": 10,
-                    },
-                },
+                        "billing_model": "Burst",
+                        "commit_rate_kbps": 10_000_000,
+                    }
+                ],
+                "incomplete": [],
+                "stats": {"complete": 1, "providers": 1},
+                "provider_slo_percent": {"Cogent": 99.0},
+                "provider_limits_gbps": {"Cogent": 10},
+                "provider_slo_read": "ok",
+                "provider_limits_read": "ok",
             }
         ),
         encoding="utf-8",
@@ -92,14 +89,12 @@ def test_main_burst_host_missing(tmp_path, monkeypatch, zabbix_env, capsys):
         "argv",
         [
             "zabbix_provider_sla.py",
-            "-f",
-            str(cr),
+            "--inventory-file",
+            str(inv),
             "--days",
             "1",
-            "--legacy-commit-rates-fallback",
         ],
     )
-    monkeypatch.setattr("zabbix_provider_services.netbox_client_from_env", lambda **k: None)
     sla_mod.main()
     captured = capsys.readouterr()
     assert "host not found" in captured.err

@@ -27,8 +27,8 @@
 | `zabbix_sync_commit_rate.py` | Макросы **{$UPLINK.BPS.MAX}** / **{$UPLINK.BPS.WARN}** из NetBox (бит/с), а также Burst-триггеры по commit rate. Область интерфейсов и связь с логическим интерфейсом берутся из NetBox. |
 | `zabbix_provider_aggregate.py` | Хосты `Uplinks {Provider}`: calculated items суммарного трафика и триггеры **90%**, **100%** и **SLA breach** по общему лимиту поставщика из поля NetBox **`aggregate_limit_gbps`**. Тег **`sla=true`** только на триггере **SLA breach**; на 90%/100% — `scripts:automatization` и `provider`. Зависимость 90% от 100% (как в Zabbix: дочерний не в PROBLEM без родителя). |
 | `zabbix_uplinks_cleanup.py` | Отдельная ручная очистка артефактов Zabbix; в рабочий запуск не входит. |
-| `zabbix_provider_services.py` | Сервисы и встроенные SLA в Zabbix: **`Uplinks {Provider}`** для активных Circuit и **`Uplinks Burst {circuit_id}`** для Circuit с **`billing_model: Burst`**. Целевое значение SLA берётся из NetBox или `PROJECT_PROVIDER_SLO_PERCENT`; чтение **`_provider_sla`** из `commit_rates.json` возможно только с явным legacy-флагом. Опционально общий родитель **`--parent-service`**. |
-| `zabbix_provider_sla.py` | Offline‑отчёт по истории событий триггеров для активных Circuit из NetBox: агрегаты и Burst, с приоритетом **SLA breach**, иначе **100%**. Окно времени — `--days` или `--from-ts`/`--to-ts`. Целевой уровень берётся из NetBox или `PROJECT_PROVIDER_SLO_PERCENT`; старый `_provider_sla` доступен только в legacy-режиме. |
+| `zabbix_provider_services.py` | Сервисы и встроенные SLA в Zabbix: **`Uplinks {Provider}`** для активных Circuit и **`Uplinks Burst {circuit_id}`** для Circuit с **`billing_model: Burst`**. Целевое значение SLA берётся из NetBox или `PROJECT_PROVIDER_SLO_PERCENT`. Опционально общий родитель **`--parent-service`**. |
+| `zabbix_provider_sla.py` | Offline‑отчёт по истории событий триггеров для активных Circuit из NetBox: агрегаты и Burst, с приоритетом **SLA breach**, иначе **100%**. Окно времени — `--days` или `--from-ts`/`--to-ts`. Целевой уровень берётся из NetBox или `PROJECT_PROVIDER_SLO_PERCENT`. |
 | `netbox_uplinks_cleanup.py` | Удалён. Старые объекты NetBox не удаляются автоматически. |
 
 ---
@@ -90,9 +90,8 @@ Termination и Cable создаются вручную в NetBox.
 
 **Откат в Zabbix:** **zabbix_uplinks_cleanup.py** — отдельный ручной инструмент.
 Перед удалением сначала используйте `--dry-run`.
-Файлы `commit_rates.json`, `dry-ssh.json` и `description_to_name.json` не
-используются рабочим NetBox-only путём. Сбор данных устройств и сверка
-интерфейсов выполняются отдельными ручными инструментами.
+Файл `dry-ssh.json` не используется рабочим NetBox-only путём. Сбор данных
+устройств и сверка интерфейсов выполняются отдельными ручными инструментами.
 
 ---
 
@@ -149,7 +148,7 @@ python run_uplinks_full.py --plan \
 Ограничения режима:
 
 - оборудование не опрашивается и `dry-ssh.json` не нужен;
-- режим не имеет legacy-ветки и выполняется только по NetBox inventory;
+- режим выполняется только по NetBox inventory;
 - отчёт останавливается с ошибкой, если чтение NetBox прошло не полностью или
   нет ни одной полной цепочки. Отдельные неполные цепочки при успешном чтении
   показываются в разделе `inventory.incomplete`, а план строится по полным
@@ -159,8 +158,10 @@ python run_uplinks_full.py --plan \
   полное содержимое виджетов побитово не сравниваются;
 - для существующих агрегатных хостов отдельно проверяются расчётные элементы
   данных и триггеры лимита;
-- триггеры Burst пока не сравниваются и помечаются в отчёте как
-  `not_evaluated`, то есть «не оценено»;
+- триггеры Burst сравниваются по описанию, выражению, приоритету, тегам и
+  зависимости. Изменения попадают в `update`, отсутствующие триггеры — в
+  `create`, лишние — в `delete`. При неоднозначном совпадении изменение
+  подавляется и попадает в `skipped`;
 - при неизвестном состоянии NetBox или Zabbix опасные операции не
   планируются: они попадают в `skipped` или `not_evaluated`.
 
@@ -442,8 +443,7 @@ python netbox_interface_types.py -o my_types.json
 
 ### 4. `zabbix_map.py`
 
-Построение карты Zabbix по `--inventory-file` из NetBox; старый
-`dry-ssh.json` используется только с явным legacy-ключом. При обращении к
+Построение карты Zabbix по `--inventory-file` из NetBox. При обращении к
 Zabbix API выполняется поиск хостов и items (Bits received/sent). Для одной
 пары «хост, провайдер» рисуется один линк — при равных условиях выбирается
 логический интерфейс (например `ae5.0`), иначе физический.
@@ -459,8 +459,8 @@ Zabbix API выполняется поиск хостов и items (Bits receive
 
 **Карта Zabbix**
 
-- **По умолчанию** (без ключей): если карты с именем из `uplinks_config.MAP_NAME` нет — создаётся карта со всеми элементами (хосты, провайдеры, линки); если карта уже есть — выводится сообщение, изменения не вносятся.
-- `--update-map` — принудительно обновить карту (хосты, провайдеры, линки). С `--host` — только указанный хост и его линки; остальные элементы карты **не удаляются**. Без `--host`: с карты убираются хосты и облака провайдеров, которых нет в текущем `dry-ssh.json`, и любые элементы не типа «хост/картинка» (устаревшие линки пересобираются по данным). Чтобы оставить старые элементы, как раньше: **`--keep-obsolete-map-elements`**.
+- При переданном `--inventory-file` и без команды изменения, если карты с именем из `uplinks_config.MAP_NAME` нет, создаётся карта со всеми элементами; если карта уже есть, изменения не вносятся.
+- `--update-map` — принудительно обновить карту (хосты, провайдеры, линки) из `--inventory-file`. С `--host` — только указанный хост и его линки; остальные элементы карты **не удаляются**. Без `--host`: с карты убираются хосты и облака провайдеров, которых нет в текущем inventory, и любые элементы не типа «хост/картинка» (устаревшие линки пересобираются по данным). Чтобы оставить старые элементы: **`--keep-obsolete-map-elements`**.
 - `--print-table` — вывести в консоль таблицу (hostname, interface, description, ISP); с `--zabbix` — с hostid и ключами items.
 - `--create-map` — только создать пустую карту, если её нет (без элементов).
 
@@ -480,35 +480,16 @@ Zabbix API выполняется поиск хостов и items (Bits receive
 
 У каждого элемента-хоста на карте задаются ссылки на график по каждому uplink-интерфейсу: подпись — имя провайдера и «Bits received» (например «Beeline 5 Bits received»), URL — `history.php?action=showgraph&itemids[]=<itemid>&from=now-1d&to=now` (график за последние сутки). Базовый URL берётся из `ZABBIX_URL` (обрезается `/api_jsonrpc.php`).
 
-**Сопоставление description → имя провайдера (`description_to_name.json`)**
-
-В обычном запуске имя провайдера берётся из области мониторинга NetBox. Файл
-`description_to_name.json` не читается рабочими Zabbix-скриптами. Он относится
-только к явно включённым legacy-инструментам и Grafana.
-
-Если в поле `description` встречаются несколько формулировок для одного провайдера (например «Beeline», «Beeline 5», «Uplink: Beeline 5»), маппинг сводит их к одной подписи: ключ — точная строка `description` из данных, значение — подпись на карте. Файл **не генерируется автоматически**, его создают и правят вручную. Чтобы получить шаблон по всем `description` из `dry-ssh.json` (новые — как ключ, так и значение), выполните:
-
-```bash
-python zabbix_map.py --legacy-dry-ssh --generate-description-map -f dry-ssh.json > description_to_name.json
-```
-
-Отредактируйте JSON: для одного провайдера задайте одно и то же значение (напр. `"Uplink: Beeline 5": "Beeline"`, `"Beeline 5": "Beeline"`, `"Beeline": "Beeline"`). Если файл уже существует, в вывод попадёт его содержимое плюс недостающие description.
-
-**Переменные:** `ZABBIX_URL` (базовый URL, например `https://zabbix.example.com`; скрипт сам дописывает `/api_jsonrpc.php` при необходимости), `ZABBIX_TOKEN` (Bearer-токен, Zabbix 7), а также `NETBOX_URL` и `NETBOX_TOKEN` — по умолчанию провайдер для линка берётся из области мониторинга NetBox. Имя карты задаётся в `uplinks_config.MAP_NAME`. Иконки элементов (хосты, провайдеры) настраиваются в Zabbix, соответствующие ID можно задать в конфиге.
+**Переменные:** `ZABBIX_URL` (базовый URL, например `https://zabbix.example.com`; скрипт сам дописывает `/api_jsonrpc.php` при необходимости) и `ZABBIX_TOKEN` (Bearer-токен, Zabbix 7). Провайдер и интерфейс берутся из `--inventory-file`. Имя карты задаётся в `uplinks_config.MAP_NAME`. Иконки элементов (хосты, провайдеры) настраиваются в Zabbix, соответствующие ID можно задать в конфиге.
 
 | Ключ | Описание |
 |------|----------|
 | `--inventory-file` | Inventory из NetBox для обычного запуска |
-| `--legacy-dry-ssh` | Явно включить старый путь с JSON-файлом устройств |
-| `-f`, `--file` | JSON с ключом `devices` только вместе с `--legacy-dry-ssh` |
-| `-m`, `--description-map` | Файл сопоставления description → имя ISP |
-| `--generate-description-map` | Собрать все description из файла и вывести шаблон JSON (в stdout); объединить с существующим маппингом |
 | `--zabbix` | Запросить Zabbix API (для карты или таблицы) |
 | `--print-table` | Вывести таблицу в консоль (с `--zabbix` — с hostid и ключами items) |
 | `--create-map` | Только создать пустую карту, если её нет |
 | `--update-map` | Обновить карту; без `--host` — удалить с карты хосты/провайдеров не из JSON; с `--host` — только один хост |
 | `--keep-obsolete-map-elements` | С `--update-map` не удалять с карты хосты/провайдеры, отсутствующие в JSON |
-| `--legacy-provider-filter` | Старый отбор интерфейсов по тексту `Uplink:` в описании вместо области мониторинга NetBox |
 | `--host HOSTNAME` | Работать только с одним хостом |
 | `--debug` | Отладочный вывод и тело запросов map.create/update |
 | `--no-cache` | Не использовать кэш Zabbix |
@@ -522,26 +503,23 @@ python zabbix_map.py --inventory-file netbox_inventory.json --zabbix --update-ma
 python zabbix_map.py --inventory-file netbox_inventory.json --zabbix --update-map
 
 # Таблица в консоль (без Zabbix / с Zabbix)
-python zabbix_map.py --legacy-dry-ssh -f dry-ssh.json --print-table
-python zabbix_map.py --legacy-dry-ssh -f dry-ssh.json --print-table --zabbix
+python zabbix_map.py --inventory-file netbox_inventory.json --print-table
+python zabbix_map.py --inventory-file netbox_inventory.json --print-table --zabbix
 
 # Один хост
-python zabbix_map.py --legacy-dry-ssh -f dry-ssh.json --zabbix --host router-001
+python zabbix_map.py --inventory-file netbox_inventory.json --zabbix --host router-001
 
 # Создать пустую карту (один раз)
-python zabbix_map.py --legacy-dry-ssh -f dry-ssh.json --create-map
+python zabbix_map.py --create-map
 
 # Обновить карту по всем хостам (с отладкой)
 python zabbix_map.py --inventory-file netbox_inventory.json --zabbix --update-map --debug
 
 # Обновить только один хост и его линки
-python zabbix_map.py --legacy-dry-ssh -f dry-ssh.json --zabbix --update-map --host router-001 --debug
+python zabbix_map.py --inventory-file netbox_inventory.json --zabbix --update-map --host router-001 --debug
 
 # Выгрузить карту из API (например, созданную вручную) для сравнения формата
-python zabbix_map.py --legacy-dry-ssh -f dry-ssh.json --export-map 10 > map_10.json
-
-# Сгенерировать/обновить шаблон description_to_name по dry-ssh.json, сохранить и отредактировать
-python zabbix_map.py --legacy-dry-ssh --generate-description-map -f dry-ssh.json > description_to_name.json
+python zabbix_map.py --export-map 10 > map_10.json
 ```
 
 ---
@@ -552,22 +530,18 @@ python zabbix_map.py --legacy-dry-ssh --generate-description-map -f dry-ssh.json
 На странице локации создаётся один итоговый график на Provider, а физический
 участник LAG не считается отдельно от логического интерфейса.
 
-**Вход:** NetBox inventory и Zabbix API. `dry-ssh.json` доступен только с
-явным `--legacy-dry-ssh`.
+**Вход:** NetBox inventory и Zabbix API.
 Переменные: `ZABBIX_URL`, `ZABBIX_TOKEN`.
 
 | Ключ | Описание |
 |------|----------|
 | `--inventory-file` | Inventory из NetBox для обычного запуска |
-| `--legacy-dry-ssh` | Явно включить старый путь с JSON-файлом устройств |
-| `-f`, `--file` | Путь к dry-ssh.json только вместе с `--legacy-dry-ssh` |
 | `--dashboard-name` | Название дашборда в Zabbix (по умолчанию `Uplinks`) |
 | `--dashboard-by-location` | Дашборд по локациям (вкладка = локация); пустая строка — не создавать |
 | `--dashboard-by-provider` | Сводный дашборд по провайдерам с >1 линком (вкладка = Cogent, HE и др.): стеки по линкам и при наличии хостов «Uplinks {Provider}» — виджеты суммарного трафика (aggregate); пустая строка — не создавать |
 | `--providers` | Список имён провайдеров для сводного дашборда (по умолчанию: `PROVIDERS_FOR_SUMMARY` + провайдеры из полных NetBox-подключений) |
 | `--no-cache` | Не использовать кэш Zabbix |
 | `--no-show-threshold` | Не рисовать пороги триггеров (линию порога) на графиках |
-| `--legacy-provider-filter` | Старый отбор интерфейсов по тексту `Uplink:` в описании вместо области мониторинга NetBox |
 | `--debug` | Отладочный вывод |
 
 Если дашборд с таким именем уже есть — он обновляется (страница с виджетами перезаписывается). Если нет — создаётся новый.
@@ -575,13 +549,13 @@ python zabbix_map.py --legacy-dry-ssh --generate-description-map -f dry-ssh.json
 **Линия порога на графике.** Включена опция Simple triggers: пороги простых триггеров рисуются пунктиром. Явный простой триггер **100%** (`max(Bits received, …) > {$UPLINK.BPS.MAX:…}`) создаётся только там, где в **`zabbix_sync_commit_rate.py`** включён **`--create-link-triggers`** и у контура в NetBox поле **`billing_model`** равно **`Burst`**; иначе линия порога на графике опирается на триггеры шаблонов / другие правила Zabbix. Период **max** задаётся в **`uplinks_config.py`** (`TRIGGER_FUNCTION_PERIOD`, по умолчанию 15m).
 
 ```bash
-# Создать или обновить дашборд «Uplinks» с графиками по всем uplink из dry-ssh.json
+# Создать или обновить дашборд «Uplinks» с графиками по inventory NetBox
 python zabbix_uplinks_dashboard.py --inventory-file netbox_inventory.json
 
 # Другое имя дашборда
 python zabbix_uplinks_dashboard.py --inventory-file netbox_inventory.json --dashboard-name "Uplinks traffic"
 
-# Сводный дашборд: по умолчанию провайдеры из конфига + из NetBox (тег uplinks); явно задать список:
+# Сводный дашборд: по умолчанию провайдеры из конфига + из inventory; явно задать список:
 python zabbix_uplinks_dashboard.py --inventory-file netbox_inventory.json --providers Cogent Hurricane
 ```
 
@@ -606,7 +580,15 @@ python zabbix_uplinks_dashboard.py --inventory-file netbox_inventory.json --prov
 
 Описания концов строк задаются в **`uplinks_config.py`**: `TRIGGER_DESC_90_SUFFIX`, `TRIGGER_DESC_100_SUFFIX`, `TRIGGER_DESC_SLA_BREACH_SUFFIX`, `TRIGGER_DESC_UTIL_*_SUFFIX`.
 
-**Утилизация порта (по умолчанию с `-d dry-ssh.json`).** Для **физических** uplink из **`dry-ssh.json`** (на Juniper — `et-*`, без `ae` / `aeN.0` / `isLag` / `isLogical`; на Arista — `Ethernet*`) на хосте Zabbix: макросы **{$UPLINK.UTIL.WARN:"iface"}** = 70, **{$UPLINK.UTIL.CRIT:"iface"}** = 85 (проценты; пороги в `uplinks_config.py`). Два триггера с тегом `scripts:automatization`, формула как у шаблона **Arista by SNMP** (`avg(net.if.in)` или `avg(net.if.out)` vs `(macro/100)*net.if.speed`, `speed>0`). Warning зависит от Critical. Если items `net.if.in/out/speed` на хосте нет — интерфейс пропускается.
+**Утилизация порта.** Для **физических** uplink из NetBox inventory (на
+Juniper — `et-*`, без `ae` / `aeN.0` / `isLag` / `isLogical`; на Arista —
+`Ethernet*`) на хосте Zabbix создаются макросы
+**{$UPLINK.UTIL.WARN:"iface"}** = 70 и **{$UPLINK.UTIL.CRIT:"iface"}** = 85
+(проценты; пороги в `uplinks_config.py`). Два триггера получают тег
+`scripts:automatization`, формула соответствует шаблону **Arista by SNMP**.
+Файл `dry-ssh.json` можно передать дополнительно для сопоставления физического
+и логического имени. Если items `net.if.in/out/speed` на хосте нет, интерфейс
+пропускается.
 
 **Важно:** обрабатываются только те физические интерфейсы, которые нашлись в
 цепочке NetBox. Раньше сюда попадали все uplink из файла опроса, без
@@ -630,18 +612,16 @@ python zabbix_uplinks_dashboard.py --inventory-file netbox_inventory.json --prov
 
 | Ключ | Описание |
 |------|----------|
-| `-f`, `--commit-rates` | Путь к `commit_rates.json`. В обычном запуске файл не читается; он нужен только вместе с `--legacy-commit-rates-fallback` |
-| `--legacy-commit-rates-fallback` | Переходный режим: добрать из `commit_rates.json` те Burst-линки, которых нет в NetBox |
 | `--inventory-file` | Inventory из NetBox для обычного запуска |
-| `--dry-ssh` | Явный legacy-файл для старого сопоставления физического и логического имени |
+| `-d`, `--dry-ssh` | Необязательный JSON от `uplinks_stats.py` для сопоставления физического и логического имени |
 | `--dry-run` | Не менять макросы в Zabbix, только вывести что бы установили. Нельзя совмещать с ключами удаления триггеров |
 | `--debug` | Отладочный вывод |
 | `--create-link-triggers` | Создавать/обновлять триггеры 90%/100%/SLA breach только для Burst-линков |
-| `--no-util-triggers` | Не создавать макросы/триггеры **{$UPLINK.UTIL.*}** (по умолчанию util включён при наличии dry-ssh) |
+| `--no-util-triggers` | Не создавать макросы/триггеры **{$UPLINK.UTIL.*}** (по умолчанию включены для физических uplink из inventory) |
 | `--delete-link-triggers` | Удалить триггеры commit 90%/100%/SLA breach |
 | `--delete-util-triggers` | Удалить триггеры uplink utilization warn/crit |
 
-**BPS-макросы:** только пары с **кабелем** circuit termination (A) → интерфейс, устройство с тегом из **`NETBOX_TAG`** (по умолчанию `border`). **Util:** физические интерфейсы из **`dry-ssh.json`**, ограниченные той же цепочкой NetBox. Для логических имён (Juniper) укажите `-d dry-ssh.json` и для BPS (контекст макроса).
+**BPS-макросы:** только пары с **кабелем** circuit termination (A) → интерфейс, устройство с тегом из **`NETBOX_TAG`** (по умолчанию `border`). **Util:** физические интерфейсы берутся из той же цепочки NetBox. Для логических имён (Juniper) можно дополнительно передать `-d dry-ssh.json` для сопоставления имени.
 
 **Поведение при неудачном чтении NetBox.** Неудачным считается любой из трёх
 случаев: отказано в доступе, не удалось получить список поставщиков, часть
@@ -699,17 +679,12 @@ items (сумма Bits in/out по каналам). Для провайдера 
 
 Карта (**`zabbix_map.py`**) и сводный дашборд используют эти триггеры для цвета и виджетов.
 
-**Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`, `NETBOX_URL`, `NETBOX_TOKEN`.
+**Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`. Данные NetBox передаются через
+`--inventory-file`.
 
 | Ключ | Описание |
 |------|----------|
 | `--inventory-file` | Inventory из NetBox для обычного запуска |
-| `--legacy-dry-ssh` | Явно включить старый путь с JSON-файлом устройств |
-| `-d`, `--dry-ssh` | Путь к dry-ssh.json только вместе с `--legacy-dry-ssh` |
-| `-f`, `--commit-rates` | Путь к commit_rates.json. В обычном запуске файл не читается и его отсутствие не является ошибкой; он нужен только вместе с `--legacy-commit-rates-fallback` |
-| `--legacy-commit-rates-fallback` | Переходный режим: брать общий лимит поставщика из `_provider_limits` в `commit_rates.json`, если в NetBox поле `aggregate_limit_gbps` не заполнено |
-| `-m`, `--description-map` | Файл description_to_name.json (используется как запасной источник имени провайдера) |
-| `--legacy-provider-filter` | Старый отбор интерфейсов по тексту `Uplink:` в описании вместо области мониторинга NetBox |
 | `--no-cache` | Не использовать кэш Zabbix |
 | `--debug` | Отладочный вывод |
 | `--keep-triggers-without-limits` | Не удалять агрегатные триггеры у провайдера, у которого нет лимита |
@@ -731,9 +706,8 @@ python zabbix_provider_aggregate.py --inventory-file netbox_inventory.json
 
 Целевой процент **`SLO`** для создаваемых SLA сначала берётся из NetBox,
 затем из **`PROJECT_PROVIDER_SLO_PERCENT`** в `uplinks_config.py`.
-Переходное чтение **`_provider_sla`** из `commit_rates.json` доступно только
-с флагом **`--legacy-commit-rates-fallback`**. Эффективная дата старта SLA —
-**`SLA_EFFECTIVE_DATE_UTC`** в `uplinks_config.py`.
+Эффективная дата старта SLA — **`SLA_EFFECTIVE_DATE_UTC`** в
+`uplinks_config.py`.
 
 Опционально **`--parent-service NAME`** — общий родитель для всех создаваемых сервисов.
 
@@ -741,12 +715,11 @@ python zabbix_provider_aggregate.py --inventory-file netbox_inventory.json
 
 | Ключ | Описание |
 |------|----------|
-| `-f`, `--commit-rates` | Путь к commit_rates.json. В обычном запуске файл не читается; нужен только вместе с `--legacy-commit-rates-fallback` |
+| `--inventory-file` | Inventory из NetBox для обычного запуска |
 | `--parent-service` | Имя родительского сервиса (создаётся при отсутствии) |
-| `--legacy-commit-rates-fallback` | Явно разрешить переходное чтение провайдеров, Burst и SLO из commit_rates.json |
 | `--debug` | Отладочный вывод API |
 
-**Порядок с Burst:** сначала **`python zabbix_sync_commit_rate.py -d dry-ssh.json --create-link-triggers`** (чтобы триггеры имели актуальные теги и описание SLA breach), затем **`python zabbix_provider_services.py --parent-service "Uplinks providers"`**.
+**Порядок с Burst:** сначала **`python zabbix_sync_commit_rate.py --inventory-file netbox_inventory.json --create-link-triggers`** (чтобы триггеры имели актуальные теги и описание SLA breach), затем **`python zabbix_provider_services.py --inventory-file netbox_inventory.json --parent-service "Uplinks providers"`**.
 
 ```bash
 python zabbix_provider_services.py
@@ -763,15 +736,13 @@ python zabbix_provider_services.py --parent-service "Uplinks"
 - **Блок Burst:** по одному ряду на активный Circuit с **`billing_model: Burst`**; те же правила выбора триггера (SLA breach или 100%). Если хост в Zabbix не найден — в таблице `n/a`.
 
 Колонка **BelowSLA** — сравнение с SLO (целевым уровнем доступности) из NetBox или
-`PROJECT_PROVIDER_SLO_PERCENT`. Старый `_provider_sla` из JSON используется только
-с флагом `--legacy-commit-rates-fallback`.
+`PROJECT_PROVIDER_SLO_PERCENT`.
 
 **Переменные:** `ZABBIX_URL`, `ZABBIX_TOKEN`, `NETBOX_URL`, `NETBOX_TOKEN`.
 
 | Ключ | Описание |
 |------|----------|
-| `-f`, `--commit-rates` | Путь к commit_rates.json для legacy-режима |
-| `--legacy-commit-rates-fallback` | Явно включить переходное чтение JSON |
+| `--inventory-file` | Inventory из NetBox для физико-логического сопоставления |
 | `--dry-ssh` | Путь к dry-ssh.json: перевод физического имени интерфейса в логическое, как оно названо в Zabbix |
 | `--days` | Глубина окна в днях (по умолчанию 30) |
 | `--from-ts`, `--to-ts` | Границы окна (Unix time) |
@@ -780,7 +751,7 @@ python zabbix_provider_services.py --parent-service "Uplinks"
 ```bash
 python zabbix_provider_sla.py
 python zabbix_provider_sla.py --days 7
-python zabbix_provider_sla.py -f commit_rates.json --legacy-commit-rates-fallback
+python zabbix_provider_sla.py --inventory-file netbox_inventory.json --days 7
 ```
 
 ---
@@ -817,14 +788,8 @@ python zabbix_uplinks_cleanup.py
 
 | Файл | Описание |
 |------|----------|
-| `dry-ssh.json` | Пример/результат: JSON с ключом `devices` (имя устройства → список интерфейсов с полями из SSH; могут быть логические интерфейсы, поля isLogical, isLag и др.) |
+| `dry-ssh.json` | Локальный результат отдельного SSH-сбора для `uplinks_stats.py` и `netbox_checks.py`; в рабочий NetBox-first запуск не входит |
 | `netbox_interface_types.json` | Справочник типов интерфейсов NetBox (value, label); используется `--mt-ref` в `netbox_checks.py` |
-| `description_to_name.example.json` | Пример сопоставления description → имя ISP; скопировать в `description_to_name.json` и заполнить |
-| `description_to_name.json` | Локальный файл сопоставления (не в git); по умолчанию для `zabbix_map.py -m` |
-| `commit_rates.json.example` | Пример структуры commit_rates (обезличенный); скопировать в `commit_rates.json` и заполнить |
-| `commit_rates.json` | Локальный файл (не в git): оплаченная скорость (commit_rate_gbps, Гбит/с), провайдер и circuit ID по паре устройство — интерфейс; для NetBox Circuit (Commit rate в Kbps = × 1 000 000) |
-| `generate_commit_rates.py` | Удалён; данные берутся из NetBox |
-| `netbox_create_circuits.py` | Удалён; объекты создаются вручную в NetBox |
 | `zabbix_sync_commit_rate.py` | Макросы {$UPLINK.BPS.MAX}/{$UPLINK.BPS.WARN}; опционально per-link триггеры **90%/100%/SLA breach** для `billing_model: Burst`; удаление старых item'ов порога |
 | `zabbix_provider_aggregate.py` | Хосты «Uplinks {Provider}»: calculated items, триггеры 90%/100%/SLA breach по полю NetBox `aggregate_limit_gbps` |
 | `zabbix_provider_services.py` | Сервисы и SLA в Zabbix: активные Circuit и Burst-контуры, цель из NetBox или `PROJECT_PROVIDER_SLO_PERCENT` |
@@ -832,30 +797,9 @@ python zabbix_uplinks_cleanup.py
 | `zabbix_uplinks_cleanup.py` | Очистка: простые триггеры uplinks (включая SLA breach на линках), item'ы порога, карта, дашборды |
 | `netbox_uplinks_cleanup.py` | Удалён; старые объекты NetBox не удаляются автоматически |
 | `uplinks_config.py` | Имя карты/дашбордов, теги триггеров (`scripts`/`automatization`, `sla`/`true`), описания **90%/100%** и **SLA breach** на линке (`TRIGGER_DESC_*`, `TRIGGER_DESC_SLA_BREACH_SUFFIX`), периоды **`TRIGGER_FUNCTION_PERIOD`** и **`SLA_TRIGGER_FUNCTION_PERIOD`**, макросы, цвета линков, префиксы агрегатных хостов, тег старых объектов **`NETBOX_AUTOMATION_TAG`** и общий целевой уровень доступности **`PROJECT_PROVIDER_SLO_PERCENT`**. Копия примера: `uplinks_config.example.py`. |
-| `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся при `--zabbix` / дашборде в той же директории, что и файл `-f`, не коммитить |
+| `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся рядом с переданным inventory-файлом, не коммитить |
 | `ROADMAP.md` | Планы доработок (например Tenancy для circuits) |
 | `requirements.txt` | Зависимости: pynetbox, paramiko, requests |
-
----
-
-**Формат `commit_rates.json`**  
-Ключ — имя устройства, значение — объект «имя интерфейса → { `provider`, `circuit_id`, `commit_rate_gbps`, ... }». `circuit_id` — уникальный идентификатор контура (Unique circuit ID в NetBox). `commit_rate_gbps` — оплаченная скорость в **Гбит/с** (в NetBox Circuit Commit rate хранится в Kbps: умножить на 1 000 000). Провайдер — короткое имя.  
-Дополнительные поля линка (например **`billing_model`**: `Flat` / **`Burst`** / `95thAggBurst`) допускаются и сохраняются при merge. Для **`Burst`** в Zabbix по флагу создаются per-link триггеры и сервис **`Uplinks Burst {circuit_id}`**; у линка должны быть заполнены **`provider`**, **`circuit_id`** и по возможности **`commit_rate_gbps`**. Ключи с префиксом `_` на корне не считаются устройствами; служебные ключи:
-
-- **`_provider_limits`** — старый агрегатный лимит по провайдеру (Гбит/с). В
-  обычном запуске не читается: лимит берётся из поля NetBox
-  `aggregate_limit_gbps` у Provider. Доступен только с ключом
-  `--legacy-commit-rates-fallback`.
-- **`_provider_sla`** — старое общее значение доступности для legacy-запусков
-  с `--legacy-commit-rates-fallback`. В обычном запуске используется
-  `PROJECT_PROVIDER_SLO_PERCENT` или значение SLO из NetBox.
-
-Другие **`_…`** ключи (`_billing_models` и т.п.) при merge сохраняются. Файл обычно не коммитится; пример — **`commit_rates.json.example`**.
-
-### Архивный формат `commit_rates.json`
-
-Файл оставлен только как справочный пример для внешних старых инструментов.
-Рабочий проект не генерирует и не читает его.
 
 ### Проверка объектов NetBox
 
