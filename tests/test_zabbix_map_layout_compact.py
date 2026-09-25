@@ -1,6 +1,5 @@
 """Compact provider-block layout: inventory model, label-aware validation."""
 
-import os
 from pathlib import Path
 
 import pytest
@@ -82,10 +81,9 @@ def _edge(hostname, hostid, iface, isp, suffix=""):
 
 
 def _netbox_inventory_edges():
-    """18 edges / 9 providers / 15 hosts from sanitized netbox_inventory.json."""
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    inventory_path = os.path.join(repo_root, "netbox_inventory.json")
-    report = load_inventory_report(inventory_path)
+    """18 edges / 9 providers / 15 hosts from tracked layout inventory fixture."""
+    inventory_path = Path(__file__).resolve().parent / "fixtures" / "netbox_inventory_layout_complete.json"
+    report = load_inventory_report(str(inventory_path))
     complete = report.get("complete") or []
     host_ids = {
         device: str(1000 + idx)
