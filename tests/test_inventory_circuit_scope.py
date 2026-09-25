@@ -21,25 +21,42 @@ def _scoped_circuit(**overrides):
     return add_project_circuit_scope(circuit)
 
 
-def _build_scoped_inventory_nb(provider=None, circuit=None, device=None, iface=None, ct=None, cable=None):
+def _build_scoped_inventory_nb(
+    provider=None,
+    circuit=None,
+    device=None,
+    iface=None,
+    ct=None,
+    cable=None,
+    *,
+    circuits=None,
+):
     provider = provider or _Record(id=1, name="Cogent")
-    circuit = circuit or _scoped_circuit()
-    circuit.provider_id = provider.id
-    circuit.provider = provider.id
     device = device or _Record(id=1, name="ALA-KZT-7280TR-1", tag="border")
     iface = iface or _Record(id=10, name="Ethernet51/1", device=device, device_id=1)
-    ct = ct or _Record(
-        id=1,
-        term_side="A",
-        cable=_Record(id=50),
-        circuit=circuit,
-        circuit_id=circuit.id,
-    )
-    cable = cable or _Record(
-        id=50,
-        a_terminations=[{"object_type": "circuits.circuittermination", "object_id": ct.id}],
-        b_terminations=[{"object_type": "dcim.interface", "object_id": iface.id}],
-    )
+    if circuits is not None:
+        circuit_list = list(circuits)
+        terminations = []
+        cables = []
+    else:
+        circuit = circuit or _scoped_circuit()
+        circuit.provider_id = provider.id
+        circuit.provider = provider.id
+        ct = ct or _Record(
+            id=1,
+            term_side="A",
+            cable=_Record(id=50),
+            circuit=circuit,
+            circuit_id=circuit.id,
+        )
+        cable = cable or _Record(
+            id=50,
+            a_terminations=[{"object_type": "circuits.circuittermination", "object_id": ct.id}],
+            b_terminations=[{"object_type": "dcim.interface", "object_id": iface.id}],
+        )
+        circuit_list = [circuit]
+        terminations = [ct]
+        cables = [cable] if cable is not None else []
 
     class _Providers:
         def all(self):
@@ -51,17 +68,15 @@ def _build_scoped_inventory_nb(provider=None, circuit=None, device=None, iface=N
         def get(self, pk):
             return provider if provider.id == pk else None
 
-    circuits = [circuit]
-
     class _CircuitsEndpoint:
         def filter(self, **kwargs):
-            out = circuits
+            out = circuit_list
             if "provider_id" in kwargs:
                 out = [c for c in out if c.provider_id == kwargs["provider_id"]]
             return out
 
         def get(self, pk):
-            for item in circuits:
+            for item in circuit_list:
                 if item.id == pk:
                     return item
             return None
@@ -69,9 +84,9 @@ def _build_scoped_inventory_nb(provider=None, circuit=None, device=None, iface=N
     nb = MockNetBox(
         devices=[device],
         interfaces=[iface],
-        cables=[cable],
-        terminations=[ct],
-        circuits=circuits,
+        cables=cables,
+        terminations=terminations,
+        circuits=circuit_list,
     )
     nb.circuits.providers = _Providers()
     nb.circuits.circuits = _CircuitsEndpoint()
@@ -85,6 +100,18 @@ def test_collect_scope_includes_active_uplink_type_complete():
     assert len(report["complete"]) == 1
     assert report["complete"][0]["provider"] == "Cogent"
     assert report["incomplete"] == []
+
+
+def test_collect_scope_provider_with_no_circuits():
+    nb = _build_scoped_inventory_nb(circuits=[])
+    scope = inv.project_circuit_scope()
+    report = inv.collect_uplink_inventory(nb, tag="border", circuit_scope=scope)
+    assert report["complete"] == []
+    assert report["incomplete"] == []
+    assert report["stats"]["circuits_seen"] == 0
+    assert report["stats"]["circuits_in_scope"] == 0
+    assert report["stats"]["circuits_active"] == 0
+    assert "error" not in report["stats"]
 
 
 def test_collect_scope_reports_incomplete_for_active_uplink_type():
