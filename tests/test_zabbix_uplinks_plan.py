@@ -1541,6 +1541,203 @@ def test_burst_trigger_matches_spec_enabled_exact_match():
     assert _burst_trigger_matches_spec(trig, spec, {"high": "100"}) is True
 
 
+def _zabbix_canonical_burst_row(spec, triggerid, functionid, itemid, dependencies=None):
+    from uplinks.zabbix.plan import _parse_burst_simple_expression
+
+    parsed = _parse_burst_simple_expression(spec["expression"])
+    assert parsed is not None
+    return {
+        "triggerid": triggerid,
+        "description": spec["description"],
+        "expression": "{{{}}}>{}".format(functionid, parsed["threshold"]),
+        "priority": spec["priority"],
+        "tags": spec["tags"],
+        "status": "0",
+        "dependencies": dependencies or [],
+        "functions": [
+            {
+                "functionid": functionid,
+                "itemid": itemid,
+                "function": parsed["function"],
+                "parameter": "$,{}".format(parsed["parameter"]),
+            }
+        ],
+        "items": [{"itemid": itemid, "key_": parsed["item_key"]}],
+    }
+
+
+def test_burst_trigger_matches_spec_canonical_expression_equivalent():
+    from uplinks.zabbix.plan import _burst_trigger_matches_spec
+    from zabbix_sync_commit_rate import expected_burst_trigger_specs
+
+    dev = "ALA-KZT-7280TR-1"
+    iface = "Ethernet51/1"
+    item_key = 'net.if.in["Ethernet51/1"]'
+    spec = expected_burst_trigger_specs(
+        dev, iface, item_key, provider="Cogent", circuit_id="CKT-1"
+    )[0]
+    trig = _zabbix_canonical_burst_row(spec, "100", "50001", "60001")
+    assert trig["functions"][0]["parameter"] == "$,15m"
+    assert _burst_trigger_matches_spec(trig, spec, {}) is True
+
+    spaced = _zabbix_canonical_burst_row(spec, "102", "50004", "60001")
+    spaced["functions"][0]["parameter"] = "$ , 15m"
+    assert _burst_trigger_matches_spec(spaced, spec, {}) is True
+
+
+def test_burst_trigger_expression_exact_match_rejects_contradictory_metadata():
+    from uplinks.zabbix.plan import _burst_trigger_expression_matches
+    from zabbix_sync_commit_rate import expected_burst_trigger_specs
+
+    dev = "ALA-KZT-7280TR-1"
+    iface = "Ethernet51/1"
+    item_key = 'net.if.in["Ethernet51/1"]'
+    spec = expected_burst_trigger_specs(
+        dev, iface, item_key, provider="Cogent", circuit_id="CKT-1"
+    )[0]
+    expression = spec["expression"]
+    base = {
+        "expression": expression,
+        "functions": [
+            {
+                "functionid": "50001",
+                "itemid": "60001",
+                "function": "max",
+                "parameter": "$,15m",
+            }
+        ],
+        "items": [{"itemid": "60001", "key_": item_key}],
+    }
+
+    assert _burst_trigger_expression_matches(base, expression) is True
+
+    wrong_key = dict(base, items=[{"itemid": "60001", "key_": 'net.if.in["Ethernet52/1"]'}])
+    assert _burst_trigger_expression_matches(wrong_key, expression) is False
+
+    wrong_fn = dict(
+        base,
+        functions=[dict(base["functions"][0], function="last")],
+    )
+    assert _burst_trigger_expression_matches(wrong_fn, expression) is False
+
+    wrong_param = dict(
+        base,
+        functions=[dict(base["functions"][0], parameter="$,5m")],
+    )
+    assert _burst_trigger_expression_matches(wrong_param, expression) is False
+
+
+def test_burst_trigger_matches_spec_canonical_wrong_item_key():
+    from uplinks.zabbix.plan import _burst_trigger_matches_spec
+    from zabbix_sync_commit_rate import expected_burst_trigger_specs
+
+    dev = "ALA-KZT-7280TR-1"
+    iface = "Ethernet51/1"
+    item_key = 'net.if.in["Ethernet51/1"]'
+    spec = expected_burst_trigger_specs(
+        dev, iface, item_key, provider="Cogent", circuit_id="CKT-1"
+    )[0]
+    trig = _zabbix_canonical_burst_row(spec, "100", "50001", "60001")
+    trig["items"][0]["key_"] = 'net.if.in["Ethernet52/1"]'
+    assert _burst_trigger_matches_spec(trig, spec, {}) is False
+
+
+def test_burst_trigger_matches_spec_canonical_wrong_function_or_parameter():
+    from uplinks.zabbix.plan import _burst_trigger_matches_spec
+    from zabbix_sync_commit_rate import expected_burst_trigger_specs
+
+    dev = "ALA-KZT-7280TR-1"
+    iface = "Ethernet51/1"
+    item_key = 'net.if.in["Ethernet51/1"]'
+    spec = expected_burst_trigger_specs(
+        dev, iface, item_key, provider="Cogent", circuit_id="CKT-1"
+    )[0]
+    wrong_fn = _zabbix_canonical_burst_row(spec, "100", "50001", "60001")
+    wrong_fn["functions"][0]["function"] = "last"
+    assert _burst_trigger_matches_spec(wrong_fn, spec, {}) is False
+
+    wrong_period = _zabbix_canonical_burst_row(spec, "101", "50002", "60002")
+    wrong_period["functions"][0]["parameter"] = "$,5m"
+    assert _burst_trigger_matches_spec(wrong_period, spec, {}) is False
+
+
+def test_burst_trigger_matches_spec_canonical_wrong_functionid():
+    from uplinks.zabbix.plan import _burst_trigger_matches_spec
+    from zabbix_sync_commit_rate import expected_burst_trigger_specs
+
+    dev = "ALA-KZT-7280TR-1"
+    iface = "Ethernet51/1"
+    item_key = 'net.if.in["Ethernet51/1"]'
+    spec = expected_burst_trigger_specs(
+        dev, iface, item_key, provider="Cogent", circuit_id="CKT-1"
+    )[0]
+    trig = _zabbix_canonical_burst_row(spec, "100", "50001", "60001")
+    trig["expression"] = trig["expression"].replace("{50001}", "{50002}", 1)
+    assert _burst_trigger_matches_spec(trig, spec, {}) is False
+
+
+def test_burst_trigger_matches_spec_canonical_sla_period_parameter():
+    from uplinks.zabbix.plan import _burst_trigger_matches_spec
+    from zabbix_sync_commit_rate import expected_burst_trigger_specs
+
+    dev = "ALA-KZT-7280TR-1"
+    iface = "Ethernet51/1"
+    item_key = 'net.if.in["Ethernet51/1"]'
+    spec = expected_burst_trigger_specs(
+        dev, iface, item_key, provider="Cogent", circuit_id="CKT-1"
+    )[2]
+    trig = _zabbix_canonical_burst_row(spec, "300", "50003", "60001")
+    assert trig["functions"][0]["parameter"] == "$,1h"
+    assert _burst_trigger_matches_spec(trig, spec, {}) is True
+
+
+def test_plan_burst_triggers_unchanged_canonical_expression(monkeypatch, zabbix_env):
+    from uplinks.zabbix.plan import _plan_burst_triggers
+    from zabbix_sync_commit_rate import expected_burst_trigger_specs
+
+    dev = "ALA-KZT-7280TR-1"
+    iface = "Ethernet51/1"
+    item_key = 'net.if.in["Ethernet51/1"]'
+    specs = expected_burst_trigger_specs(
+        dev, iface, item_key, provider="Cogent", circuit_id="CKT-1"
+    )
+    high, warn, sla = specs
+    existing = [
+        _zabbix_canonical_burst_row(high, "100", "50001", "60001"),
+        _zabbix_canonical_burst_row(warn, "200", "50002", "60001", dependencies=[{"triggerid": "100"}]),
+        _zabbix_canonical_burst_row(sla, "300", "50003", "60001"),
+    ]
+
+    monkeypatch.setattr(
+        "zabbix_sync_commit_rate.get_bits_received_item_key",
+        lambda url, token, hostid, iface_name, debug=False: item_key,
+    )
+    captured = []
+
+    def trigger_get(params):
+        captured.append(params)
+        return existing
+
+    (ZabbixRpcMocker().on("trigger.get", trigger_get).activate(monkeypatch))
+
+    plan, _, err = _plan_burst_triggers(
+        "https://z.example/api_jsonrpc.php",
+        "token",
+        [(dev, iface)],
+        {(dev, iface): {"provider": "Cogent", "circuit_id": "CKT-1"}},
+        {dev: "101"},
+        {"101": dev},
+        allow_delete=True,
+    )
+    assert err is None
+    assert plan["update"] == []
+    assert plan["create"] == []
+    assert plan["unchanged"]
+    assert captured
+    assert captured[0].get("selectFunctions") == "extend"
+    assert captured[0].get("selectItems") == ["itemid", "key_"]
+
+
 def test_plan_burst_triggers_create_update_unchanged(monkeypatch, zabbix_env):
     from uplinks.zabbix.plan import _plan_burst_triggers
     from zabbix_sync_commit_rate import expected_burst_trigger_specs

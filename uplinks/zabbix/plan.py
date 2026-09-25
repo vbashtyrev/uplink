@@ -358,11 +358,111 @@ def _plan_util_triggers(url, token, host_to_ifaces, hostid_by_name, allow_delete
     return categories, current
 
 
+_BURST_SIMPLE_EXPR_RE = re.compile(
+    r"^(max|min)\(/([^/]+)/(.+),\s*([^)]+)\)>(.+)$",
+)
+_CANONICAL_FUNCTION_REF_RE = re.compile(r"^\{(\d+)\}$")
+
+
+def _burst_expression_threshold(expression):
+    expr = (expression or "").strip()
+    sep = expr.rfind(">")
+    if sep < 0:
+        return None
+    return expr[sep + 1 :].strip()
+
+
+def _burst_expression_function_ref(expression):
+    expr = (expression or "").strip()
+    sep = expr.rfind(">")
+    if sep < 0:
+        return None
+    return expr[:sep].strip()
+
+
+def _parse_burst_simple_expression(expression):
+    match = _BURST_SIMPLE_EXPR_RE.match((expression or "").strip())
+    if not match:
+        return None
+    return {
+        "function": match.group(1).lower(),
+        "host": match.group(2),
+        "item_key": match.group(3),
+        "parameter": match.group(4).strip(),
+        "threshold": match.group(5).strip(),
+    }
+
+
+def _normalize_burst_zabbix_parameter(parameter):
+    """Strip whitespace only; Zabbix may return '$ , 15m' for '$,15m'."""
+    return re.sub(r"\s+", "", (parameter or ""))
+
+
+def _expected_burst_zabbix_parameter(period):
+    return "$,{}".format((period or "").strip())
+
+
+def _burst_trigger_has_function_metadata(existing_trig):
+    return bool(existing_trig.get("functions")) or bool(existing_trig.get("items"))
+
+
+def _burst_validate_functions_and_items(existing_trig, parsed, existing_expression, literal_match):
+    functions = existing_trig.get("functions") or []
+    items = existing_trig.get("items") or []
+    if len(functions) != 1 or not items:
+        return False
+    fn = functions[0]
+    if (fn.get("function") or "").strip().lower() != parsed["function"]:
+        return False
+    want_parameter = _expected_burst_zabbix_parameter(parsed["parameter"])
+    if _normalize_burst_zabbix_parameter(fn.get("parameter")) != want_parameter:
+        return False
+    item_key_by_id = {
+        str(row.get("itemid")): (row.get("key_") or "").strip()
+        for row in items
+        if row.get("itemid") is not None
+    }
+    item_key = item_key_by_id.get(str(fn.get("itemid") or ""))
+    if item_key != parsed["item_key"]:
+        return False
+    function_ref = _burst_expression_function_ref(existing_expression)
+    ref_match = (
+        _CANONICAL_FUNCTION_REF_RE.fullmatch(function_ref) if function_ref else None
+    )
+    if ref_match:
+        if _burst_expression_threshold(existing_expression) != parsed["threshold"]:
+            return False
+        if str(fn.get("functionid") or "") != ref_match.group(1):
+            return False
+    elif not literal_match:
+        return False
+    return True
+
+
+def _burst_trigger_expression_matches(existing_trig, expected_expression):
+    """True when Zabbix expression matches expected max/min burst form (literal or canonical)."""
+    existing_expression = (existing_trig.get("expression") or "").strip()
+    expected_expression = (expected_expression or "").strip()
+    literal_match = existing_expression == expected_expression
+    if literal_match and not _burst_trigger_has_function_metadata(existing_trig):
+        return True
+    parsed = _parse_burst_simple_expression(expected_expression)
+    if not parsed:
+        return False
+    if literal_match:
+        return _burst_validate_functions_and_items(
+            existing_trig, parsed, existing_expression, literal_match=True
+        )
+    return _burst_validate_functions_and_items(
+        existing_trig, parsed, existing_expression, literal_match=False
+    )
+
+
 def _burst_trigger_matches_spec(existing_trig, expected, role_to_triggerid):
     """Compare one Zabbix trigger row against an expected Burst spec."""
     if (existing_trig.get("description") or "").strip() != expected["description"]:
         return False
-    if (existing_trig.get("expression") or "").strip() != expected["expression"]:
+    if not _burst_trigger_expression_matches(existing_trig, expected["expression"]):
         return False
     if str(existing_trig.get("priority", "0")) != str(expected["priority"]):
         return False
@@ -482,6 +582,8 @@ def _plan_burst_triggers(
                 "search": {"description": "Interface {}:".format((iface_name or "").strip())},
                 "selectTags": "extend",
                 "selectDependencies": "extend",
+                "selectFunctions": "extend",
+                "selectItems": ["itemid", "key_"],
             },
             debug=debug,
         )
