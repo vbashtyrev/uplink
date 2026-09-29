@@ -68,16 +68,24 @@ def test_existing_only_skips_interface_create(monkeypatch, netbox_env, tmp_path,
                         assert nc.main() == 0
     out = capsys.readouterr().out
     assert not create_called
-    assert "skipped (--existing-only)" in out
+    assert "not found in NetBox, skipped" in out
     assert "Ethernet52/1" in out
 
 
-def test_auto_allows_interface_create(monkeypatch, netbox_env, tmp_path, capsys):
+def test_missing_interface_apply_never_creates(monkeypatch, netbox_env, tmp_path, capsys):
     stats = _missing_iface_stats(tmp_path)
     env = NetBoxTestEnvironment()
     dev = env.add_device("ALA-KZT-7280TR-1")
     dev.tag = "border"
     dev.platform = type("P", (), {"name": "Arista EOS"})()
+    create_called = False
+
+    def track_create(**kwargs):
+        nonlocal create_called
+        create_called = True
+        raise AssertionError("interface create should not be called")
+
+    env.dcim.interfaces.create = track_create
 
     with patch.object(nc.pynetbox, "api", lambda url, token: env):
         with patch("netbox_checks.is_juniper_platform", return_value=False):
@@ -94,15 +102,13 @@ def test_auto_allows_interface_create(monkeypatch, netbox_env, tmp_path, capsys)
                                 "--host",
                                 "ALA-KZT-7280TR-1",
                                 "--apply",
-                                "--auto",
                                 "--intname",
-                                "--description",
-                                "--mediatype",
                             ],
                         )
                         assert nc.main() == 0
-    assert env.dcim.interfaces.filter(device_id=dev.id, name="Ethernet52/1")
-    assert "created" in capsys.readouterr().out.lower()
+    out = capsys.readouterr().out
+    assert not create_called
+    assert "not found in NetBox, skipped" in out
 
 
 def test_existing_only_skips_mac_create(monkeypatch, netbox_env, tmp_path, capsys):

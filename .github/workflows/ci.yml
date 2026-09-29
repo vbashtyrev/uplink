@@ -10,8 +10,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
-      - run: pytest -q
+      - run: ruff check .
+      - run: mypy *.py uplinks
+      - name: Ruff format check (new Python files in diff)
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_SHA}" ] || [ "${BASE_SHA}" = "0000000000000000000000000000000000000000" ]; then
+            echo "BASE_SHA unset or zero; skipping ruff format check for new files."
+            exit 0
+          fi
+          tmp="$(mktemp)"
+          trap 'rm -f "${tmp}"' EXIT
+          git diff --name-only --diff-filter=A "${BASE_SHA}" HEAD -- '*.py' >"${tmp}"
+          mapfile -t added < "${tmp}"
+          if [ "${#added[@]}" -eq 0 ] || [ -z "${added[0]:-}" ]; then
+            echo "No new Python files in diff; skipping ruff format check."
+            exit 0
+          fi
+          printf '%s\n' "${added[@]}"
+          ruff format --check --diff "${added[@]}"
+      - run: pytest -q --cov=. --cov-report=term-missing --cov-fail-under=0
+      - run: python -m compileall -q .

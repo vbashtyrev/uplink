@@ -1,4 +1,4 @@
-"""netbox_checks main --apply --intname: create missing interface."""
+"""netbox_checks main --apply --intname: missing interface is skipped."""
 
 import json
 import sys
@@ -10,7 +10,7 @@ import netbox_checks as nc
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-def test_main_apply_creates_missing_interface(monkeypatch, netbox_env, tmp_path, capsys):
+def test_main_apply_skips_missing_interface(monkeypatch, netbox_env, tmp_path, capsys):
     stats = tmp_path / "stats.json"
     stats.write_text(
         json.dumps(
@@ -75,5 +75,5 @@ def test_main_apply_creates_missing_interface(monkeypatch, netbox_env, tmp_path,
                     )
                     assert nc.main() == 0
     out = capsys.readouterr().out
-    assert "created" in out.lower() or "Created" in out
-    nb.dcim.interfaces.create.assert_called_once()
+    assert "not found in NetBox, skipped" in out
+    nb.dcim.interfaces.create.assert_not_called()

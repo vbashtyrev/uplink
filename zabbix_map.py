@@ -28,6 +28,8 @@ from uplinks.zabbix.client import (
     _normalize_interface_name,
     fetch_zabbix_hosts_and_items,
     load_zabbix_cache,
+    load_zabbix_hosts_and_items_for_scope,
+    required_zabbix_item_pairs,
     save_zabbix_cache,
     validate_zabbix_token,
     zabbix_request,
@@ -2664,26 +2666,26 @@ def main():
             os.path.dirname(os.path.abspath(cache_base)) if cache_base else ".",
             ZABBIX_CACHE_FILE,
         )
-        host_id_by_name = None
-        items_by_host_iface = None
-        if not args.no_cache:
-            cached_host, cached_items = load_zabbix_cache(cache_path)
-            if cached_host is not None and cached_items is not None and set(cached_host.keys()) >= hostnames:
-                host_id_by_name = {k: cached_host[k] for k in hostnames if k in cached_host}
-                items_by_host_iface = {(h, i): rec for (h, i), rec in cached_items.items() if h in host_id_by_name}
-                if args.debug:
-                    print("DEBUG: data loaded from cache {}".format(cache_path), file=sys.stderr)
-        if host_id_by_name is None or items_by_host_iface is None:
-            host_id_by_name, items_by_host_iface, err = fetch_zabbix_hosts_and_items(
-                url, token, hostnames, debug=args.debug
-            )
-            if err:
-                print(err, file=sys.stderr)
-                sys.exit(1)
-            if not args.no_cache:
-                save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
-                if args.debug:
-                    print("DEBUG: cache saved in {}".format(cache_path), file=sys.stderr)
+        required_pairs = required_zabbix_item_pairs(
+            devices,
+            device_iface_to_provider=device_iface_to_provider,
+            inventory_scoped=inventory_scoped,
+        )
+        host_id_by_name, items_by_host_iface, err = load_zabbix_hosts_and_items_for_scope(
+            url,
+            token,
+            hostnames,
+            required_pairs=required_pairs,
+            cache_path=None if args.no_cache else cache_path,
+            no_cache=args.no_cache,
+            debug=args.debug,
+            fetch_items=fetch_zabbix_hosts_and_items,
+        )
+        if err:
+            print(err, file=sys.stderr)
+            sys.exit(1)
+        if not args.no_cache and args.debug:
+            print("DEBUG: Zabbix hosts/items loaded (cache {})".format(cache_path), file=sys.stderr)
     else:
         host_id_by_name = {}
 

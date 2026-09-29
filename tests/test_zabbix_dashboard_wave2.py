@@ -17,9 +17,8 @@ from zabbix_uplinks_dashboard import (
     load_uplink_provider_context,
     _make_graph_widget,
     create_or_update_dashboard,
-    load_zabbix_cache,
-    save_zabbix_cache,
 )
+from uplinks.zabbix.client import load_zabbix_cache, save_zabbix_cache
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -103,7 +102,7 @@ def test_main_uses_cache(monkeypatch, zabbix_env, tmp_path, capsys):
         str(cache),
         {"ALA-KZT-7280TR-1": "101", "FRN-MX-1": "102"},
         {
-            ("ALA-KZT-7280TR-1", "Ethernet51/1"): {
+            ("ALA-KZT-7280TR-1", "ethernet51/1"): {
                 "itemid_in": "1",
                 "itemid_out": "2",
                 "bits_in": 'net.if.in["Ethernet51/1"]',
@@ -125,7 +124,7 @@ def test_main_uses_cache(monkeypatch, zabbix_env, tmp_path, capsys):
         return (
             {"ALA-KZT-7280TR-1": "101", "FRN-MX-1": "102"},
             {
-                ("ALA-KZT-7280TR-1", "Ethernet51/1"): {
+                ("ALA-KZT-7280TR-1", "ethernet51/1"): {
                     "itemid_in": "1",
                     "itemid_out": "2",
                     "bits_in": 'net.if.in["Ethernet51/1"]',

@@ -91,6 +91,115 @@ def save_zabbix_cache(path, host_id_by_name, items_by_host_iface):
         json.dump(data, f, ensure_ascii=False, indent=0)
 
 
+def required_zabbix_item_pairs(
+    devices,
+    device_iface_to_provider=None,
+    inventory_scoped=True,
+):
+    """(hostname, normalized_iface) pairs for uplink interfaces in device payloads."""
+    from uplinks.netbox.inventory import is_uplink_iface
+
+    pairs = set()
+    for hostname, ifaces in (devices or {}).items():
+        for iface in ifaces or []:
+            if not is_uplink_iface(
+                iface,
+                hostname=hostname,
+                device_iface_to_provider=device_iface_to_provider,
+                inventory_scoped=inventory_scoped,
+            ):
+                continue
+            name = (iface.get("name") or "").strip()
+            if name:
+                pairs.add((hostname, normalize_interface_name(name)))
+    return pairs
+
+
+def hosts_needing_zabbix_item_refetch(
+    host_id_by_name,
+    items_by_host_iface,
+    hostnames,
+    required_pairs,
+):
+    """Hosts that must be refetched because ids or required interface pairs are missing from cache."""
+    need = set(hostnames or []) - set(host_id_by_name or {})
+    for host, iface in required_pairs or []:
+        if host not in hostnames:
+            continue
+        if host not in host_id_by_name:
+            need.add(host)
+            continue
+        if (host, iface) not in items_by_host_iface:
+            need.add(host)
+    return need
+
+
+def load_zabbix_hosts_and_items_for_scope(
+    url,
+    token,
+    hostnames,
+    required_pairs=None,
+    cache_path=None,
+    no_cache=False,
+    debug=False,
+    fetch_items=None,
+):
+    """
+    Resolve Zabbix host ids and Bits received/sent items for a scoped run.
+
+    Uses cache when allowed; refetches from Zabbix when a required host or
+    (host, interface) pair is absent from the cached snapshot.
+    """
+    fetch_items = fetch_items or fetch_zabbix_hosts_and_items
+    hostnames = set(hostnames or [])
+    required_pairs = set(required_pairs or [])
+    host_id_by_name = {}
+    items_by_host_iface = {}
+
+    if not no_cache and cache_path and os.path.isfile(cache_path):
+        cached_h, cached_i = load_zabbix_cache(cache_path)
+        if cached_h and cached_i is not None:
+            host_id_by_name = {k: cached_h[k] for k in hostnames if k in cached_h}
+            items_by_host_iface = {
+                pair: rec
+                for pair, rec in (cached_i or {}).items()
+                if pair[0] in host_id_by_name
+            }
+
+    if no_cache or not host_id_by_name:
+        refetch_hosts = set(hostnames)
+    else:
+        refetch_hosts = hosts_needing_zabbix_item_refetch(
+            host_id_by_name, items_by_host_iface, hostnames, required_pairs
+        )
+        refetch_hosts |= set(host_id_by_name.keys()) - {
+            h for (h, _iface) in items_by_host_iface.keys()
+        }
+        refetch_hosts &= set(hostnames)
+
+    if refetch_hosts:
+        fetched_h, fetched_i, err = fetch_items(
+            url, token, refetch_hosts, debug=debug
+        )
+        if err:
+            return None, None, err
+        host_id_by_name.update(fetched_h)
+        items_by_host_iface.update(fetched_i)
+
+    if cache_path and not no_cache and refetch_hosts:
+        save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
+
+    missing_hosts = hostnames - set(host_id_by_name.keys())
+    if missing_hosts:
+        print(
+            "Warning: hosts not found in Zabbix, missing: {}".format(
+                ", ".join(sorted(missing_hosts))
+            ),
+            file=sys.stderr,
+        )
+    return host_id_by_name, items_by_host_iface, None
+
+
 def set_incomplete_netbox_data(reason):
     """Arm guard: block destructive Zabbix calls until cleared."""
     global _incomplete_netbox_data_reason

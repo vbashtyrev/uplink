@@ -1,4 +1,4 @@
-"""netbox_checks apply create interface failure path."""
+"""netbox_checks apply: missing interface is skipped (no create path)."""
 
 import json
 import sys
@@ -8,7 +8,7 @@ import netbox_checks as nc
 from tests.mocks.netbox_full import NetBoxTestEnvironment
 
 
-def test_apply_create_interface_error(monkeypatch, netbox_env, tmp_path, capsys):
+def test_apply_missing_interface_skipped_without_create(monkeypatch, netbox_env, tmp_path, capsys):
     stats = tmp_path / "stats.json"
     stats.write_text(
         json.dumps(
@@ -32,7 +32,7 @@ def test_apply_create_interface_error(monkeypatch, netbox_env, tmp_path, capsys)
     dev.platform = type("P", (), {"name": "Arista EOS"})()
 
     def boom(**kwargs):
-        raise RuntimeError("create denied")
+        raise AssertionError("interface create must not run")
 
     env.dcim.interfaces.create = boom
     with patch.object(nc.pynetbox, "api", lambda url, token: env):
@@ -56,4 +56,4 @@ def test_apply_create_interface_error(monkeypatch, netbox_env, tmp_path, capsys)
                             ],
                         )
                         assert nc.main() == 0
-    assert "Error creating" in capsys.readouterr().err
+    assert "not found in NetBox, skipped" in capsys.readouterr().out

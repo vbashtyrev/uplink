@@ -715,7 +715,7 @@ def _apply_mac_to_interface(nb, dev_name, iface_display_name, nb_iface, mac_f, e
             except Exception as e2:
                 print("Error setting primary_mac_address {} {}: {} - {}".format(dev_name, iface_display_name, mac_id, e2), file=sys.stderr, flush=True)
     except Exception as e:
-        print("MAC Error {} {} {}: {} - {}".format(dev_name, iface_display_name, mac_netbox, e), file=sys.stderr, flush=True)
+        print("MAC Error {} {} {}: {}".format(dev_name, iface_display_name, mac_netbox, e), file=sys.stderr, flush=True)
 
 
 def load_mt_ref(path):
@@ -950,15 +950,9 @@ def main():
         dest="existing_only",
         help="With --apply: update existing interfaces only; do not create, unbind or rebind interface/MAC/IP objects",
     )
-    g_apply.add_argument(
-        "--auto",
-        action="store_true",
-        dest="auto",
-        help="Legacy: with --apply allow creating missing interfaces, MAC and IP objects (--auto overrides --existing-only)",
-    )
     args = parser.parse_args()
 
-    existing_only_mode = args.existing_only and not args.auto
+    existing_only_mode = args.existing_only
 
     if args.all_checks:
         args.intname = True
@@ -1444,7 +1438,7 @@ def main():
                     # MAC in Netbox is a separate entity (dcim.mac-addresses); only for physical interfaces
                     if args.mac and is_physical_for_mac and (nMac or (mac_f and not mac_n)) and nb_iface is not None:
                         _apply_mac_to_interface(
-                            nb, dev_name, nb_name or int_name, nb_iface, mac_f, existing_only=existing_only_mode
+                            nb, dev_name, nb_name or int_name, nb_iface, mac_f, existing_only=True
                         )
                     # IP in Netbox - ipam.ip_addresses with assigned_object_id/type; result in a list from a file
                     if args.ip_address and nIp == str(IP_NOTE_DIFF) and nb_iface is not None:
@@ -1462,90 +1456,13 @@ def main():
                                 nb_iface,
                                 addrs_f,
                                 vrf_id_f,
-                                existing_only=existing_only_mode,
+                                existing_only=True,
                             )
-                elif args.apply and args.intname and note_code == NOTE_MISSING and existing_only_mode:
+                elif args.apply and args.intname and note_code == NOTE_MISSING:
                     print(
-                        "Interface {} {}: not found in NetBox, skipped (--existing-only)".format(dev_name, int_name),
+                        "Interface {} {}: not found in NetBox, skipped".format(dev_name, int_name),
                         flush=True,
                     )
-                elif args.apply and args.intname and note_code == NOTE_MISSING:
-                    # The interface was not found in NetBox - create and immediately fill in all fields from the file
-                    create_data = {"device": device.id, "name": int_name}
-                    # LAG (aggregate ae): in NetBox type Link Aggregation Group (LAG), slug = "lag"
-                    if entry.get("isLag"):
-                        create_data["type"] = "lag"
-                    elif is_logical_unit:
-                        create_data["type"] = "virtual"
-                    else:
-                        media_from_file = (entry.get("mediaType") or "").strip()
-                        mt_raw = mt_to_set or media_from_file
-                        if mt_ref_values and mt_ref_list and media_from_file:
-                            mt_resolved = _mt_to_value(media_from_file, mt_ref_values, mt_ref_list)
-                            if mt_resolved and mt_resolved in mt_ref_values:
-                                mt_raw = mt_resolved
-                        if mt_raw:
-                            create_data["type"] = mt_raw
-                    desc_raw = (entry.get("description") or "").strip()
-                    if desc_raw:
-                        create_data["description"] = desc_raw
-                    bw_raw = entry.get("bandwidth")
-                    if bw_raw is not None:
-                        create_data["speed"] = int(bw_raw) // 1000  # bps -> Kbps
-                    dup_raw = (entry.get("duplex") or "").strip()
-                    dup_val = _normalize_duplex(dup_raw) or (dup_raw if dup_raw else None)
-                    if not dup_val and bw_raw is not None and int(bw_raw) >= 10_000_000_000:
-                        dup_val = "full"
-                    if dup_val:
-                        create_data["duplex"] = dup_val
-                    mtu_raw = entry.get("mtu")
-                    if mtu_raw is not None and mtu_raw != "":
-                        try:
-                            create_data["mtu"] = int(mtu_raw)
-                        except (TypeError, ValueError):
-                            pass
-                    if args.tx_power:
-                        txp_raw = entry.get("txPower")
-                        if txp_raw is not None:
-                            try:
-                                create_data["tx_power"] = int(round(float(txp_raw)))
-                            except (TypeError, ValueError):
-                                pass
-                    fwd_raw = (entry.get("forwardingModel") or "").strip()
-                    if fwd_raw:
-                        mode_val = _fwd_file_to_netbox_mode(fwd_raw)
-                        if mode_val is not None:
-                            create_data["mode"] = mode_val
-                    # Parent interface for logical unit (ae5.0 → ae5)
-                    if is_logical_unit and aggregate_name and aggregate_name in nb_by_iface_name:
-                        create_data["parent"] = nb_by_iface_name[aggregate_name].id
-                    try:
-                        nb_iface = nb.dcim.interfaces.create(**create_data)
-                        nb_by_iface_name[int_name] = nb_iface  # so that the second pass (LAG) and subsequent writes see the new interface
-                        print("Interface {} {} created: {}".format(dev_name, int_name, list(create_data.keys())), flush=True)
-                        if args.mac and is_physical_for_mac and mac_f:
-                            _apply_mac_to_interface(
-                                nb, dev_name, int_name, nb_iface, mac_f, existing_only=existing_only_mode
-                            )
-                        if args.ip_address and addrs_f:
-                            if vrf_lookup_err:
-                                print(
-                                    "IP {} {}: {}".format(dev_name, int_name, vrf_lookup_err),
-                                    file=sys.stderr,
-                                    flush=True,
-                                )
-                            else:
-                                _apply_ip_addresses_to_interface(
-                                    nb,
-                                    dev_name,
-                                    int_name,
-                                    nb_iface,
-                                    addrs_f,
-                                    vrf_id_f,
-                                    existing_only=existing_only_mode,
-                                )
-                    except Exception as e:
-                        print("Error creating {} {}: {} - {}".format(dev_name, int_name, create_data, e), file=sys.stderr, flush=True)
                 mt_to_set_display = mt_to_set if nM else ""
                 rows.append((dev_name, int_name, nb_name, note, desc_f, desc_n, nD, mt_f, mt_n, nM, mt_to_set_display, bw_f, speed_n, nB, dup_f_out, dup_n_out, nDup, mac_f, mac_n, nMac, mtu_f, mtu_n, nMtu, txp_f_out, txp_n_out, nTxp, desc_to_set, speed_to_set, dup_to_set, mtu_to_set_display, txp_to_set, fwd_f, fwd_n, nFwd, fwd_to_set, ip_f, ip_n, ip_vrf_f_display, ip_vrf_n_display, nIp, lag_f, lag_n, nLag, parent_f, parent_n, nParent))
             # Second pass: LAG and Parent - when creating the interface, the unit might not yet exist

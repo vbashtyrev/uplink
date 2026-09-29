@@ -530,8 +530,11 @@ def _plan_burst_triggers(
         TRIGGER_DESC_90_SUFFIX,
         TRIGGER_DESC_100_SUFFIX,
         TRIGGER_DESC_SLA_BREACH_SUFFIX,
+        allowed_burst_ifaces_by_device,
         expected_burst_trigger_specs,
         get_bits_received_item_key,
+        get_burst_triggers_on_host,
+        stale_burst_triggers,
     )
 
     categories = _empty_categories()
@@ -733,7 +736,40 @@ def _plan_burst_triggers(
                         reason="delete suppressed (destructive plan disabled)",
                     )
                 )
+
+    allowed_by_dev = allowed_burst_ifaces_by_device(burst_pairs)
+    for dev_name in sorted(hostid_by_name.keys()):
+        hostid = hostid_by_name[dev_name]
+        existing, err = get_burst_triggers_on_host(url, token, hostid, debug=debug)
+        if err:
+            return None, None, "trigger.get burst stale: {}".format(err)
+        for trig in stale_burst_triggers(existing, allowed_by_dev.get(dev_name, set())):
+            desc = (trig.get("description") or "").strip()
+            iface = _iface_from_burst_plan_description(desc)
+            entry = {
+                "host": dev_name,
+                "interface": iface or "?",
+                "triggerid": trig.get("triggerid"),
+                "description": desc,
+                "role": "stale_interface",
+            }
+            if allow_delete:
+                categories["delete"].append(entry)
+            else:
+                categories["skipped"].append(
+                    dict(
+                        entry,
+                        suppressed="delete",
+                        reason="delete suppressed (destructive plan disabled)",
+                    )
+                )
     return categories, current, None
+
+
+def _iface_from_burst_plan_description(description):
+    from zabbix_sync_commit_rate import _iface_from_burst_trigger_description
+
+    return _iface_from_burst_trigger_description(description)
 
 
 def _sanitize_provider_host_name(name):

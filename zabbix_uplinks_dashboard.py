@@ -10,12 +10,14 @@ from env_urls import load_env_file_if_present
 from uplinks.data import resolve_uplink_cli_input
 from zabbix_map import (
     ZABBIX_CACHE_FILE,
-    load_zabbix_cache,
-    save_zabbix_cache,
     fetch_zabbix_hosts_and_items,
     zabbix_request,
     _normalize_interface_name,
     _get_zabbix_url_token,
+)
+from uplinks.zabbix.client import (
+    load_zabbix_hosts_and_items_for_scope,
+    required_zabbix_item_pairs,
 )
 from uplinks.netbox.inventory import (
     arm_netbox_incomplete_guard,
@@ -741,22 +743,24 @@ def main():
         os.path.dirname(os.path.abspath(cache_base)) if cache_base else ".",
         ZABBIX_CACHE_FILE,
     )
-    host_id_by_name = {}
-    items_by_host_iface = {}
-    if not args.no_cache:
-        cached_h, cached_i = load_zabbix_cache(cache_path)
-        if cached_h is not None and cached_i is not None and set(cached_h.keys()) >= hostnames:
-            host_id_by_name = {k: cached_h[k] for k in hostnames if k in cached_h}
-            items_by_host_iface = {(h, i): rec for (h, i), rec in cached_i.items() if h in host_id_by_name}
-    if not host_id_by_name or not items_by_host_iface:
-        host_id_by_name, items_by_host_iface, err = fetch_zabbix_hosts_and_items(
-            url, token, hostnames, debug=args.debug
-        )
-        if err:
-            print(err, file=sys.stderr)
-            sys.exit(1)
-        if not args.no_cache:
-            save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
+    required_pairs = required_zabbix_item_pairs(
+        devices,
+        device_iface_to_provider=device_iface_to_provider,
+        inventory_scoped=inventory_scoped,
+    )
+    host_id_by_name, items_by_host_iface, err = load_zabbix_hosts_and_items_for_scope(
+        url,
+        token,
+        hostnames,
+        required_pairs=required_pairs,
+        cache_path=None if args.no_cache else cache_path,
+        no_cache=args.no_cache,
+        debug=args.debug,
+        fetch_items=fetch_zabbix_hosts_and_items,
+    )
+    if err:
+        print(err, file=sys.stderr)
+        sys.exit(1)
 
     edges = _build_edges(
         devices,

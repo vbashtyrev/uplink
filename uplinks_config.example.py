@@ -10,7 +10,7 @@ DASHBOARD_NAME = "Uplinks"
 DASHBOARD_NAME_BY_LOCATION = "Uplinks (by location)"
 DASHBOARD_NAME_BY_PROVIDER = "Uplinks by providers"
 # Optional static providers for summary dashboard (usually empty, providers come from NetBox).
-PROVIDERS_FOR_SUMMARY = []
+PROVIDERS_FOR_SUMMARY: list[str] = []
 
 # Provider aggregate hosts
 UPLINKS_AGGREGATE_HOST_PREFIX = "Uplinks "

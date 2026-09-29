@@ -30,6 +30,7 @@ from uplinks.netbox.inventory import (
     provider_slo_percent_from_inventory,
     providers_from_complete_inventory,
 )
+from uplinks.zabbix.plan import DEFAULT_PARENT_SERVICE
 from uplinks_config import PROJECT_PROVIDER_SLO_PERCENT, SLA_EFFECTIVE_DATE_UTC
 
 load_env_file_if_present()
@@ -279,6 +280,118 @@ def _delete_legacy_sla_source_service(url, token, provider, debug=False):
     _, err = zabbix_request(url, token, "service.delete", ids, debug=debug)
     if err:
         return "service.delete (legacy SLA source): {}".format(err)
+    return None
+
+
+def _delete_orphan_uplinks_services_and_slas(
+    url,
+    token,
+    providers,
+    burst_pairs,
+    netbox_ctx,
+    parent_service=None,
+    project_slo=None,
+    debug=False,
+):
+    """Remove Uplinks services/SLAs that are no longer expected (matches read-only plan)."""
+    expected_service_names = {DEFAULT_PARENT_SERVICE}
+    if parent_service:
+        expected_service_names.add(parent_service)
+    for provider in providers or []:
+        if provider:
+            expected_service_names.add("Uplinks {}".format(provider))
+    for circuit_id, _prov in burst_pairs or []:
+        if circuit_id:
+            expected_service_names.add("Uplinks Burst {}".format(circuit_id))
+
+    slo_read = (netbox_ctx or {}).get("provider_slo_read")
+    if slo_read is None and netbox_ctx:
+        report = netbox_ctx.get("report") or {}
+        slo_read = report.get("provider_slo_read", "ok")
+    sla_enabled = slo_read == "ok"
+    expected_sla_names = set()
+    if sla_enabled:
+        for provider in providers or []:
+            if (
+                provider
+                and _resolve_provider_slo(
+                    provider, netbox_ctx, project_slo=project_slo, debug=debug
+                )
+                is not None
+            ):
+                expected_sla_names.add("Uplinks {} SLA".format(provider))
+        for circuit_id, b_provider in burst_pairs or []:
+            if (
+                circuit_id
+                and _resolve_provider_slo(
+                    b_provider, netbox_ctx, project_slo=project_slo, debug=debug
+                )
+                is not None
+            ):
+                expected_sla_names.add("Uplinks Burst {} SLA".format(circuit_id))
+
+    uplinks_services, err = zabbix_request(
+        url,
+        token,
+        "service.get",
+        {
+            "output": ["serviceid", "name"],
+            "search": {"name": "Uplinks"},
+        },
+        debug=debug,
+    )
+    if err:
+        return "service.get (orphan): {}".format(err)
+    to_delete_services = []
+    for row in uplinks_services or []:
+        name = (row.get("name") or "").strip()
+        sid = row.get("serviceid")
+        if not name or not sid or name in expected_service_names:
+            continue
+        if name.endswith(" SLA source"):
+            continue
+        to_delete_services.append(str(sid))
+    if to_delete_services:
+        _, del_err = zabbix_request(
+            url, token, "service.delete", to_delete_services, debug=debug
+        )
+        if del_err:
+            return "service.delete (orphan): {}".format(del_err)
+        print(
+            "Deleted {} orphan Uplinks service(s)".format(len(to_delete_services)),
+            file=sys.stderr,
+        )
+
+    if not sla_enabled:
+        return None
+
+    uplinks_slas, err = zabbix_request(
+        url,
+        token,
+        "sla.get",
+        {
+            "output": ["slaid", "name"],
+            "search": {"name": "Uplinks"},
+        },
+        debug=debug,
+    )
+    if err:
+        return "sla.get (orphan): {}".format(err)
+    to_delete_slas = []
+    for row in uplinks_slas or []:
+        name = (row.get("name") or "").strip()
+        slid = row.get("slaid")
+        if not name or not slid or name in expected_sla_names:
+            continue
+        to_delete_slas.append(str(slid))
+    if to_delete_slas:
+        _, del_err = zabbix_request(url, token, "sla.delete", to_delete_slas, debug=debug)
+        if del_err:
+            return "sla.delete (orphan): {}".format(del_err)
+        print(
+            "Deleted {} orphan Uplinks SLA(s)".format(len(to_delete_slas)),
+            file=sys.stderr,
+        )
     return None
 
 
@@ -621,6 +734,20 @@ def main():
                     circuit_id, slaid, slo
                 )
             )
+
+    if not read_error:
+        orphan_err = _delete_orphan_uplinks_services_and_slas(
+            url,
+            token,
+            providers,
+            burst_pairs,
+            netbox_ctx,
+            parent_service=args.parent_service,
+            project_slo=project_slo,
+            debug=args.debug,
+        )
+        if orphan_err:
+            print(orphan_err, file=sys.stderr)
 
     if read_error:
         print(
