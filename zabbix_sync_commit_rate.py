@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import sys
 
 import pynetbox
@@ -729,6 +730,105 @@ def normalize_trigger_tags(tags):
             continue
         out.append((str(name), str(tag.get("value") or "")))
     return sorted(out)
+
+
+_BURST_TRIGGER_SUFFIXES = (
+    TRIGGER_DESC_90_SUFFIX,
+    TRIGGER_DESC_100_SUFFIX,
+    TRIGGER_DESC_SLA_BREACH_SUFFIX,
+)
+
+
+def allowed_burst_ifaces_by_device(burst_pairs):
+    """Map device name -> normalized interface names with active Burst pairs."""
+    allowed = {}
+    for dev_name, iface_name in burst_pairs or []:
+        dev = (dev_name or "").strip()
+        iface = _normalize_interface_name(iface_name)
+        if not dev or not iface:
+            continue
+        allowed.setdefault(dev, set()).add(iface)
+    return allowed
+
+
+def _burst_trigger_has_billing_tag(trig):
+    tags = trig.get("tags") or []
+    if not tags:
+        return True
+    return any(tg.get("tag") == "billing" and tg.get("value") == "burst" for tg in tags)
+
+
+def _iface_from_burst_trigger_description(description):
+    desc = (description or "").strip()
+    if not any(desc.endswith(suffix) for suffix in _BURST_TRIGGER_SUFFIXES):
+        return None
+    m = re.match(r"Interface\s+([^:]+):", desc)
+    if not m:
+        return None
+    return _normalize_interface_name(m.group(1))
+
+
+def stale_burst_triggers(triggers, allowed_norm_ifaces):
+    """Burst per-link triggers whose interface is not in allowed_norm_ifaces."""
+    allowed = {(n or "").strip() for n in (allowed_norm_ifaces or [])}
+    stale = []
+    for trig in triggers or []:
+        if not _burst_trigger_has_billing_tag(trig):
+            continue
+        iface = _iface_from_burst_trigger_description(trig.get("description"))
+        if not iface or iface in allowed:
+            continue
+        stale.append(trig)
+    return stale
+
+
+def get_burst_triggers_on_host(url, token, hostid, debug=False):
+    """Fetch uplink Burst triggers for one host (Interface …: 90%/100%/SLA descriptions)."""
+    res, err = zabbix_request(
+        url,
+        token,
+        "trigger.get",
+        {
+            "hostids": [hostid],
+            "output": ["triggerid", "description"],
+            "search": {"description": "Interface "},
+            "selectTags": "extend",
+        },
+        debug=debug,
+    )
+    if err:
+        return None, err
+    rows = []
+    for trig in res or []:
+        if _iface_from_burst_trigger_description(trig.get("description")) is None:
+            continue
+        if not _burst_trigger_has_billing_tag(trig):
+            continue
+        rows.append(trig)
+    return rows, None
+
+
+def prune_burst_link_triggers_on_host(
+    url, token, hostid, allowed_norm_ifaces, debug=False
+):
+    """
+    Delete stale Burst link triggers on one host.
+    Return (deleted_count, error_message).
+    """
+    res, err = get_burst_triggers_on_host(url, token, hostid, debug=debug)
+    if err:
+        return 0, err
+    to_delete = []
+    for trig in stale_burst_triggers(res, allowed_norm_ifaces):
+        tid = trig.get("triggerid")
+        if tid:
+            to_delete.append(str(tid))
+    if not to_delete:
+        return 0, None
+    _, del_err = zabbix_request(url, token, "trigger.delete", to_delete, debug=debug)
+    if del_err:
+        return 0, "trigger.delete: {}".format(del_err)
+    return len(to_delete), None
 
 
 def expected_burst_trigger_specs(host_technical, iface_name, item_key, provider=None, circuit_id=None):
@@ -1623,38 +1723,57 @@ def main():
                 print(" {}: {}".format(dev_name, line), file=sys.stderr)
 
         created_triggers_for = 0
-        if args.create_link_triggers and iface_bps_list and not inventory_read_error:
-            for iface_name, _bps in iface_bps_list:
-                if (dev_name, iface_name) not in burst_pairs:
-                    continue
-                binfo = burst_meta.get((dev_name, iface_name))
-                link_tags = (
-                    burst_link_trigger_tags_no_sla(binfo["provider"], binfo["circuit_id"])
-                    if binfo
-                    else None
+        if args.create_link_triggers and not inventory_read_error:
+            if iface_bps_list:
+                for iface_name, _bps in iface_bps_list:
+                    if (dev_name, iface_name) not in burst_pairs:
+                        continue
+                    binfo = burst_meta.get((dev_name, iface_name))
+                    link_tags = (
+                        burst_link_trigger_tags_no_sla(binfo["provider"], binfo["circuit_id"])
+                        if binfo
+                        else None
+                    )
+                    sla_tags = (
+                        burst_sla_breach_trigger_tags(binfo["provider"], binfo["circuit_id"])
+                        if binfo
+                        else None
+                    )
+                    ok_tr, err_tr = ensure_simple_threshold_trigger(
+                        zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug, link_tags=link_tags
+                    )
+                    if not ok_tr:
+                        print(" {}: trigger 100% - {}".format(iface_name, err_tr or "error"), file=sys.stderr)
+                    ok_w, err_w = ensure_simple_warn_trigger(
+                        zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug, link_tags=link_tags
+                    )
+                    if not ok_w:
+                        print(" {}: trigger 90% - {}".format(iface_name, err_w or "error"), file=sys.stderr)
+                    ok_sla, err_sla = ensure_burst_sla_breach_trigger(
+                        zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug, link_tags=sla_tags
+                    )
+                    if not ok_sla:
+                        print(" {}: SLA breach trigger - {}".format(iface_name, err_sla or "error"), file=sys.stderr)
+                    if ok_tr and ok_w and ok_sla:
+                        created_triggers_for += 1
+            allowed_burst = allowed_burst_ifaces_by_device(burst_pairs).get(dev_name, set())
+            pruned_burst, burst_prune_err = prune_burst_link_triggers_on_host(
+                zabbix_url,
+                zabbix_token,
+                hostid,
+                allowed_burst,
+                debug=args.debug,
+            )
+            if burst_prune_err:
+                print(
+                    " {}: burst trigger cleanup - {}".format(dev_name, burst_prune_err),
+                    file=sys.stderr,
                 )
-                sla_tags = (
-                    burst_sla_breach_trigger_tags(binfo["provider"], binfo["circuit_id"])
-                    if binfo
-                    else None
+            elif pruned_burst and args.debug:
+                print(
+                    "Pruned {} stale Burst triggers on {}".format(pruned_burst, dev_name),
+                    file=sys.stderr,
                 )
-                ok_tr, err_tr = ensure_simple_threshold_trigger(
-                    zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug, link_tags=link_tags
-                )
-                if not ok_tr:
-                    print(" {}: trigger 100% - {}".format(iface_name, err_tr or "error"), file=sys.stderr)
-                ok_w, err_w = ensure_simple_warn_trigger(
-                    zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug, link_tags=link_tags
-                )
-                if not ok_w:
-                    print(" {}: trigger 90% - {}".format(iface_name, err_w or "error"), file=sys.stderr)
-                ok_sla, err_sla = ensure_burst_sla_breach_trigger(
-                    zabbix_url, zabbix_token, zabbix_host, hostid, iface_name, debug=args.debug, link_tags=sla_tags
-                )
-                if not ok_sla:
-                    print(" {}: SLA breach trigger - {}".format(iface_name, err_sla or "error"), file=sys.stderr)
-                if ok_tr and ok_w and ok_sla:
-                    created_triggers_for += 1
 
         removed = 0
         if not inventory_read_error:

@@ -14,11 +14,12 @@ from uplinks.data import (
     load_description_map,
     load_devices_json,
 )
+from uplinks.zabbix.client import (
+    load_zabbix_hosts_and_items_for_scope,
+    required_zabbix_item_pairs,
+)
 from zabbix_map import (
     ZABBIX_CACHE_FILE,
-    load_zabbix_cache,
-    save_zabbix_cache,
-    fetch_zabbix_hosts_and_items,
     _normalize_interface_name,
     _get_zabbix_url_token,
 )
@@ -280,20 +281,19 @@ def main():
             os.path.dirname(os.path.abspath(args.file)) if args.file else ".",
             ZABBIX_CACHE_FILE,
         )
-        if not args.no_cache:
-            cached_h, cached_i = load_zabbix_cache(cache_path)
-            if cached_h is not None and cached_i is not None and set(cached_h.keys()) >= hostnames:
-                host_id_by_name = {k: cached_h[k] for k in hostnames if k in cached_h}
-                items_by_host_iface = {(h, i): rec for (h, i), rec in cached_i.items() if h in host_id_by_name}
-        if not host_id_by_name or not items_by_host_iface:
-            host_id_by_name, items_by_host_iface, err = fetch_zabbix_hosts_and_items(
-                url, token, hostnames, debug=args.debug
-            )
-            if err:
-                print(err, file=sys.stderr)
-                sys.exit(1)
-            if not args.no_cache:
-                save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
+        required_pairs = required_zabbix_item_pairs(devices, inventory_scoped=False)
+        host_id_by_name, items_by_host_iface, err = load_zabbix_hosts_and_items_for_scope(
+            url,
+            token,
+            hostnames,
+            required_pairs=required_pairs,
+            cache_path=None if args.no_cache else cache_path,
+            no_cache=args.no_cache,
+            debug=args.debug,
+        )
+        if err:
+            print(err, file=sys.stderr)
+            sys.exit(1)
 
     edges = build_edges(devices, host_id_by_name, items_by_host_iface, desc_to_name)
     if not edges:

@@ -11,11 +11,15 @@ import pynetbox
 
 from env_urls import load_env_file_if_present
 from uplinks.data import load_description_map, load_devices_json, resolve_uplink_cli_input
+from uplinks.zabbix.client import (
+    fetch_zabbix_hosts_and_items,
+    hosts_needing_zabbix_item_refetch,
+    required_zabbix_item_pairs,
+)
 from zabbix_map import (
     ZABBIX_CACHE_FILE,
     load_zabbix_cache,
     save_zabbix_cache,
-    fetch_zabbix_hosts_and_items,
     zabbix_request,
     _normalize_interface_name,
     _get_zabbix_url_token,
@@ -490,20 +494,6 @@ def run(
         source = "inventory" if inventory_file else "dry-ssh.json"
         return None, "There are no hosts from {} in Zabbix".format(source)
 
-    # We load items only for hosts that actually exist in Zabbix.
-    # fetch_zabbix_hosts_and_items requires that all hostnames be found.
-    missing_items_hosts = set(host_id_by_name.keys()) - {h for (h, _iface) in items_by_host_iface.keys()}
-    if missing_items_hosts:
-        fetched_h, fetched_items, err = fetch_zabbix_hosts_and_items(
-            url, token, set(missing_items_hosts), debug=debug
-        )
-        if err:
-            return None, err
-        host_id_by_name.update(fetched_h)
-        items_by_host_iface.update(fetched_items)
-        if cache_path:
-            save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
-
     nb_ctx = _load_netbox_aggregate_context(
         devices,
         debug=debug,
@@ -526,6 +516,30 @@ def run(
         nb_read_failed = bool(inventory_inv_ctx.get("read_error"))
         if nb_read_failed:
             arm_netbox_incomplete_guard(inventory_inv_ctx.get("stats") or {})
+
+    required_pairs = required_zabbix_item_pairs(
+        devices,
+        device_iface_to_provider=device_iface_to_provider,
+        inventory_scoped=inventory_scoped,
+    )
+    # We load items only for hosts that actually exist in Zabbix.
+    missing_items_hosts = set(host_id_by_name.keys()) - {
+        h for (h, _iface) in items_by_host_iface.keys()
+    }
+    missing_items_hosts |= hosts_needing_zabbix_item_refetch(
+        host_id_by_name, items_by_host_iface, hostnames, required_pairs
+    )
+    missing_items_hosts &= set(host_id_by_name.keys())
+    if missing_items_hosts:
+        fetched_h, fetched_items, err = fetch_zabbix_hosts_and_items(
+            url, token, set(missing_items_hosts), debug=debug
+        )
+        if err:
+            return None, err
+        host_id_by_name.update(fetched_h)
+        items_by_host_iface.update(fetched_items)
+        if cache_path:
+            save_zabbix_cache(cache_path, host_id_by_name, items_by_host_iface)
 
     edges = _build_edges_with_keys(
         devices,

@@ -259,7 +259,7 @@ def main():
     env_file_path = os.path.join(SCRIPT_DIR, args.env_file)
     loaded_env_count = 0
     if not args.no_env_file:
-        loaded_env_count = load_env_file(env_file_path, overwrite=True)
+        loaded_env_count = load_env_file(env_file_path, overwrite=False)
     python = sys.executable
     timeout = args.timeout
     dry_ssh_path = args.dry_ssh

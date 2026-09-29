@@ -1,4 +1,4 @@
-"""netbox_checks --apply --intname creates missing Arista physical interface."""
+"""netbox_checks --apply --intname skips missing Arista physical interface."""
 
 import json
 import sys
@@ -8,7 +8,7 @@ import netbox_checks as nc
 from tests.mocks.netbox_full import NetBoxTestEnvironment
 
 
-def test_apply_creates_ethernet_interface(monkeypatch, netbox_env, tmp_path, capsys):
+def test_apply_skips_missing_ethernet_interface(monkeypatch, netbox_env, tmp_path, capsys):
     stats = tmp_path / "stats.json"
     stats.write_text(
         json.dumps(
@@ -33,6 +33,9 @@ def test_apply_creates_ethernet_interface(monkeypatch, netbox_env, tmp_path, cap
     dev = env.add_device("ALA-KZT-7280TR-1")
     dev.tag = "border"
     dev.platform = type("P", (), {"name": "Arista EOS"})()
+    env.dcim.interfaces.create = lambda **kwargs: (_ for _ in ()).throw(
+        AssertionError("interface create must not run")
+    )
 
     with patch.object(nc.pynetbox, "api", lambda url, token: env):
         with patch("netbox_checks.is_juniper_platform", return_value=False):
@@ -58,5 +61,5 @@ def test_apply_creates_ethernet_interface(monkeypatch, netbox_env, tmp_path, cap
                             ],
                         )
                         assert nc.main() == 0
-    assert env.dcim.interfaces.filter(device_id=dev.id, name="Ethernet52/1")
-    assert "created" in capsys.readouterr().out.lower()
+    assert not env.dcim.interfaces.filter(device_id=dev.id, name="Ethernet52/1")
+    assert "not found in NetBox, skipped" in capsys.readouterr().out

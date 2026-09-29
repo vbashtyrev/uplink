@@ -158,3 +158,41 @@ def test_plan_fails_on_auth_denied_inventory(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         full.main()
     assert exc.value.code == 1
+
+
+def test_plan_loads_env_file_without_overwrite(monkeypatch, tmp_path):
+    _setup_tmp(monkeypatch, tmp_path)
+    env_path = tmp_path / "urls.env"
+    env_path.write_text("NETBOX_URL=https://from-file.example\n", encoding="utf-8")
+    overwrite_flags = []
+
+    def track_load(path, overwrite=False):
+        overwrite_flags.append(overwrite)
+        return 1
+
+    monkeypatch.setattr(full, "load_env_file", track_load)
+
+    def fake_run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
+        if capture_stdout_to_file:
+            Path(capture_stdout_to_file).write_text(
+                json.dumps(
+                    {
+                        "complete": [{"device": "ALA-KZT-7280TR-1", "interface": "Eth1", "provider": "P"}],
+                        "incomplete": [],
+                        "stats": {"complete": 1, "incomplete": 0, "providers": 1},
+                    }
+                ),
+                encoding="utf-8",
+            )
+        return True, "plan ok", ""
+
+    monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(
+        full.argparse.ArgumentParser,
+        "parse_args",
+        lambda self: _plan_ns(no_env_file=False, env_file="urls.env"),
+    )
+    with pytest.raises(SystemExit) as exc:
+        full.main()
+    assert exc.value.code == 0
+    assert overwrite_flags == [False]
