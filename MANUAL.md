@@ -16,10 +16,9 @@ export ZABBIX_TOKEN="..."
 в `uplinks_config.py`. В репозитории есть безопасные значения по умолчанию.
 Секреты в этот файл не записываются.
 
-## Что должно быть в NetBox
+## Данные NetBox
 
-Провайдер, канал, терминация и кабель создаются вручную. В мониторинг попадает
-только цепочка:
+В мониторинг попадает только полная цепочка:
 
 ```text
 Provider → Circuit → Termination A → Cable → Interface → Device
@@ -28,7 +27,7 @@ Provider → Circuit → Termination A → Cable → Interface → Device
 У канала должны быть:
 
 - тип `Uplink`;
-- встроенный статус `Active`;
+- поле `status` со значением `Active`;
 - поле `billing_model`;
 - `commit_rate` в Кбит/с, кроме `FlatAggCap`;
 - полная кабельная цепочка до интерфейса устройства.
@@ -50,6 +49,10 @@ python netbox_uplinks_inventory.py --json --dry-run > netbox_inventory.json
 python run_uplinks_full.py
 ```
 
+По умолчанию запуск не изменяет NetBox. Ключ `--netbox-checks` запускает
+`netbox_checks.py --apply` для сверки `dry-ssh.json` и обновления разрешённых
+полей.
+
 Полный запуск использует один снимок NetBox и последовательно выполняет:
 
 1. макросы и Burst-триггеры;
@@ -58,15 +61,19 @@ python run_uplinks_full.py
 4. дашборды;
 5. сервисы и SLA (целевой уровень доступности).
 
-Предварительный отчёт:
+Проверка перед записью:
 
 ```bash
-python run_uplinks_full.py --plan --report uplinks_plan_report.txt
+python run_uplinks_full.py --plan --report uplinks_run_report.txt
 ```
 
-Режим `--plan` ничего не записывает. Burst-триггеры в нём сравниваются по
+`--plan` ничего не записывает. Файл из `--report` содержит журнал запуска;
+сам план сохраняется в `run_logs/`. Burst-триггеры в нём сравниваются по
 описанию, выражению, приоритету, тегам и зависимости. Неоднозначные совпадения
 помечаются как `skipped`, без создания дубликата.
+
+Описание файлов плана и журналов находится в
+[`reports/README.md`](reports/README.md).
 
 ## Пошаговый запуск
 
@@ -82,7 +89,8 @@ python zabbix_map.py \
 python zabbix_uplinks_dashboard.py \
   --inventory-file netbox_inventory.json
 python zabbix_provider_services.py \
-  --inventory-file netbox_inventory.json
+  --inventory-file netbox_inventory.json \
+  --parent-service "Uplinks providers"
 ```
 
 Если снимок NetBox неполный, операции удаления и полные перезаписи
@@ -90,7 +98,7 @@ python zabbix_provider_services.py \
 
 ## Сбор по SSH и сверка интерфейсов
 
-Эти команды являются отдельным ручным инструментом:
+Эти команды выполняют отдельную ручную проверку интерфейсов:
 
 ```bash
 python uplinks_stats.py --fetch --json > dry-ssh.json
@@ -101,10 +109,9 @@ python netbox_checks.py -f dry-ssh.json --mediatype --mt-ref --apply
 `dry-ssh.json` можно передать синхронизации через `-d/--dry-ssh` для
 сопоставления физического и логического имени интерфейса. Скорость,
 провайдер, область мониторинга и интерфейсы для утилизации берутся из NetBox.
-При обновлении NetBox используются только существующие объекты; старый режим
-автоматического создания интерфейсов, MAC-адресов и IP-адресов удалён.
+При обновлении NetBox используются только существующие объекты.
 
-## Карта, сервисы и отчёт SLA
+## Карта и сервисы
 
 ```bash
 python zabbix_map.py \
@@ -119,6 +126,9 @@ python zabbix_provider_sla.py \
   --days 30
 ```
 
+Описание отчёта доступности и остальных результатов находится в
+[`reports/README.md`](reports/README.md).
+
 ## Удаление объектов Zabbix
 
 ```bash
@@ -126,5 +136,6 @@ python zabbix_uplinks_cleanup.py --dry-run
 python zabbix_uplinks_cleanup.py
 ```
 
-Сначала используйте `--dry-run`, то есть просмотр без изменений. Скрипты
-не создают, не изменяют и не удаляют объекты NetBox.
+Сначала выполняйте `--dry-run` и проверяйте список удалений. Без
+`--netbox-checks` полный запуск не изменяет NetBox. С этим ключом он обновляет
+разрешённые поля интерфейсов.

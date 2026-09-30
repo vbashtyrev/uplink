@@ -18,3 +18,7 @@ htmlcov/
 .env.*
 urls.env
 .DS_Store
+
+# Внутренние документы разработки не публикуются в репозитории.
+ROADMAP.md
+MIGRATION_PLAN.md

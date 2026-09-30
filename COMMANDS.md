@@ -10,8 +10,10 @@ export ZABBIX_URL="https://zabbix.example.com"
 export ZABBIX_TOKEN="..."
 ```
 
-Поставщик, канал, терминация и кабель заранее создаются вручную в NetBox.
-Рабочий запуск только читает их и настраивает Zabbix.
+Рабочий запуск читает готовые цепочки подключений в NetBox и настраивает
+Zabbix. По умолчанию NetBox не изменяется; ключ `--netbox-checks` запускает
+`netbox_checks.py --apply` для сверки `dry-ssh.json` и обновления разрешённых
+полей.
 
 ## Полный запуск
 
@@ -19,6 +21,7 @@ export ZABBIX_TOKEN="..."
 python run_uplinks_full.py
 python run_uplinks_full.py --report uplinks_run_report.txt --no-stop-on-error
 python run_uplinks_full.py --no-burst-triggers
+python run_uplinks_full.py --netbox-checks
 ```
 
 Область мониторинга строится по цепочке NetBox:
@@ -32,12 +35,13 @@ Provider → Circuit → Termination A → Cable → Interface → Device
 
 ## Предварительный план
 
-План (то есть отчёт без записи) читает NetBox и Zabbix, но ничего не меняет:
+План читает NetBox и Zabbix и ничего не меняет:
 
 ```bash
-python run_uplinks_full.py --plan --report uplinks_plan_report.txt
+python run_uplinks_full.py --plan --report uplinks_run_report.txt
 python zabbix_uplinks_plan.py \
   --inventory-file netbox_inventory.json \
+  --create-link-triggers \
   --text uplinks_plan_report.txt \
   --output uplinks_plan_report.json
 ```
@@ -77,22 +81,21 @@ python zabbix_provider_services.py \
 перезаписи подавляются. Скрипты не обращаются к NetBox повторно, если снимок
 уже передан.
 
-## Сбор данных устройств и проверка NetBox
+## Ручная проверка интерфейсов
 
-Эти команды относятся к отдельному ручному сбору по SSH и не входят в
-NetBox-first запуск:
+Эти команды не входят в полный запуск:
 
 ```bash
 python uplinks_stats.py --fetch --json > dry-ssh.json
-python uplinks_stats.py --fetch --json --host "router-001" > dry-ssh.json
+python uplinks_stats.py --fetch --json --host "router-001" --merge-into
 python netbox_checks.py -f dry-ssh.json --all --mt-ref --show-change
 python netbox_checks.py -f dry-ssh.json --mediatype --mt-ref --apply
 python netbox_interface_types.py -o netbox_interface_types.json
 ```
 
-`--apply` записывает проверенные изменения в NetBox. Для безопасного полного
-запуска сверки используется `--existing-only`: отсутствующие интерфейсы,
-MAC-адреса и IP-адреса не создаются.
+`--apply` записывает проверенные изменения в NetBox. Отсутствующие интерфейсы,
+MAC-адреса и IP-адреса не создаются. Ключ `--existing-only` дополнительно
+запрещает менять связи LAG и parent.
 
 ## Макросы и триггеры
 
@@ -130,8 +133,8 @@ python zabbix_map.py --create-map
 python zabbix_map.py --export-map 10 > map_10.json
 ```
 
-`--export-map` только читает карту через API. `--create-map` только создаёт
-пустую карту, если карты с нужным именем ещё нет.
+`--export-map` читает карту. `--create-map` создаёт пустую карту, если её ещё
+нет.
 
 ## Агрегаты, сервисы и SLA
 
@@ -148,21 +151,21 @@ python zabbix_provider_sla.py \
   --days 30
 ```
 
-SLA (целевой уровень доступности) берётся из NetBox или из
+Отчёт доступности берёт целевой уровень из NetBox или из
 `PROJECT_PROVIDER_SLO_PERCENT`. Для сопоставления физического и логического
 имени отчёт SLA может дополнительно принять `--dry-ssh dry-ssh.json`.
 
-## Grafana и очистка Zabbix
+## Отчёты и очистка Zabbix
+
+Подробное описание снимка NetBox, плана Zabbix, журналов запуска, отчёта
+доступности и других результатов находится в
+[`reports/README.md`](reports/README.md).
+
+Очистка Zabbix — отдельная ручная операция:
 
 ```bash
-python grafana_uplinks_graph.py \
-  -f dry-ssh.json -o grafana_uplinks_graph.json
-python grafana_uplinks_graph.py \
-  -f dry-ssh.json --zabbix --grafana-api
-
 python zabbix_uplinks_cleanup.py --dry-run
 python zabbix_uplinks_cleanup.py
 ```
 
-Очистка Zabbix — отдельная ручная операция. Объекты NetBox рабочими
-скриптами не удаляются.
+Рабочие скрипты не удаляют объекты NetBox.
