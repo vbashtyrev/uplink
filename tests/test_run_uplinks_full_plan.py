@@ -12,8 +12,6 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 def _plan_ns(**overrides):
     base = dict(
         plan=True,
-        dry_ssh="dry-ssh.json",
-        no_netbox_apply=False,
         no_burst_triggers=False,
         stop_on_error=True,
         no_stop_on_error=False,
@@ -21,7 +19,6 @@ def _plan_ns(**overrides):
         timeout=60,
         env_file="urls.env",
         no_env_file=True,
-        netbox_checks=False,
     )
     base.update(overrides)
     return full.argparse.Namespace(**base)
@@ -31,7 +28,6 @@ def _setup_tmp(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
     monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
-    monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
     monkeypatch.setattr(full, "DEFAULT_NETBOX_INVENTORY", "netbox_inventory.json")
 
 

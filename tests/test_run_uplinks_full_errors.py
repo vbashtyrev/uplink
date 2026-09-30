@@ -14,8 +14,6 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 def _base_args(tmp_path):
     return full.argparse.Namespace(
         plan=False,
-        dry_ssh=str(tmp_path / "dry-ssh.json"),
-        no_netbox_apply=False,
         no_burst_triggers=False,
         stop_on_error=True,
         no_stop_on_error=False,
@@ -23,7 +21,6 @@ def _base_args(tmp_path):
         timeout=60,
         env_file="urls.env",
         no_env_file=True,
-        netbox_checks=False,
     )
 
 

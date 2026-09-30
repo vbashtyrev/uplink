@@ -1,4 +1,4 @@
-"""netbox_checks: duplex, lag, intname, apply description."""
+"""netbox_checks: duplex, mtu, tx-power read-only checks."""
 
 import json
 import sys
@@ -83,28 +83,3 @@ def test_checks_duplex_mtu_tx(monkeypatch, tmp_path, capsys, netbox_env):
                         ],
                     )
                     assert nc.main() == 0
-
-
-def test_apply_description(monkeypatch, tmp_path, capsys, netbox_env):
-    nb, nb_iface = _nb_mock()
-    updates = []
-    nb_iface.update = lambda data: updates.append(data)
-    with patch("netbox_checks.pynetbox.api", return_value=nb):
-        with patch("netbox_checks.is_arista_platform", return_value=True):
-            with patch("netbox_checks.is_juniper_platform", return_value=False):
-                with patch("netbox_checks.get_device_platform_name", return_value="Arista EOS"):
-                    monkeypatch.setattr(
-                        sys,
-                        "argv",
-                        [
-                            "netbox_checks.py",
-                            "-f",
-                            str(_file_payload(tmp_path)),
-                            "--host",
-                            "ALA-KZT-7280TR-1",
-                            "--description",
-                            "--apply",
-                        ],
-                    )
-                    nc.main()
-                    assert updates or "Updated" in capsys.readouterr().out

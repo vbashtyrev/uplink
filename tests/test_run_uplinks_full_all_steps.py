@@ -14,8 +14,6 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 def _default_ns(**overrides):
     base = dict(
         plan=False,
-        dry_ssh="dry-ssh.json",
-        no_netbox_apply=False,
         no_burst_triggers=False,
         stop_on_error=False,
         no_stop_on_error=True,
@@ -23,7 +21,6 @@ def _default_ns(**overrides):
         timeout=60,
         env_file="urls.env",
         no_env_file=True,
-        netbox_checks=False,
     )
     base.update(overrides)
     return full.argparse.Namespace(**base)
@@ -42,7 +39,6 @@ def test_main_human_mode_all_steps_success(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
     monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
-    monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
     monkeypatch.setattr(full, "DEFAULT_NETBOX_INVENTORY", "netbox_inventory.json")
 
     calls = []
@@ -92,35 +88,6 @@ def test_main_human_mode_all_steps_success(monkeypatch, tmp_path):
 
     assert scripts.index("zabbix_provider_aggregate.py") < scripts.index("zabbix_map.py")
     assert scripts.count("zabbix_map.py") == 1
-
-
-def test_main_human_mode_optional_netbox_checks(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
-    monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
-    monkeypatch.setattr(full, "DEFAULT_NETBOX_INVENTORY", "netbox_inventory.json")
-
-    calls = []
-
-    def fake_run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
-        calls.append(list(argv))
-        if "netbox_uplinks_inventory.py" in argv and capture_stdout_to_file:
-            Path(capture_stdout_to_file).write_text(
-                json.dumps(_inventory_json_payload()), encoding="utf-8"
-            )
-        return True, "", ""
-
-    monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
-    monkeypatch.setattr(
-        full.argparse.ArgumentParser,
-        "parse_args",
-        lambda self: _default_ns(netbox_checks=True),
-    )
-    with pytest.raises(SystemExit) as exc:
-        full.main()
-    assert exc.value.code == 0
-    scripts = [c[1] for c in calls]
-    assert scripts[1] == "netbox_checks.py"
 
 
 def test_main_provider_services_without_commit_rates_file(monkeypatch, tmp_path):

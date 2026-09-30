@@ -65,7 +65,6 @@ def test_run_no_fetch_human_mode(monkeypatch, tmp_path, minimal_dry_ssh, minimal
 
     monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
     monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
-    monkeypatch.setattr(full, "DEFAULT_DRY_SSH", "dry-ssh.json")
     monkeypatch.setattr(full, "DEFAULT_NETBOX_INVENTORY", "netbox_inventory.json")
     monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
 
@@ -78,15 +77,12 @@ def test_run_no_fetch_human_mode(monkeypatch, tmp_path, minimal_dry_ssh, minimal
     with patch.object(full.argparse.ArgumentParser, "parse_args") as mock_parse:
         mock_parse.return_value = full.argparse.Namespace(
             plan=False,
-            dry_ssh="dry-ssh.json",
-            no_netbox_apply=False,
             no_burst_triggers=False,
             stop_on_error=True,
             report=None,
             timeout=60,
             env_file="urls.env",
             no_env_file=True,
-            netbox_checks=False,
         )
         with pytest.raises(SystemExit) as exc:
             full.main()

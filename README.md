@@ -1,9 +1,7 @@
 # Uplinks
 
 Проект берёт область подключений из NetBox и настраивает мониторинг в Zabbix.
-Обычный рабочий запуск не опрашивает сетевые устройства и не изменяет NetBox.
-Дополнительный ключ `--netbox-checks` запускает `netbox_checks.py --apply`
-для сверки `dry-ssh.json` и обновления разрешённых полей интерфейсов.
+Скрипты проекта не изменяют NetBox.
 Проверочные и рабочие отчёты описаны в
 [`reports/README.md`](reports/README.md). Виртуальное окружение создаётся в
 `.venv`.
@@ -18,7 +16,7 @@
 | `netbox_uplinks_inventory.py` | Только чтение NetBox: обход Provider → Circuit → терминация стороны A → кабель → интерфейс на устройстве с тегом `border`. В мониторинг входят только Circuit типа `Uplink` со статусом `Active`. |
 | `zabbix_uplinks_plan.py` | Только чтение: сравнивает текущее состояние Zabbix с тем, что сделал бы обычный запуск, и пишет отчёт. Для сравнения Burst-триггеров нужен ключ `--create-link-triggers`. Ничего не создаёт, не меняет и не удаляет. |
 | `uplinks_stats.py` | Отдельная ручная проверка интерфейсов по SSH и отчёт в таблице или JSON. |
-| `netbox_checks.py` | Сверка данных из JSON с NetBox (интерфейсы: имя, description, тип, speed, duplex, MAC, MTU, IP, LAG и др.) и при необходимости обновление полей в NetBox. |
+| `netbox_checks.py` | Только чтение: сверка данных из JSON с NetBox (интерфейсы, MAC, MTU, IP, LAG и другие поля). |
 | `netbox_interface_types.py` | Скачивание справочника типов интерфейсов NetBox (value/label) из репозитория в JSON для `--mt-ref`. |
 | `zabbix_map.py` | Карта Zabbix по полной области из NetBox (хосты, провайдеры, линки с items Bits in/out). |
 | `zabbix_uplinks_dashboard.py` | Создание/обновление дашборда Zabbix с виджетами-графиками по каждому uplink (Bits received/sent). |
@@ -249,7 +247,11 @@ python uplinks_stats.py --report
 
 ### `netbox_checks.py`
 
-Сверка данных из JSON-файла с NetBox и при необходимости обновление интерфейсов в NetBox. **Подключения по SSH к устройствам нет** — скрипт всегда читает данные только из файла. Если `-f` не указан, используется файл по умолчанию `dry-ssh.json` (его можно получить через `uplinks_stats.py --fetch --json > dry-ssh.json` или использовать уже сохранённый). Устройства в NetBox выбираются по тегу.
+Только чтение: сверка данных из JSON-файла с NetBox. **Подключения по SSH к
+устройствам нет** — скрипт всегда читает данные только из файла. Если `-f`
+не указан, используется файл `dry-ssh.json` (его можно получить через
+`uplinks_stats.py --fetch --json > dry-ssh.json` или использовать уже
+сохранённый). Устройства в NetBox выбираются по тегу.
 
 **Входной файл:** по умолчанию `dry-ssh.json` (структура с ключом `devices`: имя устройства → список интерфейсов с полями `name`, `description`, `mediaType`, `bandwidth`, `duplex`, `physicalAddress`, `mtu`, `txPower` и т.д.).
 
@@ -288,7 +290,10 @@ python uplinks_stats.py --report
 При `--no-mt-ref` значения `mediaType` не приводятся к единому формату,
 поэтому расхождения могут быть вызваны разным написанием.
 
-Если ни один ключ проверки не указан (и не передан `--apply`), включаются все проверки, колонки «что подставим» (`--show-change`) и скрытие колонок без расхождений (`--hide-no-diff-cols`). При полном совпадении выводится итог: `Result: all checked fields match NetBox. No discrepancies found.`
+Если ни один ключ проверки не указан, включаются все проверки, колонки «что
+подставим» (`--show-change`) и скрытие колонок без расхождений
+(`--hide-no-diff-cols`). При полном совпадении выводится итог:
+`Result: all checked fields match NetBox. No discrepancies found.`
 
 #### Вывод и колонки
 
@@ -301,34 +306,6 @@ python uplinks_stats.py --report
 | `--json` | Вывод в JSON (по умолчанию — таблица) |
 | `--version` | Вывести версию скрипта и выйти |
 
-#### Применение изменений в NetBox
-
-| Ключ | Описание |
-|------|----------|
-| `--apply` | При разнице по выбранным ключам обновлять интерфейс в NetBox. При `--apply` таблица не выводится. Справочник типов используется по умолчанию; `--no-mt-ref` отключает его. |
-| `--existing-only` | Не менять связи LAG и parent. MAC- и IP-адреса при `--apply` в любом случае обрабатываются только как существующие объекты. |
-
-**Реализованные обновления при `--apply`** (при наличии соответствующего ключа и расхождении данные из файла записываются в NetBox):
-
-| Ключ запуска | Поле в NetBox | Источник в JSON |
-|--------------|---------------|-----------------|
-| `--intname` | `name` | Имя интерфейса из файла (при отличии от NetBox) |
-| `--description` | `description` | `description` |
-| `--mediatype` | `type` | `mediaType` (через справочник → slug) |
-| `--bandwidth` | `speed` | `bandwidth` (bps → Kbps) |
-| `--duplex` | `duplex` | `duplex` (нормализация full/half) |
-| `--mtu` | `mtu` | `mtu` |
-| `--tx-power` | `tx_power` | `txPower` |
-| `--forwarding-model` | `mode` | `forwardingModel`: в NetBox записывается `routed`→null, `bridged`→`tagged` |
-| `--mac` | сущность MAC (dcim.mac-addresses) + поле интерфейса | При расхождении используется существующая запись MAC. Новая запись и перенос между интерфейсами не выполняются; для MAC на этом интерфейсе при необходимости обновляется `primary_mac_address`. |
-| `--ip-address` | IP (ipam.ip_addresses) + VRF | Проверяется привязка существующего IP. Создание, отвязка, перенос и изменение VRF не выполняются; отсутствующий адрес или интерфейс пропускается. |
-
-В NetBox MAC — отдельная сущность (dcim.mac-addresses). При `--apply`
-используется только существующая запись MAC, уже связанная с нужным
-интерфейсом; при необходимости обновляется `primary_mac_address`. Если
-интерфейс, MAC или IP отсутствует, объект не создаётся и отмечается как
-пропущенный.
-
 **Примеры:**
 
 ```bash
@@ -337,9 +314,6 @@ python netbox_checks.py -f dry-ssh.json --mediatype --mt-ref
 
 # Один хост, все проверки, колонки «что подставим»
 python netbox_checks.py -f dry-ssh.json --host router-001 --all --show-change
-
-# Сверка и применение изменений в NetBox (таблица не выводится)
-python netbox_checks.py -f dry-ssh.json --mediatype --mt-ref --apply
 
 # Только просмотр расхождений по описанию и типу, вывод в JSON
 python netbox_checks.py -f dry-ssh.json --description --mediatype --mt-ref --json
@@ -380,11 +354,7 @@ python netbox_interface_types.py -o my_types.json
    ```bash
    python netbox_checks.py -f dry-ssh.json --all --mt-ref --show-change
    ```
-3. При необходимости обновить NetBox:
-   ```bash
-   python netbox_checks.py -f dry-ssh.json --mediatype --mt-ref --apply
-   ```
-4. При обновлении справочника типов интерфейсов:
+3. При обновлении справочника типов интерфейсов:
    ```bash
    python netbox_interface_types.py
    ```
@@ -688,7 +658,7 @@ python zabbix_uplinks_cleanup.py
 
 | Файл | Описание |
 |------|----------|
-| `dry-ssh.json` | Локальный результат отдельного SSH-сбора для `uplinks_stats.py` и `netbox_checks.py`; используется при запуске с `--netbox-checks` |
+| `dry-ssh.json` | Локальный результат отдельного SSH-сбора для ручной проверки интерфейсов |
 | `netbox_interface_types.json` | Справочник типов интерфейсов NetBox (value, label); используется `--mt-ref` в `netbox_checks.py` |
 | `uplinks_config.py` | Имя карты/дашбордов, теги триггеров (`scripts`/`automatization`, `sla`/`true`), описания **90%/100%** и **SLA breach** на линке (`TRIGGER_DESC_*`, `TRIGGER_DESC_SLA_BREACH_SUFFIX`), периоды **`TRIGGER_FUNCTION_PERIOD`** и **`SLA_TRIGGER_FUNCTION_PERIOD`**, макросы, цвета линков, префиксы агрегатных хостов, тег старых объектов **`NETBOX_AUTOMATION_TAG`** и общий целевой уровень доступности **`PROJECT_PROVIDER_SLO_PERCENT`**. Копия примера: `uplinks_config.example.py`. |
 | `zabbix_uplinks_cache.json` | Кэш данных Zabbix (хосты, items); создаётся рядом с переданным inventory-файлом, не коммитить |

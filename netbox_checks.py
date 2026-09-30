@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and optionally sync NetBox interfaces against dry-ssh.json."""
+"""Read-only validation of NetBox interfaces against dry-ssh.json."""
 
 import sys
 

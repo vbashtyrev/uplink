@@ -13,7 +13,7 @@ def test_mac_and_ip_helpers():
     assert nc._is_global_routable_address("10.0.0.1/8") is False
 
 
-def test_get_interface_mac_and_related_id():
+def test_get_interface_mac():
     mac_rec = MagicMock()
     mac_rec.mac_address = "44:4C:A8:BF:2E:91"
     iface = MagicMock()
@@ -23,10 +23,6 @@ def test_get_interface_mac_and_related_id():
     assert nc._get_interface_mac(iface) == "44:4C:A8:BF:2E:91"
     assert nc._mac_both_filled(iface) is True
 
-    parent = MagicMock()
-    parent.id = 5
-    iface.parent = parent
-    assert nc._get_related_interface_id(iface, "parent") == 5
 
 
 def test_vrf_resolve():
@@ -40,13 +36,3 @@ def test_vrf_resolve():
     assert nc._resolve_vrf_name_to_id(nb, "internet", cache)[0] == 3
     id_cache = {}
     assert nc._resolve_vrf_id_to_name(nb, 3, id_cache) == "internet"
-
-
-def test_find_ip_helpers():
-    nb = MagicMock()
-    ip = MagicMock()
-    ip.vrf = None
-    nb.ipam.ip_addresses.filter.return_value = [ip]
-    candidates, err = nc._find_ips_in_netbox(nb, "203.0.113.1/24", None)
-    assert err is None
-    assert candidates == [ip]

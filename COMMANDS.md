@@ -11,9 +11,7 @@ export ZABBIX_TOKEN="..."
 ```
 
 Рабочий запуск читает готовые цепочки подключений в NetBox и настраивает
-Zabbix. По умолчанию NetBox не изменяется; ключ `--netbox-checks` запускает
-`netbox_checks.py --apply` для сверки `dry-ssh.json` и обновления разрешённых
-полей.
+Zabbix. Скрипты проекта не изменяют NetBox.
 
 ## Полный запуск
 
@@ -21,7 +19,6 @@ Zabbix. По умолчанию NetBox не изменяется; ключ `--ne
 python run_uplinks_full.py
 python run_uplinks_full.py --report uplinks_run_report.txt --no-stop-on-error
 python run_uplinks_full.py --no-burst-triggers
-python run_uplinks_full.py --netbox-checks
 ```
 
 Область мониторинга строится по цепочке NetBox:
@@ -89,13 +86,11 @@ python zabbix_provider_services.py \
 python uplinks_stats.py --fetch --json > dry-ssh.json
 python uplinks_stats.py --fetch --json --host "router-001" --merge-into
 python netbox_checks.py -f dry-ssh.json --all --mt-ref --show-change
-python netbox_checks.py -f dry-ssh.json --mediatype --mt-ref --apply
 python netbox_interface_types.py -o netbox_interface_types.json
 ```
 
-`--apply` записывает проверенные изменения в NetBox. Отсутствующие интерфейсы,
-MAC-адреса и IP-адреса не создаются. Ключ `--existing-only` дополнительно
-запрещает менять связи LAG и parent.
+Эти команды только читают NetBox или локальные файлы. Изменения в NetBox
+вносятся вручную.
 
 ## Макросы и триггеры
 

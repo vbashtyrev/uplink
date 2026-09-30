@@ -49,10 +49,6 @@ python netbox_uplinks_inventory.py --json --dry-run > netbox_inventory.json
 python run_uplinks_full.py
 ```
 
-По умолчанию запуск не изменяет NetBox. Ключ `--netbox-checks` запускает
-`netbox_checks.py --apply` для сверки `dry-ssh.json` и обновления разрешённых
-полей.
-
 Полный запуск использует один снимок NetBox и последовательно выполняет:
 
 1. макросы и Burst-триггеры;
@@ -103,13 +99,12 @@ python zabbix_provider_services.py \
 ```bash
 python uplinks_stats.py --fetch --json > dry-ssh.json
 python netbox_checks.py -f dry-ssh.json --all --mt-ref --show-change
-python netbox_checks.py -f dry-ssh.json --mediatype --mt-ref --apply
 ```
 
 `dry-ssh.json` можно передать синхронизации через `-d/--dry-ssh` для
 сопоставления физического и логического имени интерфейса. Скорость,
 провайдер, область мониторинга и интерфейсы для утилизации берутся из NetBox.
-При обновлении NetBox используются только существующие объекты.
+Проверка интерфейсов только читает NetBox.
 
 ## Карта и сервисы
 
@@ -136,6 +131,5 @@ python zabbix_uplinks_cleanup.py --dry-run
 python zabbix_uplinks_cleanup.py
 ```
 
-Сначала выполняйте `--dry-run` и проверяйте список удалений. Без
-`--netbox-checks` полный запуск не изменяет NetBox. С этим ключом он обновляет
-разрешённые поля интерфейсов.
+Сначала выполняйте `--dry-run` и проверяйте список удалений. Скрипты проекта не
+изменяют NetBox.
