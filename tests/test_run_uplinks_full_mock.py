@@ -1,7 +1,5 @@
 """run_uplinks_full.py step orchestration with mocked subprocess steps."""
-
 import json
-import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,91 +7,56 @@ import pytest
 
 import run_uplinks_full as full
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-
-@pytest.fixture
-def minimal_dry_ssh(tmp_path):
-    src = FIXTURES / "dry_ssh_minimal.json"
-    dst = tmp_path / "dry-ssh.json"
-    dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-    return dst
-
-
-@pytest.fixture
-def minimal_desc_map(tmp_path):
-    path = tmp_path / "description_to_name.json"
-    path.write_text(
-        json.dumps(
-            {
-                "Uplink: Cogent 10G": "Cogent",
-                "Uplink: Hurricane": "Hurricane",
-                "Uplink: Hurricane member": "Hurricane",
-            }
-        ),
-        encoding="utf-8",
-    )
-    return path
-
-
-def test_run_no_fetch_human_mode(monkeypatch, tmp_path, minimal_dry_ssh, minimal_desc_map):
+def test_run_no_fetch_human_mode(monkeypatch, tmp_path):
     """Default human mode: inventory read-only, no generate/create."""
     monkeypatch.chdir(tmp_path)
-    commit_rates = tmp_path / "commit_rates.json"
-    commit_rates.write_text('{"_comment": "t"}', encoding="utf-8")
-
+    commit_rates = tmp_path / 'commit_rates.json'
+    commit_rates.write_text('{"_comment": "t"}', encoding='utf-8')
     calls = []
 
     def fake_run_cmd(argv, cwd, timeout=600, capture_stdout_to_file=None, env=None):
         calls.append(argv[1] if len(argv) > 1 else str(argv))
-        if "uplinks_stats.py" in str(argv):
-            return False, "", "should not run"
-        if "netbox_uplinks_inventory.py" in str(argv) and capture_stdout_to_file:
-            import json as _json
-
+        if 'netbox_uplinks_inventory.py' in str(argv) and capture_stdout_to_file:
             Path(capture_stdout_to_file).write_text(
-                _json.dumps(
+                json.dumps(
                     {
-                        "complete": [{"device": "ALA-KZT-7280TR-1", "interface": "Eth1", "provider": "P"}],
-                        "incomplete": [],
-                        "stats": {"complete": 1},
+                        'complete': [
+                            {'device': 'ALA-KZT-7280TR-1', 'interface': 'Eth1', 'provider': 'P'}
+                        ],
+                        'incomplete': [],
+                        'stats': {'complete': 1},
                     }
                 ),
-                encoding="utf-8",
+                encoding='utf-8',
             )
-        return True, "ok", ""
+        return True, 'ok', ''
 
-    monkeypatch.setattr(full, "SCRIPT_DIR", str(tmp_path))
-    monkeypatch.setattr(full, "RUN_LOGS_DIR", "run_logs")
-    monkeypatch.setattr(full, "DEFAULT_NETBOX_INVENTORY", "netbox_inventory.json")
-    monkeypatch.setattr(full, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(full, 'SCRIPT_DIR', str(tmp_path))
+    monkeypatch.setattr(full, 'RUN_LOGS_DIR', 'run_logs')
+    monkeypatch.setattr(full, 'DEFAULT_NETBOX_INVENTORY', 'netbox_inventory.json')
+    monkeypatch.setattr(full, 'run_cmd', fake_run_cmd)
 
-    shutil_desc = minimal_desc_map
-    (tmp_path / "description_to_name.json").write_text(
-        shutil_desc.read_text(encoding="utf-8"), encoding="utf-8"
-    )
-    (tmp_path / "dry-ssh.json").write_text(minimal_dry_ssh.read_text(encoding="utf-8"), encoding="utf-8")
-
-    with patch.object(full.argparse.ArgumentParser, "parse_args") as mock_parse:
+    with patch.object(full.argparse.ArgumentParser, 'parse_args') as mock_parse:
         mock_parse.return_value = full.argparse.Namespace(
             plan=False,
             no_burst_triggers=False,
             stop_on_error=True,
             report=None,
             timeout=60,
-            env_file="urls.env",
+            env_file='urls.env',
             no_env_file=True,
         )
         with pytest.raises(SystemExit) as exc:
             full.main()
         assert exc.value.code == 0
 
-    scripts = [c for c in calls if c.endswith(".py")]
-    assert "netbox_uplinks_inventory.py" in scripts
-    assert "netbox_checks.py" not in scripts
-    assert "generate_commit_rates.py" not in scripts
-    assert "netbox_create_circuits.py" not in scripts
-    assert "zabbix_sync_commit_rate.py" in scripts
-    assert "zabbix_map.py" in scripts
-    assert "zabbix_provider_aggregate.py" in scripts
-    assert "uplinks_stats.py" not in scripts
+    scripts = [c for c in calls if c.endswith('.py')]
+    assert scripts == [
+        'netbox_uplinks_inventory.py',
+        'zabbix_sync_commit_rate.py',
+        'zabbix_provider_aggregate.py',
+        'zabbix_map.py',
+        'zabbix_uplinks_dashboard.py',
+        'zabbix_provider_services.py',
+    ]

@@ -97,243 +97,6 @@ def _macro_name_util_crit_for_interface(iface_name):
     return UPLINK_UTIL_MACRO_PREFIX_CRIT + ':"' + iface_name.strip() + '"}'
 
 
-def load_dry_ssh(path):
-    """Load dry-ssh.json. Return devices dict or None."""
-    if not path or not os.path.isfile(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data.get("devices") or None
-
-
-def is_physical_uplink_iface(iface_entry):
-    """
-    Physical uplink port for utilization monitoring (not LAG aeN nor logical unit aeN.0).
-    Arista entries without Juniper flags are treated as physical.
-    """
-    if not isinstance(iface_entry, dict):
-        return True
-    name = (iface_entry.get("name") or "").strip()
-    if iface_entry.get("isLag"):
-        return False
-    if iface_entry.get("isLogical"):
-        return False
-    if name.startswith("ae"):
-        return False
-    return True
-
-
-def util_interfaces_by_host_from_inventory(
-    dry_ssh_devices, inventory_report, debug=False, netbox_relations=None
-):
-    """
-    Physical util interface names per host from scoped inventory complete rows.
-    Without dry-ssh, uses complete inventory interfaces directly (cable termination points).
-    With dry-ssh, physical-only candidates are filtered by scoped inventory (legacy).
-    """
-    from uplinks.netbox.inventory import (
-        device_iface_provider_map_from_inventory,
-        iface_has_inventory_entry,
-    )
-
-    expanded_map = device_iface_provider_map_from_inventory(
-        inventory_report,
-        dry_ssh_devices=dry_ssh_devices,
-        netbox_relations=netbox_relations,
-        debug=debug,
-    )
-    result = {}
-    if not dry_ssh_devices:
-        for row in inventory_report.get("complete") or []:
-            dev_name = (row.get("device") or "").strip()
-            iface_name = (row.get("interface") or "").strip()
-            if not dev_name or not iface_name:
-                continue
-            result.setdefault(dev_name, [])
-            if iface_name not in result[dev_name]:
-                result[dev_name].append(iface_name)
-    else:
-        for dev_name, ifaces in dry_ssh_devices.items():
-            if not isinstance(ifaces, list):
-                continue
-            seen = set()
-            names = []
-            for entry in ifaces:
-                if not isinstance(entry, dict):
-                    continue
-                if not is_physical_uplink_iface(entry):
-                    continue
-                name = (entry.get("name") or "").strip()
-                if not name or name in seen:
-                    continue
-                if iface_has_inventory_entry(dev_name, entry, expanded_map):
-                    seen.add(name)
-                    names.append(name)
-            if names:
-                result[dev_name] = names
-    if debug:
-        total = sum(len(v) for v in result.values())
-        print(
-            "Util interfaces from scoped inventory: {} hosts, {} physical ifaces".format(
-                len(result), total
-            ),
-            file=sys.stderr,
-        )
-    return result
-
-
-def load_burst_pairs(
-    inventory_report=None,
-    dry_ssh_devices=None,
-    netbox_relations=None,
-    debug=False,
-):
-    """Burst (device, interface) pairs from NetBox inventory (Zabbix iface names when dry-ssh given)."""
-    if inventory_report is None:
-        return set()
-    netbox_pairs = burst_pairs_from_inventory(inventory_report)
-    if dry_ssh_devices or netbox_relations:
-        netbox_pairs = expand_burst_pairs_for_zabbix(
-            netbox_pairs,
-            dry_ssh_devices=dry_ssh_devices,
-            netbox_relations=netbox_relations,
-            debug=debug,
-        )
-    merged = set(netbox_pairs)
-    if merged and debug:
-        print(
-            "Burst pairs from NetBox inventory: {}".format(len(merged)),
-            file=sys.stderr,
-        )
-    return merged
-
-
-def load_burst_metadata(
-    inventory_report=None,
-    dry_ssh_devices=None,
-    netbox_relations=None,
-    debug=False,
-):
-    """Burst link metadata from NetBox inventory (Zabbix iface names when dry-ssh given)."""
-    if inventory_report is None:
-        return {}
-    netbox_meta = burst_metadata_from_inventory(inventory_report)
-    if dry_ssh_devices or netbox_relations:
-        netbox_meta = expand_burst_metadata_for_zabbix(
-            netbox_meta,
-            dry_ssh_devices=dry_ssh_devices,
-            netbox_relations=netbox_relations,
-            debug=debug,
-        )
-    if netbox_meta and debug:
-        print(
-            "Burst metadata from NetBox inventory: {} pairs".format(len(netbox_meta)),
-            file=sys.stderr,
-        )
-    return dict(netbox_meta)
-
-
-def burst_link_trigger_tags_no_sla(provider, circuit_id):
-    """90%/100% on the map - without sla=true (like aggregate warn/high)."""
-    return [
-        TRIGGER_TAG_SCRIPTS,
-        {"tag": "provider", "value": provider},
-        {"tag": "circuit", "value": circuit_id},
-        {"tag": "billing", "value": "burst"},
-    ]
-
-
-def burst_sla_breach_trigger_tags(provider, circuit_id):
-    """Only SLA breach trigger - matches the problem_tags of the Uplinks Burst service."""
-    return burst_link_trigger_tags_no_sla(provider, circuit_id) + [
-        {"tag": SLA_TRIGGER_TAG_NAME, "value": SLA_TRIGGER_TAG_VALUE},
-    ]
-
-
-def build_physical_to_logical(dry_ssh_devices):
-    """
-    By dry-ssh: for each (device, physical_interface) a list of logical interfaces,
-    for which physicalInterface == physical_interface.
-    LAG members (aggregateInterface on a physical port, e.g. et-0/0/3 -> ae5)
-    inherit logical units from their aggregate anchor.
-    Return: dict (dev_name, physical_iface) -> [logical_name, ...]
-    """
-    out = {}
-    member_to_aggregate = {}
-    if not dry_ssh_devices:
-        return out
-    for dev_name, ifaces in dry_ssh_devices.items():
-        if not isinstance(ifaces, list):
-            continue
-        for entry in ifaces:
-            if not isinstance(entry, dict):
-                continue
-            name = (entry.get("name") or "").strip()
-            phys = (entry.get("physicalInterface") or "").strip()
-            aggregate = (entry.get("aggregateInterface") or "").strip()
-            if name and aggregate:
-                member_to_aggregate[(dev_name, _normalize_interface_name(name))] = aggregate
-            if not name or not phys:
-                continue
-            key = (dev_name, _normalize_interface_name(phys))
-            out.setdefault(key, []).append(name)
-    for (dev_name, member), aggregate in member_to_aggregate.items():
-        logicals = out.get((dev_name, _normalize_interface_name(aggregate)))
-        if not logicals:
-            continue
-        existing = out.setdefault((dev_name, member), [])
-        for logical in logicals:
-            if logical not in existing:
-                existing.append(logical)
-    return out
-
-
-def _pick_one_logical(logicals):
-    """
-    From several logical interfaces on one physical one, select one for the Zabbix macro.
-    Priority: unit .0 (ae5.0, ae3.0) - main uplink LAG; otherwise first on the list.
-    """
-    if not logicals:
-        return None
-    if len(logicals) == 1:
-        return logicals[0]
-    for name in logicals:
-        if name.endswith(".0"):
-            return name
-    return logicals[0]
-
-
-def apply_logical_context(commit_rates, dry_ssh_devices, debug=False):
-    """
-    If dry_ssh is specified: for pairs (dev, physical_iface) from NetBox, substitute the context according to logical
-    name (as in Zabbix). One circuit → one macro per logical interface (with several
-    logical on one physics one is taken, the priority is unit .0, for example. ae5.0).
-    Return: dict (device_name, iface_name_for_zabbix) -> commit_rate_bps
-    """
-    phys_to_logical = build_physical_to_logical(dry_ssh_devices)
-    result = {}
-    substituted = []
-    for (dev_name, iface_name), bps in commit_rates.items():
-        key = (dev_name, _normalize_interface_name(iface_name))
-        logicals = phys_to_logical.get(key, [])
-        if logicals:
-            logical = _pick_one_logical(logicals)
-            if logical:
-                result[(dev_name, logical)] = bps
-                substituted.append((dev_name, iface_name, logical))
-            else:
-                result[(dev_name, iface_name)] = bps
-        else:
-            result[(dev_name, iface_name)] = bps
-    if debug and substituted:
-        for dev, phys, logical in substituted:
-            print("Context for Zabbix: {} {} -> {}".format(dev, phys, logical), file=sys.stderr)
-    return result
-
-
 _NETBOX_AUTH_MESSAGE = (
     "NetBox error: token has expired or access is denied (403). "
     "Check NETBOX_TOKEN and update the token if necessary."
@@ -404,6 +167,101 @@ def commit_rates_from_inventory_report(report, debug=False):
                 file=sys.stderr,
             )
     return result
+
+
+def util_interfaces_by_host_from_inventory(
+    inventory_report, debug=False, netbox_relations=None
+):
+    """Physical util interface names per host from scoped inventory complete rows."""
+    from uplinks.netbox.inventory import device_iface_provider_map_from_inventory
+
+    device_iface_provider_map_from_inventory(
+        inventory_report,
+        netbox_relations=netbox_relations,
+        debug=debug,
+    )
+    result = {}
+    for row in inventory_report.get("complete") or []:
+        dev_name = (row.get("device") or "").strip()
+        iface_name = (row.get("interface") or "").strip()
+        if not dev_name or not iface_name:
+            continue
+        result.setdefault(dev_name, [])
+        if iface_name not in result[dev_name]:
+            result[dev_name].append(iface_name)
+    if debug:
+        total = sum(len(v) for v in result.values())
+        print(
+            "Util interfaces from scoped inventory: {} hosts, {} physical ifaces".format(
+                len(result), total
+            ),
+            file=sys.stderr,
+        )
+    return result
+
+
+def load_burst_pairs(
+    inventory_report=None,
+    netbox_relations=None,
+    debug=False,
+):
+    """Burst (device, interface) pairs from NetBox inventory (Zabbix iface names via relations)."""
+    if inventory_report is None:
+        return set()
+    netbox_pairs = burst_pairs_from_inventory(inventory_report)
+    if netbox_relations:
+        netbox_pairs = expand_burst_pairs_for_zabbix(
+            netbox_pairs,
+            netbox_relations=netbox_relations,
+            debug=debug,
+        )
+    merged = set(netbox_pairs)
+    if merged and debug:
+        print(
+            "Burst pairs from NetBox inventory: {}".format(len(merged)),
+            file=sys.stderr,
+        )
+    return merged
+
+
+def load_burst_metadata(
+    inventory_report=None,
+    netbox_relations=None,
+    debug=False,
+):
+    """Burst link metadata from NetBox inventory (Zabbix iface names via relations)."""
+    if inventory_report is None:
+        return {}
+    netbox_meta = burst_metadata_from_inventory(inventory_report)
+    if netbox_relations:
+        netbox_meta = expand_burst_metadata_for_zabbix(
+            netbox_meta,
+            netbox_relations=netbox_relations,
+            debug=debug,
+        )
+    if netbox_meta and debug:
+        print(
+            "Burst metadata from NetBox inventory: {} pairs".format(len(netbox_meta)),
+            file=sys.stderr,
+        )
+    return dict(netbox_meta)
+
+
+def burst_link_trigger_tags_no_sla(provider, circuit_id):
+    """90%/100% on the map - without sla=true (like aggregate warn/high)."""
+    return [
+        TRIGGER_TAG_SCRIPTS,
+        {"tag": "provider", "value": provider},
+        {"tag": "circuit", "value": circuit_id},
+        {"tag": "billing", "value": "burst"},
+    ]
+
+
+def burst_sla_breach_trigger_tags(provider, circuit_id):
+    """Only SLA breach trigger - matches the problem_tags of the Uplinks Burst service."""
+    return burst_link_trigger_tags_no_sla(provider, circuit_id) + [
+        {"tag": SLA_TRIGGER_TAG_NAME, "value": SLA_TRIGGER_TAG_VALUE},
+    ]
 
 
 def border_device_tag(tag=None):
@@ -1418,17 +1276,7 @@ def main():
             "Sync Zabbix uplink macros and triggers from NetBox inventory. "
             "With --inventory-file: commit rates and utilization scope come from the inventory report; "
             "{$UPLINK.UTIL.*} macros and utilization triggers follow scoped inventory entries. "
-            "Optional --dry-ssh adds physical/logical interface mapping and extra device metadata."
-        ),
-    )
-    parser.add_argument(
-        "-d",
-        "--dry-ssh",
-        default=None,
-        metavar="FILE",
-        help=(
-            "Optional dry-ssh.json for physical/logical interface mapping and supplemental device data "
-            "(utilization scope and BPS macros still come from NetBox inventory when --inventory-file is set)"
+            "Sync Zabbix uplink macros and triggers from NetBox inventory (--inventory-file)."
         ),
     )
     parser.add_argument(
@@ -1484,9 +1332,6 @@ def main():
         )
         sys.exit(1)
 
-    dry_ssh_path = getattr(args, "dry_ssh", None)
-    dry_ssh_devices = load_dry_ssh(dry_ssh_path) if dry_ssh_path else None
-
     if args.inventory_file:
         try:
             inventory_report = load_inventory_report(args.inventory_file)
@@ -1518,7 +1363,6 @@ def main():
         arm_netbox_incomplete_guard(inventory_report.get("stats"))
     commit_rates = commit_rates_from_inventory_report(inventory_report, debug=args.debug)
     host_to_util_ifaces = util_interfaces_by_host_from_inventory(
-        dry_ssh_devices,
         inventory_report,
         debug=args.debug,
         netbox_relations=netbox_relations,
@@ -1532,13 +1376,8 @@ def main():
             commit_rates = map_commit_rates_to_zabbix_ifaces(
                 commit_rates,
                 netbox_relations=netbox_relations,
-                dry_ssh_devices=dry_ssh_devices,
                 debug=args.debug,
             )
-        elif dry_ssh_devices:
-            commit_rates = apply_logical_context(commit_rates, dry_ssh_devices, debug=args.debug)
-    elif dry_ssh_path and dry_ssh_devices and args.debug:
-        print("dry-ssh loaded; NetBox commit_rates empty", file=sys.stderr)
 
     if inventory_read_error:
         inv_error = (inventory_report.get("stats") or {}).get("error")
@@ -1591,8 +1430,8 @@ def main():
             )
             sys.exit(1)
         print(
-            "Nothing to sync: no NetBox circuits with cable and no uplinks in dry-ssh "
-            "(or use --no-util-triggers). Check NETBOX_TAG / dry-ssh.json.",
+            "Nothing to sync: no NetBox circuits with cable in inventory "
+            "(or use --no-util-triggers). Check NETBOX_TAG / --inventory-file.",
             file=sys.stderr,
         )
         sys.exit(0)
@@ -1634,7 +1473,6 @@ def main():
         burst_pairs = (
             load_burst_pairs(
                 inventory_report=inventory_report,
-                dry_ssh_devices=dry_ssh_devices,
                 netbox_relations=netbox_relations,
                 debug=args.debug,
             )
@@ -1644,7 +1482,6 @@ def main():
         burst_meta = (
             load_burst_metadata(
                 inventory_report=inventory_report,
-                dry_ssh_devices=dry_ssh_devices,
                 netbox_relations=netbox_relations,
                 debug=args.debug,
             )

@@ -78,20 +78,6 @@ python zabbix_provider_services.py \
 перезаписи подавляются. Скрипты не обращаются к NetBox повторно, если снимок
 уже передан.
 
-## Ручная проверка интерфейсов
-
-Эти команды не входят в полный запуск:
-
-```bash
-python uplinks_stats.py --fetch --json > dry-ssh.json
-python uplinks_stats.py --fetch --json --host "router-001" --merge-into
-python netbox_checks.py -f dry-ssh.json --all --mt-ref --show-change
-python netbox_interface_types.py -o netbox_interface_types.json
-```
-
-Эти команды только читают NetBox или локальные файлы. Изменения в NetBox
-вносятся вручную.
-
 ## Макросы и триггеры
 
 ```bash
@@ -111,11 +97,11 @@ python zabbix_sync_commit_rate.py \
   --delete-util-triggers
 ```
 
-Файл `dry-ssh.json` можно передать через `-d/--dry-ssh` для сопоставления
-физического и логического имени интерфейса. Макросы скорости, область
-мониторинга и интерфейсы для утилизации берутся из NetBox.
+Макросы скорости, область мониторинга и интерфейсы для утилизации берутся
+из NetBox. Физические и логические интерфейсы сопоставляются по связям
+NetBox.
 
-## Карта
+## Карта связей в Zabbix
 
 ```bash
 python zabbix_map.py \
@@ -147,8 +133,7 @@ python zabbix_provider_sla.py \
 ```
 
 Отчёт доступности берёт целевой уровень из NetBox или из
-`PROJECT_PROVIDER_SLO_PERCENT`. Для сопоставления физического и логического
-имени отчёт SLA может дополнительно принять `--dry-ssh dry-ssh.json`.
+`PROJECT_PROVIDER_SLO_PERCENT`.
 
 ## Отчёты и очистка Zabbix
 

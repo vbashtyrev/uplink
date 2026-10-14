@@ -1,1 +1,1 @@
-"""NetBox inventory and manual interface checks."""
+"""NetBox uplink inventory helpers."""

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Run the full uplinks pipeline: devices → NetBox → Zabbix with reporting."""
+"""Run the full uplinks pipeline: NetBox inventory → Zabbix with reporting."""
 
 import argparse
 import json
@@ -309,9 +309,12 @@ def main():
     _append_debug(
         debug_log_path,
         "Step 1: Data collection",
-        skip_reason="NetBox-first path (inventory drives Zabbix; no SSH fetch)",
+        skip_reason=(
+            "NetBox inventory already collected in step 0; "
+            "used as the single source for this run (no separate data-collection step)"
+        ),
     )
-    log("[SKIP] Step 1: Data collection (NetBox inventory drives Zabbix)")
+    log("[SKIP] Step 1: Data collection (inventory from step 0)")
     report_lines.append("")
 
     if _plan_mode(args):

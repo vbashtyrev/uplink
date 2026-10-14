@@ -10,7 +10,7 @@ import sys
 import pynetbox
 
 from env_urls import load_env_file_if_present
-from uplinks.data import load_description_map, load_devices_json, resolve_uplink_cli_input
+from uplinks.data import resolve_uplink_cli_input
 from uplinks.zabbix.client import (
     fetch_zabbix_hosts_and_items,
     hosts_needing_zabbix_item_refetch,
@@ -78,7 +78,7 @@ def _get_netbox_client(debug=False):
         return None
 
 
-def _load_netbox_aggregate_context(dry_ssh_devices, debug=False, inventory_report=None):
+def _load_netbox_aggregate_context(debug=False, inventory_report=None):
     """
     Read-only NetBox inventory for provider aggregates.
     Return dict with device_iface_to_provider, providers, provider_limits_gbps, stats, read_error; or None.
@@ -89,7 +89,6 @@ def _load_netbox_aggregate_context(dry_ssh_devices, debug=False, inventory_repor
     )
 
     ctx = load_uplink_provider_context(
-        dry_ssh_devices,
         debug=debug,
         inventory_report=inventory_report,
     )
@@ -141,20 +140,11 @@ def _resolve_provider_limit_bps(provider, netbox_limits_gbps):
     return None
 
 
-def _provider_name_for_iface(hostname, iface, desc_to_name, device_iface_to_provider=None):
-    """Resolve provider name: NetBox inventory first, description map as fallback."""
-    return resolve_provider_name_for_iface(
-        hostname, iface, desc_to_name, device_iface_to_provider=device_iface_to_provider
-    )
-
-
 def _build_edges_with_keys(
     devices,
     host_id_by_name,
     items_by_host_iface,
-    desc_to_name,
     device_iface_to_provider=None,
-    inventory_scoped=False,
 ):
     """One edge per (host, ISP), with key_in/key_out for formulas. Return [(hostname, isp, key_in, key_out), ...]."""
     edges_raw = []
@@ -166,12 +156,11 @@ def _build_edges_with_keys(
                 iface,
                 hostname=hostname,
                 device_iface_to_provider=device_iface_to_provider,
-                inventory_scoped=inventory_scoped,
             ):
                 continue
             iface_name = iface.get("name", "")
-            isp = _provider_name_for_iface(
-                hostname, iface, desc_to_name, device_iface_to_provider=device_iface_to_provider
+            isp = resolve_provider_name_for_iface(
+                hostname, iface, device_iface_to_provider=device_iface_to_provider
             )
             key_norm = _normalize_interface_name(iface_name)
             rec = items_by_host_iface.get((hostname, key_norm), {})
@@ -409,12 +398,9 @@ NETBOX_READ_PARTIAL_MSG = (
 def run(
     url,
     token,
-    dry_ssh_path=None,
-    desc_map_path=None,
     cache_path=None,
     debug=False,
     prune_triggers_without_limits=True,
-    inventory_scoped=True,
     inventory_file=None,
 ):
     """Create/update provider aggregate hosts with calculated items and limit triggers."""
@@ -422,33 +408,26 @@ def run(
     if not ok:
         return None, "Authorization error in Zabbix (token): {}".format(err)
 
+    if not inventory_file:
+        return None, "Provide --inventory-file (NetBox snapshot path)"
+
     inventory_report = None
     inventory_inv_ctx = None
-    if inventory_file:
-        try:
-            inventory_report = load_inventory_report(inventory_file)
-        except (OSError, json.JSONDecodeError) as e:
-            return None, "failed to read inventory file {}: {}".format(inventory_file, e)
-        inventory_inv_ctx = load_uplink_provider_context(
-            inventory_report=inventory_report, debug=debug
-        )
-        device_iface_to_provider = {}
-        if inventory_inv_ctx:
-            device_iface_to_provider = inventory_inv_ctx.get("device_iface_to_provider") or {}
-        devices = scoped_devices_from_inventory_report(
-            inventory_report, device_iface_to_provider
-        )
-        if not devices:
-            return None, "No devices in scoped inventory"
-    else:
-        data, err = load_devices_json(dry_ssh_path)
-        if err:
-            return None, err
-        devices = data["devices"]
-    if inventory_file:
-        desc_to_name = {}
-    else:
-        desc_to_name = load_description_map(desc_map_path)
+    try:
+        inventory_report = load_inventory_report(inventory_file)
+    except (OSError, json.JSONDecodeError) as e:
+        return None, "failed to read inventory file {}: {}".format(inventory_file, e)
+    inventory_inv_ctx = load_uplink_provider_context(
+        inventory_report=inventory_report, debug=debug
+    )
+    device_iface_to_provider = {}
+    if inventory_inv_ctx:
+        device_iface_to_provider = inventory_inv_ctx.get("device_iface_to_provider") or {}
+    devices = scoped_devices_from_inventory_report(
+        inventory_report, device_iface_to_provider
+    )
+    if not devices:
+        return None, "No devices in scoped inventory"
 
     hostnames = set(devices.keys())
     host_id_by_name = {}
@@ -491,11 +470,9 @@ def run(
             )
 
     if not host_id_by_name:
-        source = "inventory" if inventory_file else "dry-ssh.json"
-        return None, "There are no hosts from {} in Zabbix".format(source)
+        return None, "There are no hosts from inventory in Zabbix"
 
     nb_ctx = _load_netbox_aggregate_context(
-        devices,
         debug=debug,
         inventory_report=inventory_report,
     )
@@ -520,7 +497,6 @@ def run(
     required_pairs = required_zabbix_item_pairs(
         devices,
         device_iface_to_provider=device_iface_to_provider,
-        inventory_scoped=inventory_scoped,
     )
     # We load items only for hosts that actually exist in Zabbix.
     missing_items_hosts = set(host_id_by_name.keys()) - {
@@ -545,9 +521,7 @@ def run(
         devices,
         host_id_by_name,
         items_by_host_iface,
-        desc_to_name,
         device_iface_to_provider=device_iface_to_provider,
-        inventory_scoped=inventory_scoped,
     )
     by_provider = {}
     for hostname, isp, key_in, key_out in edges:

@@ -92,26 +92,7 @@ python zabbix_provider_sla.py \
 `Burst`. Он использует историю событий Zabbix и показывает целевой уровень
 доступности, длительность нарушений и итоговую оценку.
 
-## Проверка интерфейсов
-
-Сбор данных:
-
-```bash
-python uplinks_stats.py --fetch --json > dry-ssh.json
-```
-
-Сверка с NetBox:
-
-```bash
-python uplinks_stats.py --report
-python netbox_checks.py -f dry-ssh.json --all --mt-ref --show-change
-python netbox_checks.py -f dry-ssh.json --description --mediatype --json
-```
-
-Это отдельная ручная проверка интерфейсов. Она не входит в обычный полный
-запуск и не изменяет NetBox.
-
-## Таблица карты
+## Таблица карты связей в Zabbix
 
 Команды:
 
