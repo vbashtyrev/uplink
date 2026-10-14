@@ -2,11 +2,9 @@
 __pycache__/
 *.pyc
 
-dry-ssh.json
 netbox_inventory.json
 run_logs/
 zabbix_uplinks_cache.json
-description_to_name.json
 commit_rates.json
 *-export.json
 uplinks_*_report.txt
@@ -18,3 +16,7 @@ htmlcov/
 .env.*
 urls.env
 .DS_Store
+
+# Внутренние документы разработки не публикуются в репозитории.
+ROADMAP.md
+MIGRATION_PLAN.md

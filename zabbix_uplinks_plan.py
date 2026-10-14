@@ -16,13 +16,6 @@ def main(argv=None):
         description="Read-only Zabbix uplinks plan (no create/update/delete in Zabbix or NetBox)."
     )
     parser.add_argument(
-        "-d",
-        "--dry-ssh",
-        default=None,
-        metavar="FILE",
-        help="Legacy dry-ssh.json (optional; inventory-file is preferred)",
-    )
-    parser.add_argument(
         "--inventory-file",
         default=None,
         metavar="FILE",
@@ -50,7 +43,7 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    if not args.inventory_file and not args.dry_ssh:
+    if not args.inventory_file:
         nb_url = os.environ.get("NETBOX_URL", "").strip()
         nb_token = os.environ.get("NETBOX_TOKEN", "").strip()
         if not nb_url or not nb_token:
@@ -59,12 +52,8 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return 1
-    if args.dry_ssh and not os.path.isfile(args.dry_ssh):
-        print("dry-ssh file not found: {}".format(args.dry_ssh), file=sys.stderr)
-        return 1
 
     report, err = build_zabbix_plan(
-        args.dry_ssh,
         debug=args.debug,
         create_link_triggers=args.create_link_triggers,
         inventory_file=args.inventory_file,

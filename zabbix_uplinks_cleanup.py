@@ -2,7 +2,7 @@
 """Cleaning automation artifacts in Zabbix:
 - simple triggers 90% / 100% / SLA breach on links created by zabbix_sync_commit_rate.py;
 - old threshold items net.if.threshold["..."];
-- uplinks map ([test] uplinks);
+- uplinks map;
 - uplinks dashboards (main, “by location”, “by provider”) by default.
 
 Whenever possible, elements are marked with the Zabbix tag (trigger tags): scripts=automatization.

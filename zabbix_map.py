@@ -2068,7 +2068,7 @@ def _compute_layout_validated(edges, map_width=MAP_WIDTH, map_height=MAP_HEIGHT)
 
 
 def ensure_map_exists(url, token, debug=False, width=None, height=None):
-    """Create a [test] uplinks map if it doesn't already exist. Return (sysmapid or None, err).
+    """Create an uplinks map if it doesn't already exist. Return (sysmapid or None, err).
     width/height — when creating a map; if not specified - MAP_WIDTH/MAP_HEIGHT."""
     existing, err = zabbix_request(url, token, "map.get", {
         "filter": {"name": MAP_NAME},
@@ -2099,17 +2099,15 @@ def update_uplinks_map(
     devices,
     host_id_by_name,
     items_by_host_iface,
-    desc_to_name,
     debug=False,
     prune_obsolete=True,
     device_iface_to_provider=None,
-    inventory_scoped=True,
 ):
     """
     Update the map: hosts, providers (image), links.
 
     When prune_obsolete=True (default for full update): elements are removed from the map
-    which are not in the current data (hosts and provider clouds not from dry-ssh, other types of elements).
+    which are not in the current data (hosts and provider clouds not in scoped inventory, other types of elements).
     With --host, prune_obsolete=False is passed to the CLI - we do not touch the other hosts on the map.
     Disable cleanup for a full run: --keep-obsolete-map-elements.
     """
@@ -2126,7 +2124,6 @@ def update_uplinks_map(
                 iface,
                 hostname=hostname,
                 device_iface_to_provider=device_iface_to_provider,
-                inventory_scoped=inventory_scoped,
             ):
                 continue
             iface_name = iface.get("name", "")
@@ -2134,7 +2131,6 @@ def update_uplinks_map(
             isp = resolve_provider_name_for_iface(
                 hostname,
                 iface,
-                desc_to_name,
                 device_iface_to_provider=device_iface_to_provider,
             )
             key_norm = _normalize_interface_name(iface_name)
@@ -2520,7 +2516,7 @@ def update_uplinks_map(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Data for Zabbix map. Default: hostname, interface, description, ISP."
+        description="Build a Zabbix map of uplink connections from NetBox inventory."
     )
     parser.add_argument(
         "--inventory-file",
@@ -2546,7 +2542,7 @@ def main():
     parser.add_argument(
         "--create-map",
         action="store_true",
-        help="Only create a [test] uplinks map if it doesn't exist yet (empty)",
+        help="Only create an empty uplinks map if it doesn't exist yet",
     )
     parser.add_argument(
         "--update-map",
@@ -2613,7 +2609,6 @@ def main():
         print(input_err, file=sys.stderr)
         sys.exit(1)
 
-    desc_to_name = {}
     inventory_report = None
     inv_ctx = None
     if input_mode == "inventory":
@@ -2640,11 +2635,9 @@ def main():
 
     use_zabbix = args.zabbix or args.create_map or args.update_map or default_create_map
     device_iface_to_provider = {}
-    inventory_scoped = True
     inventory_read_error = False
     if inv_ctx is None and (use_zabbix or args.print_table):
         inv_ctx = load_uplink_provider_context(
-            devices,
             debug=args.debug,
             inventory_report=inventory_report,
         )
@@ -2669,7 +2662,6 @@ def main():
         required_pairs = required_zabbix_item_pairs(
             devices,
             device_iface_to_provider=device_iface_to_provider,
-            inventory_scoped=inventory_scoped,
         )
         host_id_by_name, items_by_host_iface, err = load_zabbix_hosts_and_items_for_scope(
             url,
@@ -2706,7 +2698,6 @@ def main():
                 isp = resolve_provider_name_for_iface(
                     hostname,
                     iface,
-                    desc_to_name,
                     device_iface_to_provider=device_iface_to_provider,
                 )
                 row = (hostname, iface_name, description, isp)
@@ -2736,11 +2727,9 @@ def main():
                 devices,
                 host_id_by_name,
                 items_by_host_iface,
-                desc_to_name,
                 debug=args.debug,
                 prune_obsolete=(not args.host) and (not args.keep_obsolete_map_elements),
                 device_iface_to_provider=device_iface_to_provider,
-                inventory_scoped=inventory_scoped,
             )
             if err_msg:
                 print(err_msg, file=sys.stderr)
@@ -2773,10 +2762,8 @@ def main():
                 devices,
                 host_id_by_name,
                 items_by_host_iface,
-                desc_to_name,
                 debug=args.debug,
                 device_iface_to_provider=device_iface_to_provider,
-                inventory_scoped=inventory_scoped,
             )
             if err_msg:
                 print(err_msg, file=sys.stderr)

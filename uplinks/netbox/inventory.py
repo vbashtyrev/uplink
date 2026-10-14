@@ -1502,7 +1502,7 @@ def expand_provider_map_for_netbox(inventory_map, netbox_relations, debug=False)
 
 
 def map_commit_rates_to_zabbix_ifaces(
-    commit_rates, netbox_relations=None, dry_ssh_devices=None, debug=False
+    commit_rates, netbox_relations=None, debug=False
 ):
     """Map inventory (device, physical iface) commit rates to Zabbix-facing interface names."""
     result = {}
@@ -1511,7 +1511,6 @@ def map_commit_rates_to_zabbix_ifaces(
         zabbix_iface = _zabbix_iface_from_inventory_iface(
             dev_name,
             iface_name,
-            dry_ssh_devices=dry_ssh_devices,
             netbox_relations=netbox_relations,
         )
         if not zabbix_iface:
@@ -1532,7 +1531,7 @@ def map_commit_rates_to_zabbix_ifaces(
 
 def scoped_devices_from_inventory_report(report, expanded_provider_map=None):
     """
-    Build dry-ssh-like devices dict from complete inventory rows.
+    Build scoped devices dict from complete inventory rows.
     When expanded_provider_map is set, include alias interfaces (e.g. ae5.0).
     """
     devices = {}
@@ -1566,7 +1565,7 @@ def scoped_devices_from_inventory_report(report, expanded_provider_map=None):
 
 
 def _pick_zabbix_iface_from_aliases(aliases):
-    """Pick Zabbix-facing interface name from inventory/dry-ssh alias set."""
+    """Pick Zabbix-facing interface name from NetBox inventory alias set."""
     if not aliases:
         return None
     with_dot = sorted(name for name in aliases if "." in name)
@@ -1579,64 +1578,38 @@ def _pick_zabbix_iface_from_aliases(aliases):
     return None
 
 
-def _dry_ssh_display_name(dev_name, normalized_iface, dry_ssh_devices):
-    """Return dry-ssh interface name (original casing) matching normalized iface."""
-    if not dry_ssh_devices or not dev_name or not normalized_iface:
-        return normalized_iface
-    for entry in dry_ssh_devices.get(dev_name) or []:
-        if not isinstance(entry, dict):
-            continue
-        name = (entry.get("name") or "").strip()
-        if name and _normalize_iface_name(name) == normalized_iface:
-            return name
-    return normalized_iface
-
-
-def _zabbix_iface_display_name(dev_name, iface_norm, netbox_relations=None, dry_ssh_devices=None):
-    """Resolve normalized iface name to display casing from NetBox or dry-ssh."""
+def _zabbix_iface_display_name(dev_name, iface_norm, netbox_relations=None):
+    """Resolve normalized iface name to display casing from NetBox relations."""
     if netbox_relations:
         display = (netbox_relations.get("display_names") or {}).get((dev_name, iface_norm))
         if display:
             return display
-    return _dry_ssh_display_name(dev_name, iface_norm, dry_ssh_devices)
+    return iface_norm
 
 
 def _zabbix_iface_from_inventory_iface(
-    dev_name, inv_iface, dry_ssh_devices=None, netbox_relations=None
+    dev_name, inv_iface, netbox_relations=None
 ):
-    """Map inventory cable interface to Zabbix macro/trigger name via NetBox or dry-ssh."""
+    """Map inventory cable interface to Zabbix macro/trigger name via NetBox relations."""
     if not dev_name or not inv_iface:
         return None
     inv_norm = _normalize_iface_name(inv_iface)
-    if netbox_relations:
-        aliases = _inventory_alias_ifaces_netbox(dev_name, inv_norm, netbox_relations)
-        zabbix_norm = _pick_zabbix_iface_from_aliases(aliases)
-        if zabbix_norm:
-            return _zabbix_iface_display_name(
-                dev_name, zabbix_norm, netbox_relations=netbox_relations, dry_ssh_devices=dry_ssh_devices
-            )
+    if not netbox_relations:
         return (inv_iface or "").strip() or None
-    if not dry_ssh_devices:
-        return (inv_iface or "").strip() or None
-    phys_to_logical = _build_physical_to_logical_normalized(dry_ssh_devices)
-    member_to_aggregate = _build_member_to_aggregate(dry_ssh_devices)
-    aliases = _inventory_alias_ifaces(
-        dev_name,
-        inv_iface,
-        phys_to_logical,
-        member_to_aggregate,
-    )
+    aliases = _inventory_alias_ifaces_netbox(dev_name, inv_norm, netbox_relations)
     zabbix_norm = _pick_zabbix_iface_from_aliases(aliases)
-    if not zabbix_norm:
-        return (inv_iface or "").strip() or None
-    return _dry_ssh_display_name(dev_name, zabbix_norm, dry_ssh_devices)
+    if zabbix_norm:
+        return _zabbix_iface_display_name(
+            dev_name, zabbix_norm, netbox_relations=netbox_relations
+        )
+    return (inv_iface or "").strip() or None
 
 
 def expand_burst_pairs_for_zabbix(
-    pairs, dry_ssh_devices=None, netbox_relations=None, debug=False
+    pairs, netbox_relations=None, debug=False
 ):
     """Map inventory (device, iface) Burst pairs to Zabbix logical interface names."""
-    if not dry_ssh_devices and not netbox_relations:
+    if not netbox_relations:
         return set(pairs)
     expanded = set()
     substituted = []
@@ -1644,7 +1617,6 @@ def expand_burst_pairs_for_zabbix(
         zabbix_iface = _zabbix_iface_from_inventory_iface(
             dev_name,
             inv_iface,
-            dry_ssh_devices=dry_ssh_devices,
             netbox_relations=netbox_relations,
         )
         if not zabbix_iface:
@@ -1664,10 +1636,10 @@ def expand_burst_pairs_for_zabbix(
 
 
 def expand_burst_metadata_for_zabbix(
-    meta, dry_ssh_devices=None, netbox_relations=None, debug=False
+    meta, netbox_relations=None, debug=False
 ):
     """Map inventory Burst metadata keys to Zabbix logical interface names."""
-    if not dry_ssh_devices and not netbox_relations:
+    if not netbox_relations:
         return dict(meta)
     expanded = {}
     substituted = []
@@ -1675,7 +1647,6 @@ def expand_burst_metadata_for_zabbix(
         zabbix_iface = _zabbix_iface_from_inventory_iface(
             dev_name,
             inv_iface,
-            dry_ssh_devices=dry_ssh_devices,
             netbox_relations=netbox_relations,
         )
         if not zabbix_iface:
@@ -1695,7 +1666,7 @@ def expand_burst_metadata_for_zabbix(
 
 
 def _normalize_iface_name(iface_name):
-    """Lowercase interface name for case-insensitive inventory/dry-ssh joins."""
+    """Lowercase interface name for case-insensitive inventory joins."""
     from uplinks.zabbix.client import normalize_interface_name
 
     return normalize_interface_name(iface_name)
@@ -1713,95 +1684,8 @@ def _provider_map_get(device_iface_to_provider, hostname, iface_name):
     return device_iface_to_provider.get(_normalize_map_key(hostname, iface_name))
 
 
-def _build_physical_to_logical_normalized(dry_ssh_devices):
-    """Like build_physical_to_logical, with case-normalized physical interface keys."""
-    out = {}
-    if not dry_ssh_devices:
-        return out
-    for dev_name, ifaces in dry_ssh_devices.items():
-        if not isinstance(ifaces, list):
-            continue
-        for entry in ifaces:
-            if not isinstance(entry, dict):
-                continue
-            name = (entry.get("name") or "").strip()
-            phys = _normalize_iface_name((entry.get("physicalInterface") or "").strip())
-            if not name or not phys:
-                continue
-            key = (dev_name, phys)
-            out.setdefault(key, []).append(name)
-    return out
-
-
-def _build_member_to_aggregate(dry_ssh_devices):
-    """Map (device, member iface) -> aggregate name (aeN) from dry-ssh aggregateInterface."""
-    out = {}
-    if not dry_ssh_devices:
-        return out
-    for dev_name, ifaces in dry_ssh_devices.items():
-        if not isinstance(ifaces, list):
-            continue
-        for entry in ifaces:
-            if not isinstance(entry, dict):
-                continue
-            name = _normalize_iface_name((entry.get("name") or "").strip())
-            aggregate = _normalize_iface_name((entry.get("aggregateInterface") or "").strip())
-            if name and aggregate:
-                out[(dev_name, name)] = aggregate
-    return out
-
-
-def _inventory_alias_ifaces(dev_name, inv_iface, phys_to_logical, member_to_aggregate):
-    """
-    Inventory cable may terminate on member, aggregate, or logical iface.
-    Return related interface names that should inherit the same provider.
-    """
-    inv_norm = _normalize_iface_name(inv_iface)
-    aliases = {inv_norm}
-    aggregate = member_to_aggregate.get((dev_name, inv_norm))
-    if aggregate:
-        aliases.add(aggregate)
-    for anchor in list(aliases):
-        anchor_norm = _normalize_iface_name(anchor)
-        for logical in phys_to_logical.get((dev_name, anchor_norm), []):
-            aliases.add(_normalize_iface_name(logical))
-    return aliases
-
-
-def expand_provider_map_for_zabbix(inventory_map, dry_ssh_devices, debug=False):
-    """Map inventory interfaces to Zabbix names (logical aeN.0, case-normalized keys)."""
-    phys_to_logical = _build_physical_to_logical_normalized(dry_ssh_devices)
-    member_to_aggregate = _build_member_to_aggregate(dry_ssh_devices)
-    result = {}
-    substituted = []
-
-    for (dev_name, inv_iface), provider in inventory_map.items():
-        if not dev_name or not inv_iface or not provider:
-            continue
-        inv_iface_norm = _normalize_iface_name(inv_iface)
-        alias_ifaces = _inventory_alias_ifaces(
-            dev_name, inv_iface_norm, phys_to_logical, member_to_aggregate
-        )
-        for alias in alias_ifaces:
-            key = _normalize_map_key(dev_name, alias)
-            if key not in result:
-                result[key] = provider
-            if debug and alias != inv_iface_norm:
-                substituted.append((dev_name, inv_iface_norm, alias, provider))
-
-    if debug and substituted:
-        for dev_name, inv_iface, logical, provider in substituted:
-            print(
-                "NetBox provider map: {} {} -> {} ({})".format(
-                    dev_name, inv_iface, logical, provider
-                ),
-                file=sys.stderr,
-            )
-    return result
-
-
 def device_iface_provider_map_from_inventory(
-    report, dry_ssh_devices=None, netbox_relations=None, debug=False
+    report, netbox_relations=None, debug=False
 ):
     """Build (device, interface) -> provider from complete inventory rows."""
     inventory_map = {}
@@ -1813,8 +1697,6 @@ def device_iface_provider_map_from_inventory(
             inventory_map[_normalize_map_key(device_name, iface_name)] = provider
     if netbox_relations is not None:
         return expand_provider_map_for_netbox(inventory_map, netbox_relations, debug=debug)
-    if dry_ssh_devices is not None:
-        return expand_provider_map_for_zabbix(inventory_map, dry_ssh_devices, debug=debug)
     return inventory_map
 
 
@@ -1822,15 +1704,7 @@ def iface_has_inventory_entry(hostname, iface, device_iface_to_provider=None):
     """True when expanded inventory contains a provider for this interface."""
     device_iface_to_provider = device_iface_to_provider or {}
     iface_name = (iface.get("name") or "").strip()
-    if _provider_map_get(device_iface_to_provider, hostname, iface_name):
-        return True
-    phys = (iface.get("physicalInterface") or "").strip()
-    if _provider_map_get(device_iface_to_provider, hostname, phys):
-        return True
-    aggregate = (iface.get("aggregateInterface") or "").strip()
-    if _provider_map_get(device_iface_to_provider, hostname, aggregate):
-        return True
-    return False
+    return bool(_provider_map_get(device_iface_to_provider, hostname, iface_name))
 
 
 def lag_member_superseded_in_scoped(
@@ -1869,42 +1743,22 @@ def lag_member_superseded_in_scoped(
     return bool(preferred_provider) and preferred_provider == isp
 
 
-def _iface_is_uplink_by_description(iface):
-    """True when an unscoped SSH record contains ``Uplink:`` in its description."""
-    desc = (iface.get("description") or "").strip()
-    return "Uplink:" in desc
-
-
-def is_uplink_iface(iface, hostname=None, device_iface_to_provider=None, inventory_scoped=False):
+def is_uplink_iface(iface, hostname=None, device_iface_to_provider=None):
     """
     Uplink filter for map/dashboard/aggregate.
 
-    When inventory_scoped is True (NetBox-first path), only interfaces present in
-    scoped inventory count as uplinks (fail-closed).
-    When inventory_scoped is False, use the Uplink: description marker.
+    Only interfaces present in scoped inventory count as uplinks (fail-closed).
     """
-    if inventory_scoped:
-        if not hostname:
-            return False
-        return iface_has_inventory_entry(hostname, iface, device_iface_to_provider or {})
-
-    return _iface_is_uplink_by_description(iface)
+    if not hostname:
+        return False
+    return iface_has_inventory_entry(hostname, iface, device_iface_to_provider or {})
 
 
-def resolve_provider_name_for_iface(hostname, iface, desc_to_name, device_iface_to_provider=None):
-    """Resolve provider name: NetBox inventory first, description map as fallback."""
+def resolve_provider_name_for_iface(hostname, iface, device_iface_to_provider=None):
+    """Resolve provider name from NetBox inventory only."""
     device_iface_to_provider = device_iface_to_provider or {}
     iface_name = (iface.get("name") or "").strip()
-    for candidate in (
-        iface_name,
-        (iface.get("physicalInterface") or "").strip(),
-        (iface.get("aggregateInterface") or "").strip(),
-    ):
-        provider = _provider_map_get(device_iface_to_provider, hostname, candidate)
-        if provider:
-            return provider
-    description = iface.get("description", "")
-    return desc_to_name.get(description, description)
+    return _provider_map_get(device_iface_to_provider, hostname, iface_name)
 
 
 def inventory_read_failed(report):
@@ -1927,7 +1781,6 @@ def arm_netbox_incomplete_guard(stats):
 
 
 def load_uplink_provider_context(
-    dry_ssh_devices=None,
     debug=False,
     border_tag=None,
     circuit_scope=True,
@@ -1988,7 +1841,6 @@ def load_uplink_provider_context(
     return {
         "device_iface_to_provider": device_iface_provider_map_from_inventory(
             report,
-            dry_ssh_devices=dry_ssh_devices,
             netbox_relations=netbox_relations,
             debug=debug,
         ),

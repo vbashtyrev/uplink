@@ -91,11 +91,7 @@ def save_zabbix_cache(path, host_id_by_name, items_by_host_iface):
         json.dump(data, f, ensure_ascii=False, indent=0)
 
 
-def required_zabbix_item_pairs(
-    devices,
-    device_iface_to_provider=None,
-    inventory_scoped=True,
-):
+def required_zabbix_item_pairs(devices, device_iface_to_provider=None):
     """(hostname, normalized_iface) pairs for uplink interfaces in device payloads."""
     from uplinks.netbox.inventory import is_uplink_iface
 
@@ -106,7 +102,6 @@ def required_zabbix_item_pairs(
                 iface,
                 hostname=hostname,
                 device_iface_to_provider=device_iface_to_provider,
-                inventory_scoped=inventory_scoped,
             ):
                 continue
             name = (iface.get("name") or "").strip()

@@ -1,1 +1,1 @@
-"""Uplinks automation toolkit (NetBox, SSH, Zabbix)."""
+"""Uplinks automation toolkit (NetBox, Zabbix)."""

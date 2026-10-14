@@ -56,13 +56,6 @@ LINK_COLOR_HIGH = "DD0000"
 # Legacy threshold item key (cleanup)
 THRESHOLD_ITEM_KEY = "net.if.threshold"
 
-# Uplink VRF name for stats collection (per-device)
-UPLINK_VRF_NAME = "internet"
-
-# Historical tag name. The current project does not create or clean up
-# NetBox objects automatically.
-NETBOX_AUTOMATION_TAG = TRIGGER_TAG_VALUE
-
 # Shared target SLA for all providers when Provider has no slo_percent in NetBox.
 PROJECT_PROVIDER_SLO_PERCENT = 99.95
 

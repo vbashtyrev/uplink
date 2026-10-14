@@ -1,8 +1,0 @@
-{
-  "interfaces": {
-    "Ethernet51/1": {
-      "mediaType": "10GBASE-SR",
-      "txPower": -2.5
-    }
-  }
-}

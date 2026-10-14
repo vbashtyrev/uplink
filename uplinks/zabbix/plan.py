@@ -1099,7 +1099,6 @@ def _prepare_uplink_plan_context(
     url,
     token,
     inventory_report,
-    dry_ssh_devices,
     hostid_by_name,
     netbox_relations,
     inventory_from_file=False,
@@ -1109,7 +1108,6 @@ def _prepare_uplink_plan_context(
     from zabbix_uplinks_dashboard import _build_edges
 
     inv_ctx = load_uplink_provider_context(
-        dry_ssh_devices=dry_ssh_devices,
         debug=debug,
         inventory_report=inventory_report,
     )
@@ -1119,7 +1117,6 @@ def _prepare_uplink_plan_context(
         inv_ctx = {
             "device_iface_to_provider": device_iface_provider_map_from_inventory(
                 inventory_report,
-                dry_ssh_devices=dry_ssh_devices,
                 netbox_relations=netbox_relations,
                 debug=debug,
             ),
@@ -1149,9 +1146,7 @@ def _prepare_uplink_plan_context(
         devices,
         resolved_hostids,
         items_by_host_iface,
-        desc_to_name={},
         device_iface_to_provider=device_iface_to_provider,
-        inventory_scoped=True,
         netbox_relations=netbox_relations,
     )
 
@@ -1958,7 +1953,6 @@ def _plan_services(
 
 
 def build_zabbix_plan(
-    dry_ssh_path,
     tag=None,
     debug=False,
     create_link_triggers=False,
@@ -1970,9 +1964,7 @@ def build_zabbix_plan(
     Return (report_dict, error_message). error_message is set on fatal errors.
     """
     from zabbix_sync_commit_rate import (
-        apply_logical_context,
         commit_rates_from_inventory_report,
-        load_dry_ssh,
         util_interfaces_by_host_from_inventory,
     )
 
@@ -1983,7 +1975,6 @@ def build_zabbix_plan(
     if not valid:
         return None, auth_err or "Invalid ZABBIX_TOKEN"
 
-    dry_ssh_devices = load_dry_ssh(dry_ssh_path) if dry_ssh_path else None
 
     if inventory_file:
         try:
@@ -2043,18 +2034,14 @@ def build_zabbix_plan(
             commit_rates = map_commit_rates_to_zabbix_ifaces(
                 commit_rates,
                 netbox_relations=netbox_relations,
-                dry_ssh_devices=dry_ssh_devices,
                 debug=debug,
             )
-        elif dry_ssh_devices:
-            commit_rates = apply_logical_context(commit_rates, dry_ssh_devices, debug=debug)
 
     host_to_iface_bps = {}
     for (dev_name, iface_name), bps in commit_rates.items():
         host_to_iface_bps.setdefault(dev_name, []).append((iface_name, bps))
 
     host_to_util_ifaces = util_interfaces_by_host_from_inventory(
-        dry_ssh_devices,
         inventory_report,
         debug=debug,
         netbox_relations=netbox_relations,
@@ -2073,7 +2060,6 @@ def build_zabbix_plan(
         zabbix_url,
         zabbix_token,
         inventory_report,
-        dry_ssh_devices,
         hostid_by_name,
         netbox_relations,
         inventory_from_file=bool(inventory_file),
@@ -2171,13 +2157,11 @@ def build_zabbix_plan(
 
         burst_pairs = load_burst_pairs(
             inventory_report=inventory_report,
-            dry_ssh_devices=dry_ssh_devices,
             netbox_relations=netbox_relations,
             debug=debug,
         )
         burst_meta = load_burst_metadata(
             inventory_report=inventory_report,
-            dry_ssh_devices=dry_ssh_devices,
             netbox_relations=netbox_relations,
             debug=debug,
         )
@@ -2198,7 +2182,6 @@ def build_zabbix_plan(
 
     report = {
         "read_only": True,
-        "dry_ssh": os.path.abspath(dry_ssh_path) if dry_ssh_path else None,
         "inventory": {
             "complete": inventory_report.get("complete") or [],
             "incomplete": inventory_report.get("incomplete") or [],

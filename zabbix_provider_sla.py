@@ -8,7 +8,6 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from env_urls import load_env_file_if_present
-from uplinks.data import load_devices_json
 from uplinks.netbox.inventory import (
     ERROR_AUTH_DENIED,
     ERROR_PARTIAL_READ,
@@ -168,17 +167,15 @@ def _commit_rate_gbps_from_inventory_row(row):
 
 def _burst_report_rows_from_inventory(
     report,
-    dry_ssh_devices=None,
     netbox_relations=None,
     debug=False,
 ):
-    """Burst SLA rows from NetBox inventory; map physical to logical via relations or dry-ssh."""
+    """Burst SLA rows from NetBox inventory; map physical to logical via NetBox relations."""
     meta = burst_metadata_from_inventory(report)
     relations = _usable_netbox_relations(netbox_relations)
-    if dry_ssh_devices or relations:
+    if relations:
         meta = expand_burst_metadata_for_zabbix(
             meta,
-            dry_ssh_devices=dry_ssh_devices,
             netbox_relations=relations,
             debug=debug,
         )
@@ -196,7 +193,6 @@ def _burst_report_rows_from_inventory(
             _zabbix_iface_from_inventory_iface(
                 device_name,
                 iface_name,
-                dry_ssh_devices=dry_ssh_devices,
                 netbox_relations=relations,
             )
             or iface_name
@@ -218,7 +214,6 @@ def _burst_report_rows_from_inventory(
 
 def _resolve_burst_report_rows(
     netbox_ctx,
-    dry_ssh_devices=None,
     netbox_relations=None,
     debug=False,
 ):
@@ -230,7 +225,6 @@ def _resolve_burst_report_rows(
     )
     rows = _burst_report_rows_from_inventory(
         netbox_ctx.get("report") or {},
-        dry_ssh_devices=dry_ssh_devices,
         netbox_relations=relations,
         debug=debug,
     )
@@ -521,12 +515,6 @@ def main():
         help="NetBox inventory JSON (with netbox_interface_relations) for physical-to-logical mapping.",
     )
     parser.add_argument(
-        "--dry-ssh",
-        default=None,
-        metavar="FILE",
-        help="Legacy dry-ssh.json: map physical inventory interface to logical Zabbix trigger name.",
-    )
-    parser.add_argument(
         "--days",
         type=int,
         default=30,
@@ -551,14 +539,6 @@ def main():
     )
     args = parser.parse_args()
 
-    dry_ssh_devices = None
-    if args.dry_ssh:
-        data, err = load_devices_json(args.dry_ssh)
-        if err:
-            print(err, file=sys.stderr)
-            sys.exit(1)
-        dry_ssh_devices = data.get("devices")
-
     inventory_report = None
     if args.inventory_file:
         try:
@@ -582,7 +562,6 @@ def main():
     providers = _resolve_providers(netbox_ctx, debug=args.debug)
     burst_rows = _resolve_burst_report_rows(
         netbox_ctx,
-        dry_ssh_devices=dry_ssh_devices,
         netbox_relations=_usable_netbox_relations(
             (netbox_ctx or {}).get("netbox_interface_relations")
         ),

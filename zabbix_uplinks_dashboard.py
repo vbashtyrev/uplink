@@ -47,9 +47,7 @@ def _build_edges(
     devices,
     host_id_by_name,
     items_by_host_iface,
-    desc_to_name,
     device_iface_to_provider=None,
-    inventory_scoped=False,
     netbox_relations=None,
 ):
     """Build per-(host, provider) edge list similar to zabbix_map."""
@@ -63,17 +61,15 @@ def _build_edges(
                 iface,
                 hostname=hostname,
                 device_iface_to_provider=device_iface_to_provider,
-                inventory_scoped=inventory_scoped,
             ):
                 continue
             iface_name = iface.get("name", "")
             isp = resolve_provider_name_for_iface(
                 hostname,
                 iface,
-                desc_to_name,
                 device_iface_to_provider=device_iface_to_provider,
             )
-            if inventory_scoped and lag_member_superseded_in_scoped(
+            if lag_member_superseded_in_scoped(
                 hostname,
                 iface_name,
                 isp,
@@ -699,7 +695,6 @@ def main():
         print(input_err, file=sys.stderr)
         sys.exit(1)
 
-    desc_to_name = {}
     inventory_report = None
     inv_ctx = None
     if input_mode == "inventory":
@@ -716,12 +711,10 @@ def main():
             sys.exit(1)
 
     device_iface_to_provider = {}
-    inventory_scoped = True
     inventory_read_error = False
     netbox_relations = None
     if inv_ctx is None:
         inv_ctx = load_uplink_provider_context(
-            devices,
             debug=args.debug,
             inventory_report=inventory_report,
         )
@@ -746,7 +739,6 @@ def main():
     required_pairs = required_zabbix_item_pairs(
         devices,
         device_iface_to_provider=device_iface_to_provider,
-        inventory_scoped=inventory_scoped,
     )
     host_id_by_name, items_by_host_iface, err = load_zabbix_hosts_and_items_for_scope(
         url,
@@ -766,9 +758,7 @@ def main():
         devices,
         host_id_by_name,
         items_by_host_iface,
-        desc_to_name,
         device_iface_to_provider=device_iface_to_provider,
-        inventory_scoped=inventory_scoped,
         netbox_relations=netbox_relations,
     )
     if inventory_read_error:

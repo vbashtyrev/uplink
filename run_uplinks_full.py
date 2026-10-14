@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Run the full uplinks pipeline: devices → NetBox → Zabbix with reporting."""
+"""Run the full uplinks pipeline: NetBox inventory → Zabbix with reporting."""
 
 import argparse
 import json
@@ -14,7 +14,6 @@ from uplinks.netbox.inventory import format_inventory_text
 from uplinks.zabbix.plan import inventory_plan_gate
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DRY_SSH = "dry-ssh.json"
 DEFAULT_NETBOX_INVENTORY = "netbox_inventory.json"
 RUN_LOGS_DIR = "run_logs"  # log folder: date_time_run.log and date_time_debug.log
 
@@ -192,17 +191,6 @@ def main():
         description="Full uplinks chain: NetBox inventory → Zabbix (sync, map, dashboards, services).",
     )
     parser.add_argument(
-        "--dry-ssh",
-        default=DEFAULT_DRY_SSH,
-        metavar="FILE",
-        help="Path to dry-ssh.json for optional --netbox-checks step (default {})".format(DEFAULT_DRY_SSH),
-    )
-    parser.add_argument(
-        "--no-netbox-apply",
-        action="store_true",
-        help="Skip optional netbox_checks.py; it is not part of the default path.",
-    )
-    parser.add_argument(
         "--no-burst-triggers",
         action="store_true",
         help="Do not pass --create-link-triggers to zabbix_sync_commit_rate.py (Burst per-link 90%%/100%%/SLA)",
@@ -248,11 +236,6 @@ def main():
         action="store_true",
         help="Read-only preview: scoped NetBox inventory and Zabbix plan report",
     )
-    parser.add_argument(
-        "--netbox-checks",
-        action="store_true",
-        help="Run netbox_checks.py (optional; not part of default human path)",
-    )
     args = parser.parse_args()
 
     os.chdir(SCRIPT_DIR)
@@ -262,7 +245,6 @@ def main():
         loaded_env_count = load_env_file(env_file_path, overwrite=False)
     python = sys.executable
     timeout = args.timeout
-    dry_ssh_path = args.dry_ssh
 
     # Log folder: run_logs/YYYY-MM-DD_HH-MM-SS_run.log
     logs_dir = os.path.join(SCRIPT_DIR, RUN_LOGS_DIR)
@@ -327,71 +309,25 @@ def main():
     _append_debug(
         debug_log_path,
         "Step 1: Data collection",
-        skip_reason="NetBox-first path (inventory drives Zabbix; no SSH fetch)",
+        skip_reason=(
+            "NetBox inventory already collected in step 0; "
+            "used as the single source for this run (no separate data-collection step)"
+        ),
     )
-    log("[SKIP] Step 1: Data collection (NetBox inventory drives Zabbix)")
+    log("[SKIP] Step 1: Data collection (inventory from step 0)")
     report_lines.append("")
 
-    run_netbox_checks = getattr(args, "netbox_checks", False)
-    if run_netbox_checks and (_plan_mode(args) or not args.no_netbox_apply):
-        netbox_checks_argv = [
-            python,
-            "netbox_checks.py",
-            "-f",
-            dry_ssh_path,
-            "--all",
-            "--no-tx-power",
-            "--mt-ref",
-            "--scope-to-file",
-        ]
-        if _plan_mode(args):
-            netbox_checks_argv.append("--existing-only")
-            netbox_checks_mode = "--existing-only (preview)"
-        else:
-            netbox_checks_argv.append("--existing-only")
-            netbox_checks_argv.append("--apply")
-            netbox_checks_mode = "--existing-only --apply"
-        if _plan_mode(args):
-            log(
-                "Step 2: NetBox - read-only preview (netbox_checks.py -f {} --all --no-tx-power --mt-ref --scope-to-file --existing-only) ...".format(
-                    dry_ssh_path
-                )
-            )
-        else:
-            log(
-                "Step 2: NetBox - reconciliation and application (netbox_checks.py -f {} --all --no-tx-power --mt-ref --scope-to-file {}) ...".format(
-                    dry_ssh_path, netbox_checks_mode
-                )
-            )
-        ok, out, err = run_cmd(
-            netbox_checks_argv,
-            cwd=SCRIPT_DIR,
-            timeout=timeout,
-        )
-        step_name = "Step 2: NetBox checks (preview)" if _plan_mode(args) else "Step 2: NetBox checks --apply"
-        _append_debug(debug_log_path, step_name, stdout=out or "", stderr=err or "", ok=ok)
-        step(step_name, ok, err or out or ("code != 0" if not ok else ""))
-        if not ok and args.stop_on_error:
-            _finish(report_lines, errors, args.report, run_log_path)
-            sys.exit(1)
-        log("")
-    else:
-        skip_reason = "--no-netbox-apply" if args.no_netbox_apply else "not requested (default human path)"
-        _append_debug(debug_log_path, "Step 2: NetBox checks", skip_reason=skip_reason)
-        log("[SKIP] Step 2: NetBox checks ({})".format(skip_reason))
-        report_lines.append("")
-
     if _plan_mode(args):
-        log("Step 3: NetBox uplink inventory summary (from step 0, no new NetBox read) ...")
+        log("Step 2: NetBox uplink inventory summary (from step 0, no new NetBox read) ...")
         inv_summary = format_inventory_text(plan_inventory_report, dry_run=True)
         _append_debug(
             debug_log_path,
-            "Step 3: NetBox uplink inventory (plan)",
+            "Step 2: NetBox uplink inventory (plan)",
             stdout=inv_summary or "",
             stderr="",
             ok=True,
         )
-        step("Step 3: NetBox uplink inventory (plan)", True, "")
+        step("Step 2: NetBox uplink inventory (plan)", True, "")
         if inv_summary:
             for line in inv_summary.splitlines():
                 log("  {}".format(line))
@@ -409,10 +345,10 @@ def main():
         ]
         if not args.no_burst_triggers:
             plan_argv.append("--create-link-triggers")
-        log("Step 4: Zabbix plan (read-only) -> {} ...".format(os.path.basename(plan_json_path)))
+        log("Step 3: Zabbix plan (read-only) -> {} ...".format(os.path.basename(plan_json_path)))
         ok, out, err = run_cmd(plan_argv, cwd=SCRIPT_DIR, timeout=timeout)
-        _append_debug(debug_log_path, "Step 4: Zabbix plan", stdout=out or "", stderr=err or "", ok=ok)
-        step("Step 4: Zabbix plan", ok, err or out or ("code != 0" if not ok else ""))
+        _append_debug(debug_log_path, "Step 3: Zabbix plan", stdout=out or "", stderr=err or "", ok=ok)
+        step("Step 3: Zabbix plan", ok, err or out or ("code != 0" if not ok else ""))
         if not ok and args.stop_on_error:
             _finish(report_lines, errors, args.report, run_log_path)
             sys.exit(1)
@@ -433,19 +369,19 @@ def main():
         _write_run_report(report_lines, run_log_path, args.report, log_func=log)
         sys.exit(0)
 
-    log("Step 3: NetBox uplink inventory summary (from step 0) ...")
+    log("Step 2: NetBox uplink inventory summary (from step 0) ...")
     try:
         inv_summary = format_inventory_text(
             _load_inventory_report(inventory_path), dry_run=True
         )
     except (OSError, json.JSONDecodeError) as e:
-        step("Step 3: NetBox uplink inventory", False, "failed to read {}: {}".format(inventory_path, e))
+        step("Step 2: NetBox uplink inventory", False, "failed to read {}: {}".format(inventory_path, e))
         if args.stop_on_error:
             _finish(report_lines, errors, args.report, run_log_path)
             sys.exit(1)
         inv_summary = ""
     else:
-        step("Step 3: NetBox uplink inventory", True, "")
+        step("Step 2: NetBox uplink inventory", True, "")
         if inv_summary:
             for line in inv_summary.splitlines():
                 log("  {}".format(line))
@@ -455,10 +391,10 @@ def main():
     if not args.no_burst_triggers:
         sync_argv.append("--create-link-triggers")
     sync_detail = " ".join(sync_argv[1:])
-    log("Step 5: Zabbix - macros and triggers ({}) ...".format(sync_detail))
+    log("Step 3: Zabbix - macros and triggers ({}) ...".format(sync_detail))
     ok, out, err = run_cmd(sync_argv, cwd=SCRIPT_DIR, timeout=timeout)
-    _append_debug(debug_log_path, "Step 5: Zabbix sync commit rate", stdout=out or "", stderr=err or "", ok=ok)
-    step("Step 5: Zabbix sync commit rate", ok, err or ("code != 0" if not ok else ""))
+    _append_debug(debug_log_path, "Step 3: Zabbix sync commit rate", stdout=out or "", stderr=err or "", ok=ok)
+    step("Step 3: Zabbix sync commit rate", ok, err or ("code != 0" if not ok else ""))
     if not ok and args.stop_on_error:
         _finish(report_lines, errors, args.report, run_log_path)
         sys.exit(1)
@@ -469,15 +405,15 @@ def main():
 
     agg_argv = [python, "zabbix_provider_aggregate.py", "--inventory-file", inventory_path]
     log(
-        "Step 6: Zabbix - aggregate by provider ({}) ...".format(" ".join(agg_argv[1:]))
+        "Step 4: Zabbix - aggregate by provider ({}) ...".format(" ".join(agg_argv[1:]))
     )
     ok, out, err = run_cmd(
         agg_argv,
         cwd=SCRIPT_DIR,
         timeout=timeout,
     )
-    _append_debug(debug_log_path, "Step 6: Zabbix provider aggregate", stdout=out or "", stderr=err or "", ok=ok)
-    step("Step 6: Zabbix provider aggregate", ok, err or ("code != 0" if not ok else ""))
+    _append_debug(debug_log_path, "Step 4: Zabbix provider aggregate", stdout=out or "", stderr=err or "", ok=ok)
+    step("Step 4: Zabbix provider aggregate", ok, err or ("code != 0" if not ok else ""))
     if not ok and args.stop_on_error:
         _finish(report_lines, errors, args.report, run_log_path)
         sys.exit(1)
@@ -494,13 +430,13 @@ def main():
         "--zabbix",
         "--update-map",
     ]
-    map_log = "Step 7: Zabbix - map (zabbix_map.py --inventory-file {} --zabbix --update-map) ...".format(
+    map_log = "Step 5: Zabbix - map (zabbix_map.py --inventory-file {} --zabbix --update-map) ...".format(
         os.path.basename(inventory_path)
     )
     log(map_log)
     ok, out, err = run_cmd(map_argv, cwd=SCRIPT_DIR, timeout=timeout)
-    _append_debug(debug_log_path, "Step 7: Zabbix map", stdout=out or "", stderr=err or "", ok=ok)
-    step("Step 7: Zabbix map", ok, err or ("code != 0" if not ok else ""))
+    _append_debug(debug_log_path, "Step 5: Zabbix map", stdout=out or "", stderr=err or "", ok=ok)
+    step("Step 5: Zabbix map", ok, err or ("code != 0" if not ok else ""))
     if not ok and args.stop_on_error:
         _finish(report_lines, errors, args.report, run_log_path)
         sys.exit(1)
@@ -510,13 +446,13 @@ def main():
     log("")
 
     dash_argv = [python, "zabbix_uplinks_dashboard.py", "--inventory-file", inventory_path]
-    dash_log = "Step 8: Zabbix - dashboards (zabbix_uplinks_dashboard.py --inventory-file {}) ...".format(
+    dash_log = "Step 6: Zabbix - dashboards (zabbix_uplinks_dashboard.py --inventory-file {}) ...".format(
         os.path.basename(inventory_path)
     )
     log(dash_log)
     ok, out, err = run_cmd(dash_argv, cwd=SCRIPT_DIR, timeout=timeout)
-    _append_debug(debug_log_path, "Step 8: Zabbix dashboard", stdout=out or "", stderr=err or "", ok=ok)
-    step("Step 8: Zabbix dashboard", ok, err or ("code != 0" if not ok else ""))
+    _append_debug(debug_log_path, "Step 6: Zabbix dashboard", stdout=out or "", stderr=err or "", ok=ok)
+    step("Step 6: Zabbix dashboard", ok, err or ("code != 0" if not ok else ""))
     if not ok and args.stop_on_error:
         _finish(report_lines, errors, args.report, run_log_path)
         sys.exit(1)
@@ -531,7 +467,7 @@ def main():
         "Uplinks providers",
     ]
     log(
-        "Step 9: Zabbix - services and SLAs by providers ({}) ...".format(
+        "Step 7: Zabbix - services and SLAs by providers ({}) ...".format(
             " ".join(services_argv[1:])
         )
     )
@@ -540,8 +476,8 @@ def main():
         cwd=SCRIPT_DIR,
         timeout=timeout,
     )
-    _append_debug(debug_log_path, "Step 9: Zabbix provider services/SLA", stdout=out or "", stderr=err or "", ok=ok)
-    step("Step 9: Zabbix provider services/SLA", ok, err or ("code != 0" if not ok else ""))
+    _append_debug(debug_log_path, "Step 7: Zabbix provider services/SLA", stdout=out or "", stderr=err or "", ok=ok)
+    step("Step 7: Zabbix provider services/SLA", ok, err or ("code != 0" if not ok else ""))
     if not ok and args.stop_on_error:
         _finish(report_lines, errors, args.report, run_log_path)
         sys.exit(1)
