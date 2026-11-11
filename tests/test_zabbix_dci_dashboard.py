@@ -47,9 +47,13 @@ def _wire_dci_nb(circuits, terminations, devices=None, interfaces=None, cables=N
     )
     nb.circuits.circuits._items = list(circuits)
     provider = _Record(id=1, name="Inetcom")
-    nb.circuits.providers = type("P", (), {
-        "get": lambda self, pk: provider if pk == provider.id else None,
-    })()
+    nb.circuits.providers = type(
+        "P",
+        (),
+        {
+            "get": lambda self, pk: provider if pk == provider.id else None,
+        },
+    )()
     return nb
 
 
@@ -93,8 +97,22 @@ def test_ignore_non_dci_circuit():
 def test_full_pair_both_sides():
     dev_a = _Record(id=1, name="router-a")
     dev_z = _Record(id=2, name="router-z")
-    iface_a = _Record(id=10, name="Eth1", device=dev_a, device_id=1, enabled=True, tags=[_Record(slug="dci")])
-    iface_z = _Record(id=11, name="Eth2", device=dev_z, device_id=2, enabled=True, tags=[_Record(slug="dci")])
+    iface_a = _Record(
+        id=10,
+        name="Eth1",
+        device=dev_a,
+        device_id=1,
+        enabled=True,
+        tags=[_Record(slug="dci")],
+    )
+    iface_z = _Record(
+        id=11,
+        name="Eth2",
+        device=dev_z,
+        device_id=2,
+        enabled=True,
+        tags=[_Record(slug="dci")],
+    )
     circuit = _make_dci_circuit(cid="DCI: MSK-1")
     ct_a, cab_a = _full_chain_side(1, iface_a, cable_id=50, side="A")
     ct_z, cab_z = _full_chain_side(2, iface_z, cable_id=51, side="Z")
@@ -115,11 +133,15 @@ def test_full_pair_both_sides():
 
 def test_incomplete_inactive_reads_cable():
     dev = _Record(id=1, name="r1")
-    iface = _Record(id=10, name="Eth1", device=dev, enabled=False, tags=[_Record(slug="dci")])
+    iface = _Record(
+        id=10, name="Eth1", device=dev, enabled=False, tags=[_Record(slug="dci")]
+    )
     circuit = _make_dci_circuit(status="planned", cid="X")
     ct_a, cab = _full_chain_side(1, iface, side="A")
     ct_z = _Record(id=2, term_side="Z", cable=None, circuit_id=100)
-    nb = _wire_dci_nb([circuit], [ct_a, ct_z], devices=[dev], interfaces=[iface], cables=[cab])
+    nb = _wire_dci_nb(
+        [circuit], [ct_a, ct_z], devices=[dev], interfaces=[iface], cables=[cab]
+    )
     nb.dcim.cables.get = MagicMock(wraps=nb.dcim.cables.get)
     report = dci_mod.collect_dci_channels(nb)
     ch = report["channels"][0]
@@ -163,8 +185,22 @@ def test_channel_row_y():
 def test_collect_region_from_termination_site():
     dev_a = _Record(id=1, name="router-a")
     dev_z = _Record(id=2, name="router-z")
-    iface_a = _Record(id=10, name="Eth1", device=dev_a, device_id=1, enabled=True, tags=[_Record(slug="dci")])
-    iface_z = _Record(id=11, name="Eth2", device=dev_z, device_id=2, enabled=True, tags=[_Record(slug="dci")])
+    iface_a = _Record(
+        id=10,
+        name="Eth1",
+        device=dev_a,
+        device_id=1,
+        enabled=True,
+        tags=[_Record(slug="dci")],
+    )
+    iface_z = _Record(
+        id=11,
+        name="Eth2",
+        device=dev_z,
+        device_id=2,
+        enabled=True,
+        tags=[_Record(slug="dci")],
+    )
     site_msk = _site_with_region("MSK-2", "Moscow")
     circuit = _make_dci_circuit(cid="DCI-MSK")
     ct_a, cab_a = _full_chain_side(1, iface_a, side="A", site=site_msk)
@@ -183,8 +219,12 @@ def test_collect_region_from_termination_site():
 def test_collect_missing_region_not_completeness_error():
     dev_a = _Record(id=1, name="router-a")
     dev_z = _Record(id=2, name="router-z")
-    iface_a = _Record(id=10, name="Eth1", device=dev_a, enabled=True, tags=[_Record(slug="dci")])
-    iface_z = _Record(id=11, name="Eth2", device=dev_z, enabled=True, tags=[_Record(slug="dci")])
+    iface_a = _Record(
+        id=10, name="Eth1", device=dev_a, enabled=True, tags=[_Record(slug="dci")]
+    )
+    iface_z = _Record(
+        id=11, name="Eth2", device=dev_z, enabled=True, tags=[_Record(slug="dci")]
+    )
     circuit = _make_dci_circuit(cid="DCI-X")
     ct_a, cab_a = _full_chain_side(1, iface_a, side="A", site=_Record(name="S1"))
     ct_z, cab_z = _full_chain_side(2, iface_z, cable_id=51, side="Z")
@@ -243,7 +283,12 @@ def test_build_graph_plan_two_channels_one_region_two_rows():
         },
     ]
     hosts = {"h1": "1", "h2": "2", "h3": "3", "h4": "4"}
-    items = _sample_items("1") + _sample_items("2") + _sample_items("3") + _sample_items("4")
+    items = (
+        _sample_items("1")
+        + _sample_items("2")
+        + _sample_items("3")
+        + _sample_items("4")
+    )
     pages, _, count = zdd.build_graph_plan(channels, channels, hosts, items)
     assert len(pages) == 1
     assert pages[0]["name"] == "Moscow"
@@ -281,7 +326,12 @@ def test_build_graph_plan_two_regions_two_pages():
         },
     ]
     hosts = {"h1": "1", "h2": "2", "h3": "3", "h4": "4"}
-    items = _sample_items("1") + _sample_items("2") + _sample_items("3") + _sample_items("4")
+    items = (
+        _sample_items("1")
+        + _sample_items("2")
+        + _sample_items("3")
+        + _sample_items("4")
+    )
     pages, _, _ = zdd.build_graph_plan(channels, channels, hosts, items)
     assert [p["name"] for p in pages] == ["Moscow", "Warsaw"]
 
@@ -301,7 +351,9 @@ def test_build_graph_plan_incomplete_excluded_via_full_only():
         },
     ]
     full = [all_ch[1]]
-    pages, _, count = zdd.build_graph_plan(full, all_ch, {"h1": "1"}, _sample_items("1"))
+    pages, _, count = zdd.build_graph_plan(
+        full, all_ch, {"h1": "1"}, _sample_items("1")
+    )
     assert len(pages) == 1
     assert pages[0]["name"] == "Moscow"
     assert count == 1
@@ -348,8 +400,20 @@ def test_build_graph_plan_no_full_channels_one_empty_page():
 
 def test_select_item_status_enabled_preferred():
     items = [
-        {"itemid": "1", "status": "1", "hostid": "10", "name": "Interface Eth1: Bits received", "key_": "net.if.in[Eth1]"},
-        {"itemid": "2", "status": "0", "hostid": "10", "name": "Interface Eth1: Bits received", "key_": "net.if.in[Eth1]"},
+        {
+            "itemid": "1",
+            "status": "1",
+            "hostid": "10",
+            "name": "Interface Eth1: Bits received",
+            "key_": "net.if.in[Eth1]",
+        },
+        {
+            "itemid": "2",
+            "status": "0",
+            "hostid": "10",
+            "name": "Interface Eth1: Bits received",
+            "key_": "net.if.in[Eth1]",
+        },
     ]
     iin, iout, warns = zdd.select_items_for_end("h", "10", "Eth1", items)
     assert iin == "2"
@@ -358,8 +422,20 @@ def test_select_item_status_enabled_preferred():
 
 def test_select_item_ambiguous_warning():
     items = [
-        {"itemid": "1", "status": "0", "hostid": "10", "name": "Interface Eth1: Bits received", "key_": "net.if.in[Eth1]"},
-        {"itemid": "2", "status": "0", "hostid": "10", "name": "Interface Eth1: Bits received", "key_": "net.if.in[Eth1]"},
+        {
+            "itemid": "1",
+            "status": "0",
+            "hostid": "10",
+            "name": "Interface Eth1: Bits received",
+            "key_": "net.if.in[Eth1]",
+        },
+        {
+            "itemid": "2",
+            "status": "0",
+            "hostid": "10",
+            "name": "Interface Eth1: Bits received",
+            "key_": "net.if.in[Eth1]",
+        },
     ]
     iin, _, warns = zdd.select_items_for_end("h", "10", "Eth1", items)
     assert iin == ""
@@ -445,8 +521,14 @@ def test_zabbix_unavailable_no_prompt(monkeypatch):
     monkeypatch.setenv("ZABBIX_TOKEN", "bad")
     nb = _wire_dci_nb([], [])
     monkeypatch.setattr("pynetbox.api", lambda url, token: nb)
-    monkeypatch.setattr(zdd, "validate_zabbix_token", lambda *a, **k: (False, "auth fail"))
-    monkeypatch.setattr(zdd, "prompt_write_dashboard", lambda: (_ for _ in ()).throw(AssertionError("prompt")))
+    monkeypatch.setattr(
+        zdd, "validate_zabbix_token", lambda *a, **k: (False, "auth fail")
+    )
+    monkeypatch.setattr(
+        zdd,
+        "prompt_write_dashboard",
+        lambda: (_ for _ in ()).throw(AssertionError("prompt")),
+    )
     assert zdd.main([]) == 1
 
 
@@ -480,7 +562,9 @@ def test_confirm_no_exit_zero(monkeypatch):
     monkeypatch.setattr(zdd, "validate_zabbix_token", lambda *a, **k: (True, None))
     monkeypatch.setattr(zdd, "prompt_write_dashboard", lambda: False)
     called = []
-    monkeypatch.setattr(zdd, "write_dci_dashboard", lambda *a, **k: called.append(1) or ("1", None))
+    monkeypatch.setattr(
+        zdd, "write_dci_dashboard", lambda *a, **k: called.append(1) or ("1", None)
+    )
     assert zdd.main([]) == 0
     assert called == []
 
@@ -525,7 +609,9 @@ def test_reason_order_incomplete():
     ch = dci_mod.collect_dci_channels(nb)["channels"][0]
     assert ch["reason_text"].startswith("A: нет ровно одного окончания")
     parts = ch["reason_text"].split("; ")
-    assert parts.index("статус не active") > parts.index("A: нет ровно одного окончания")
+    assert parts.index("статус не active") > parts.index(
+        "A: нет ровно одного окончания"
+    )
 
 
 def test_graph_header_provider_prefix():
@@ -603,8 +689,22 @@ def test_non_digit_itemid_warning():
 def test_full_pairs_no_items_empty_dashboard_on_yes(monkeypatch):
     dev_a = _Record(id=1, name="router-a")
     dev_z = _Record(id=2, name="router-z")
-    iface_a = _Record(id=10, name="Eth1", device=dev_a, device_id=1, enabled=True, tags=[_Record(slug="dci")])
-    iface_z = _Record(id=11, name="Eth2", device=dev_z, device_id=2, enabled=True, tags=[_Record(slug="dci")])
+    iface_a = _Record(
+        id=10,
+        name="Eth1",
+        device=dev_a,
+        device_id=1,
+        enabled=True,
+        tags=[_Record(slug="dci")],
+    )
+    iface_z = _Record(
+        id=11,
+        name="Eth2",
+        device=dev_z,
+        device_id=2,
+        enabled=True,
+        tags=[_Record(slug="dci")],
+    )
     circuit = _make_dci_circuit(cid="C1")
     ct_a, cab_a = _full_chain_side(1, iface_a, side="A")
     ct_z, cab_z = _full_chain_side(2, iface_z, cable_id=51, side="Z")

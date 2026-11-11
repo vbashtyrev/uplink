@@ -161,7 +161,9 @@ def select_items_for_end(hostname, hostid, iface_name, all_items):
     itemid_out, warn_out = _select_item_by_status(out_candidates)
     if warn_out:
         warnings.append(
-            "{} {} {}: отправка — {}".format(WARNING_PREFIX, hostname, iface_name, warn_out)
+            "{} {} {}: отправка — {}".format(
+                WARNING_PREFIX, hostname, iface_name, warn_out
+            )
         )
         itemid_out = None
 
@@ -198,27 +200,39 @@ def build_dci_graph_widget(widget_index, title, itemid_in, itemid_out, x, y, wid
     colors = ["1A7F37", "E02F44"]
     ds_k = 0
     if itemid_in:
-        fields.extend([
-            {"type": 0, "name": "ds.{}.dataset_type".format(ds_k), "value": 0},
-            {"type": 4, "name": "ds.{}.itemids.0".format(ds_k), "value": itemid_in},
-            {"type": 1, "name": "ds.{}.data_set_label".format(ds_k), "value": "Bits received"},
-            {"type": 1, "name": "ds.{}.color.0".format(ds_k), "value": colors[0]},
-            {"type": 0, "name": "ds.{}.width".format(ds_k), "value": 2},
-            {"type": 0, "name": "ds.{}.transparency".format(ds_k), "value": 5},
-            {"type": 0, "name": "ds.{}.fill".format(ds_k), "value": 3},
-        ])
+        fields.extend(
+            [
+                {"type": 0, "name": "ds.{}.dataset_type".format(ds_k), "value": 0},
+                {"type": 4, "name": "ds.{}.itemids.0".format(ds_k), "value": itemid_in},
+                {
+                    "type": 1,
+                    "name": "ds.{}.data_set_label".format(ds_k),
+                    "value": "Bits received",
+                },
+                {"type": 1, "name": "ds.{}.color.0".format(ds_k), "value": colors[0]},
+                {"type": 0, "name": "ds.{}.width".format(ds_k), "value": 2},
+                {"type": 0, "name": "ds.{}.transparency".format(ds_k), "value": 5},
+                {"type": 0, "name": "ds.{}.fill".format(ds_k), "value": 3},
+            ]
+        )
         ds_k = 1 if itemid_out else 0
     if itemid_out:
         k = ds_k if itemid_in else 0
-        fields.extend([
-            {"type": 0, "name": "ds.{}.dataset_type".format(k), "value": 0},
-            {"type": 4, "name": "ds.{}.itemids.0".format(k), "value": itemid_out},
-            {"type": 1, "name": "ds.{}.data_set_label".format(k), "value": "Bits sent"},
-            {"type": 1, "name": "ds.{}.color.0".format(k), "value": colors[1]},
-            {"type": 0, "name": "ds.{}.width".format(k), "value": 2},
-            {"type": 0, "name": "ds.{}.transparency".format(k), "value": 5},
-            {"type": 0, "name": "ds.{}.fill".format(k), "value": 3},
-        ])
+        fields.extend(
+            [
+                {"type": 0, "name": "ds.{}.dataset_type".format(k), "value": 0},
+                {"type": 4, "name": "ds.{}.itemids.0".format(k), "value": itemid_out},
+                {
+                    "type": 1,
+                    "name": "ds.{}.data_set_label".format(k),
+                    "value": "Bits sent",
+                },
+                {"type": 1, "name": "ds.{}.color.0".format(k), "value": colors[1]},
+                {"type": 0, "name": "ds.{}.width".format(k), "value": 2},
+                {"type": 0, "name": "ds.{}.transparency".format(k), "value": 5},
+                {"type": 0, "name": "ds.{}.fill".format(k), "value": 3},
+            ]
+        )
     return {
         "type": "svggraph",
         "name": title,
@@ -312,7 +326,9 @@ def write_dci_dashboard(url, token, pages, dashboard_name, debug=False):
             return None, "dashboard.create: {}".format(err)
         return result.get("dashboardids", [None])[0], None
     if len(existing) > 1:
-        return None, "dashboard.get: more than one dashboard named {!r}".format(dashboard_name)
+        return None, "dashboard.get: more than one dashboard named {!r}".format(
+            dashboard_name
+        )
     dashboardid = existing[0]["dashboardid"]
     result, err = zabbix_request(
         url,
@@ -330,7 +346,17 @@ def write_dci_dashboard(url, token, pages, dashboard_name, debug=False):
     return dashboardid, None
 
 
-def _widgets_for_channel_end(ch, side, device_key, iface_key, host_id_by_name, all_items, ambiguous_cids, y, widget_index):
+def _widgets_for_channel_end(
+    ch,
+    side,
+    device_key,
+    iface_key,
+    host_id_by_name,
+    all_items,
+    ambiguous_cids,
+    y,
+    widget_index,
+):
     """Build one side widget at fixed x/y or return (None, widget_index)."""
     device = ch.get(device_key) or ""
     iface = ch.get(iface_key) or ""
@@ -349,9 +375,7 @@ def _widgets_for_channel_end(ch, side, device_key, iface_key, host_id_by_name, a
     else:
         x, width = WIDGET_X_Z, WIDGET_WIDTH_Z
     title = graph_header(ch, side, ambiguous_cids)
-    wg = build_dci_graph_widget(
-        widget_index, title, itemid_in, itemid_out, x, y, width
-    )
+    wg = build_dci_graph_widget(widget_index, title, itemid_in, itemid_out, x, y, width)
     if wg:
         return wg, widget_index + 1, warnings
     return None, widget_index, warnings
@@ -408,7 +432,9 @@ def prompt_write_dashboard():
     return line.strip() == "да"
 
 
-def _print_summary(full_count, graph_count, wrote=False, dry_run=False, zabbix_ok=False):
+def _print_summary(
+    full_count, graph_count, wrote=False, dry_run=False, zabbix_ok=False
+):
     if dry_run and not zabbix_ok:
         print(
             "Итого: полных пар {}, графиков {}; записи не было".format(
@@ -444,7 +470,9 @@ def main(argv=None):
         action="store_true",
         help="Print pairs and graph plan without writing the Zabbix dashboard",
     )
-    parser.add_argument("--debug", action="store_true", help="Verbose stderr diagnostics")
+    parser.add_argument(
+        "--debug", action="store_true", help="Verbose stderr diagnostics"
+    )
     args = parser.parse_args(argv)
 
     if not _netbox_configured():
@@ -543,7 +571,9 @@ def main(argv=None):
                 name = (ch.get(key) or "").strip()
                 if name:
                     hostnames.add(name)
-        host_id_by_name, err = load_zabbix_hosts(url, token, hostnames, debug=args.debug)
+        host_id_by_name, err = load_zabbix_hosts(
+            url, token, hostnames, debug=args.debug
+        )
         if err:
             print(err, file=sys.stderr)
             return 1
