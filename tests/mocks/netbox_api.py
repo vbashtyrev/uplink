@@ -15,6 +15,9 @@ class _Filterable:
     def __init__(self, items):
         self._items = list(items)
 
+    def all(self):
+        return list(self._items)
+
     def filter(self, **kwargs):
         out = self._items
         for key, val in kwargs.items():
@@ -71,6 +74,9 @@ class _CircuitsEndpoint:
 
     def __init__(self, items):
         self._items = list(items)
+
+    def all(self):
+        return list(self._items)
 
     def filter(self, **kwargs):
         out = self._items

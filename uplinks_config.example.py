@@ -6,6 +6,9 @@ MAP_ICON_HOST = 130
 MAP_ICON_CLOUD = 4
 
 # Dashboards
+DCI_DASHBOARD_NAME = "DCI"
+DCI_CIRCUIT_TYPE = "dci"
+DCI_TAG_SLUG = "dci"
 DASHBOARD_NAME = "Uplinks"
 DASHBOARD_NAME_BY_LOCATION = "Uplinks (by location)"
 DASHBOARD_NAME_BY_PROVIDER = "Uplinks by providers"
